@@ -1,0 +1,141 @@
+schema_version: 1
+
+annotation_policy:
+  scope: all_visible_instances
+
+  default_actions:
+    face: redact
+    license_plate: redact
+
+  identity_overrides:
+    person_night_01: keep
+
+  face:
+    region: visible facial area
+    annotate_when: at least one identity-bearing facial feature is visible
+    do_not_annotate_when: only the back of the head is visible
+
+  license_plate:
+    region: physical plate rectangle
+    annotate_when: a human can reliably localize the plate region
+    text_readability_required: false
+
+  temporal_state:
+    outside_when_not_visible: true
+    occluded_when_partially_occluded: true
+
+  frame_boundary:
+    clip_boxes_to_image: true
+
+clips:
+  day_plate:
+    file: artifacts/eval_day_plate.mp4
+    parent_file: artifacts/day_primary.mp4
+    parent_start_seconds: 40
+    duration_seconds: 19
+    original_source_interval: "00:01:33-00:01:52"
+    continuous_scene: true
+    sha256: 63d41905e2b6c65a3cdc72aa73ee31668fe1c1b4fdfefa2c5688cd38c90d1097
+    frame_count: 570
+    primary_targets:
+      - object_id: plate_day_01
+        category: license_plate
+        action: redact
+    challenges:
+      - small_object
+      - moving_camera
+      - changing_distance
+      - road_motion
+    dense_verification:
+      start_seconds: 8
+      end_seconds: 16
+    metrics:
+      - object_frame_recall
+      - redaction_coverage
+      - maximum_consecutive_missed_frames
+      - flicker_events
+
+  day_face:
+    file: artifacts/eval_day_face.mp4
+    parent_file: artifacts/day_primary.mp4
+    parent_start_seconds: 154
+    duration_seconds: 36
+    original_source_interval: "00:03:27-00:04:03"
+    continuous_scene: true
+    sha256: fa131aa652a1f4bf3b88b88f66522bf8cd34cae23655da9a10cb053a6cb4c33d
+    frame_count: 1079
+    primary_targets:
+      - object_id: person_day_01
+        category: face
+        action: redact
+    challenges:
+      - profile_face
+      - head_rotation
+      - partial_occlusion
+      - moving_camera
+    dense_verification:
+      start_seconds: 10
+      end_seconds: 20
+    metrics:
+      - object_frame_recall
+      - track_coverage
+      - maximum_consecutive_missed_frames
+      - track_fragmentation
+      - flicker_events
+
+  night_selective:
+    file: artifacts/eval_night_selective.mp4
+    parent_file: data/raw/night_candidate.mp4
+    parent_start_seconds: 282
+    duration_seconds: 53
+    original_source_interval: "00:48:12-00:49:05"
+    continuous_scene: true
+    sha256: 0b55aa3a497941711ac8634a049c557637e20928e8d3bd8b63e5b030b6b272e0
+    frame_count: 1589
+    primary_targets:
+      - object_id: person_night_01
+        description: standing person
+        category: face
+        action: keep
+      - object_id: person_night_02
+        description: seated person wearing a cap
+        category: face
+        action: redact
+      - object_id: plate_night_01
+        description: rear plate of the white pickup
+        category: license_plate
+        action: redact
+    challenges:
+      - low_light
+      - glare
+      - multiple_people
+      - partial_occlusion
+      - selective_redaction
+    dense_verification:
+      start_seconds: 14
+      end_seconds: 26
+    metrics:
+      - per_identity_object_frame_recall
+      - protected_identity_redaction_overlap
+      - sensitive_identity_leaked_frames
+      - license_plate_object_frame_recall
+      - maximum_consecutive_missed_frames
+      - manual_corrections
+
+annotation_strategy:
+  full_clips:
+    method: track annotation with keyframes and interpolation
+  dense_intervals:
+    method: frame-by-frame verification of interpolated annotations
+
+final_review_success:
+  leaked_sensitive_object_frames: 0
+  redacted_keep_identity_frames: 0
+
+notes:
+  - Identity labels are local visual identifiers, not real-world identities.
+  - Keep and redact actions are analyst-provided test policies.
+  - Zero-leak claims apply only to fully reviewed evaluation intervals.
+  - Annotate all visible faces and license plates, not only the listed primary targets.
+  - Primary targets are used for per-object reporting and selective-policy tests.
+  - A plate may be annotated even when its characters are not readable.
