@@ -29,31 +29,34 @@ annotation_policy:
 
 clips:
   day_plate:
-    file: artifacts/eval_day_plate.mp4
+    file: artifacts/eval_day_plate_close.mp4
     parent_file: artifacts/day_primary.mp4
-    parent_start_seconds: 40
-    duration_seconds: 19
-    original_source_interval: "00:01:33-00:01:52"
+    parent_start_seconds: 61
+    duration_seconds: 18
+    original_source_interval: "00:01:54-00:02:12"
     continuous_scene: true
-    sha256: 63d41905e2b6c65a3cdc72aa73ee31668fe1c1b4fdfefa2c5688cd38c90d1097
-    frame_count: 570
+    sha256: 4f19396fa1393c2861bfd26302b3147fc8ae29acfd55bf10f6e7be46a30231c9
+    frame_count: 540
     primary_targets:
       - object_id: plate_day_01
         category: license_plate
         action: redact
     challenges:
-      - small_object
+      - close_plate
+      - changing_scale
+      - changing_perspective
       - moving_camera
-      - changing_distance
-      - road_motion
+      - partial_occlusion
     dense_verification:
-      start_seconds: 8
-      end_seconds: 16
+      start_seconds: 2
+      end_seconds: 12
     metrics:
-      - object_frame_recall
-      - redaction_coverage
-      - maximum_consecutive_missed_frames
+      - observed_plate_leaked_frames
+      - maximum_observed_consecutive_gap
+      - manual_additions
       - flicker_events
+      - processing_fps
+      - review_time_seconds
 
   day_face:
     file: artifacts/eval_day_face.mp4
@@ -77,11 +80,13 @@ clips:
       start_seconds: 10
       end_seconds: 20
     metrics:
-      - object_frame_recall
-      - track_coverage
-      - maximum_consecutive_missed_frames
-      - track_fragmentation
+      - observed_face_leaked_frames
+      - maximum_observed_consecutive_gap
+      - track_fragment_count
+      - manual_corrections
       - flicker_events
+      - processing_fps
+      - review_time_seconds
 
   night_selective:
     file: artifacts/eval_night_selective.mp4
@@ -115,27 +120,49 @@ clips:
       start_seconds: 14
       end_seconds: 26
     metrics:
-      - per_identity_object_frame_recall
-      - protected_identity_redaction_overlap
       - sensitive_identity_leaked_frames
-      - license_plate_object_frame_recall
-      - maximum_consecutive_missed_frames
+      - keep_identity_false_redaction_frames
+      - observed_plate_leaked_frames
+      - maximum_observed_consecutive_gap
       - manual_corrections
+      - processing_fps
+      - review_time_seconds
 
-annotation_strategy:
-  full_clips:
-    method: track annotation with keyframes and interpolation
-  dense_intervals:
-    method: frame-by-frame verification of interpolated annotations
+supplementary_stress_tests:
+  day_plate_far:
+    file: artifacts/eval_day_plate.mp4
+    sha256: 63d41905e2b6c65a3cdc72aa73ee31668fe1c1b4fdfefa2c5688cd38c90d1097
+    frame_count: 570
+    purpose: qualitative evaluation of a small and visually ambiguous distant plate
+    required_for_final_success: false
+
+evaluation_strategy:
+  automated_pass:
+    method: detector and tracker proposals
+
+  human_review:
+    full_clip_playback: true
+    review_flagged_intervals: true
+    dense_intervals_frame_by_frame: true
+    record_errors_only: true
+
+  full_manual_ground_truth_required: false
+
+  optional_ground_truth:
+    purpose: additional quantitative benchmarking if time permits
 
 final_review_success:
   leaked_sensitive_object_frames: 0
   redacted_keep_identity_frames: 0
 
 notes:
-  - Identity labels are local visual identifiers, not real-world identities.
-  - Keep and redact actions are analyst-provided test policies.
-  - Zero-leak claims apply only to fully reviewed evaluation intervals.
+  - Evaluation is based on automated proposals followed by targeted human review.
+  - Full manual bounding-box ground truth is optional, not required.
+  - Quantitative recall and IoU must not be reported without independent ground truth.
+  - Zero-leak claims apply only to intervals reviewed frame-by-frame.
+  - The far-plate clip is a qualitative stress test because the plate is visually ambiguous at long range.
   - Annotate all visible faces and license plates, not only the listed primary targets.
   - Primary targets are used for per-object reporting and selective-policy tests.
   - A plate may be annotated even when its characters are not readable.
+  - Identity labels are local visual identifiers, not real-world identities.
+  - Keep and redact actions are analyst-provided test policies.
