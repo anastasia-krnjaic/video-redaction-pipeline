@@ -1,0 +1,49 @@
+# Local source data
+data/raw/*
+!data/raw/.gitkeep
+!data/source.yaml
+
+# Generated artifacts
+artifacts/*
+!artifacts/.gitkeep
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# macOS
+.DS_Store
+
+# Common video formats
+*.mp4
+*.mov
+*.m4v
+*.avi
+*.mkv
+*.webm
+*.mpg
+*.mpeg
+
+# Common model weights
+*.pt
+*.pth
+*.onnx
+*.safetensors
+*.ckpt
+*.bin
+*.weights
+*.tflite
+
+# Local source metadata
+*.youtube.json
+*.info.json

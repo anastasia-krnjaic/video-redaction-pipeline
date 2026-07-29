@@ -1,0 +1,20 @@
+source_id: Bw-IJxxtCRs
+source_type: youtube
+source_url: https://www.youtube.com/watch?v=Bw-IJxxtCRs
+title: "7 'Dumbest' DUI Excuses Caught on Bodycam"
+channel: Law&Crime Network
+
+selected_segment:
+  start_seconds: 0
+  end_seconds: 300
+
+local_file: data/raw/bodycam_sample.mp4
+
+intended_categories:
+  - face
+  - license_plate
+
+usage:
+  purpose: local model development and evaluation
+  redistribution: verify usage rights before sharing
+  commit_source_video_to_git: false
