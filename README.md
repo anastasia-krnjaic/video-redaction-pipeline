@@ -1,10 +1,10 @@
 # Video Redaction Pipeline
 
-Video Redaction Pipeline is a small Python project for inspecting local video files and
-creating lightweight development artifacts. Phase 1 focuses on metadata inspection,
-streaming hashes, short clips, and contact sheets.
+Video Redaction Pipeline is a small Python project for inspecting local video files,
+creating lightweight development artifacts, and running baseline frame-level detections.
 
-Detection, tracking, and redaction are not implemented yet.
+Tracking, redaction, identity grouping, rendering policies, manifests, and a UI are not
+implemented yet.
 
 ## Current Scope
 
@@ -12,12 +12,14 @@ Detection, tracking, and redaction are not implemented yet.
 - Calculate SHA-256 hashes with chunked reads.
 - Create short MP4 development clips with FFmpeg.
 - Create JPEG contact sheets with FFmpeg filters.
+- Run diagnostic face or license-plate detection over every decoded video frame.
 - Provide a small `redactor` command-line interface.
 
 ## Architecture
 
 - `src/redactor/cli.py` handles commands and user-facing validation.
 - `src/redactor/media.py` handles hashing, probing, trimming, contact sheets, and tool checks.
+- `src/redactor/detection.py` handles OpenCV-based diagnostic detection runs.
 - `src/redactor/models.py` defines metadata dataclasses.
 
 ## Installation
@@ -60,6 +62,35 @@ redactor trim data/raw/bodycam_sample.mp4 artifacts/smoke_clip.mp4 \
   --start 0 \
   --duration 5
 ```
+
+Run a face-detection diagnostic:
+
+```bash
+redactor detect artifacts/eval_day_face.mp4 \
+  --category face \
+  --model models/face_detection_yunet_2023mar.onnx \
+  --threshold 0.60 \
+  --output-dir artifacts/baseline/day_face \
+  --overwrite
+```
+
+Detection outputs include `detections.jsonl`, `summary.json`, and a diagnostic
+`overlay.mp4`. The overlay does not include audio.
+
+## Local Models
+
+Model binaries are stored locally in `models/` and are excluded from Git.
+
+- `models/face_detection_yunet_2023mar.onnx`: YuNet face detector from the
+  official OpenCV Zoo model repository. The model files in that directory are licensed
+  under the MIT License.
+- `models/license_plate_detection_lpd_yunet_2023mar.onnx`: LPD-YuNet license-plate
+  detector from the official OpenCV Zoo model repository. The model files in that
+  directory are licensed under the Apache 2.0 License.
+
+The license-plate model was trained with Chinese license plates, so results on other
+plate styles may be limited. The detection command records each local model SHA-256 in
+`summary.json`.
 
 ## Data Policy
 

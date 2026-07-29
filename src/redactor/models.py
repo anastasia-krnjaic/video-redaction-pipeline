@@ -1,7 +1,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
+
+
+@dataclass(frozen=True)
+class Detection:
+    category: str
+    score: float
+    bbox_xyxy: tuple[int, int, int, int]
+
+    def __post_init__(self) -> None:
+        if not self.category:
+            raise ValueError("detection category is required")
+        if not isfinite(self.score):
+            raise ValueError("detection score must be finite")
+        x1, y1, x2, y2 = self.bbox_xyxy
+        if x2 <= x1:
+            raise ValueError("detection bbox must satisfy x2 > x1")
+        if y2 <= y1:
+            raise ValueError("detection bbox must satisfy y2 > y1")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "bbox_xyxy": list(self.bbox_xyxy),
+            "category": self.category,
+            "score": self.score,
+        }
 
 
 @dataclass(frozen=True)

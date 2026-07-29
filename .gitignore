@@ -7,6 +7,10 @@ data/raw/*
 artifacts/*
 !artifacts/.gitkeep
 
+# Local model binaries
+models/*.onnx
+!models/.gitkeep
+
 # Python caches
 __pycache__/
 *.py[cod]

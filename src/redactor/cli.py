@@ -141,6 +141,82 @@ def contact_sheet(
     )
 
 
+@main.command()
+@click.argument(
+    "input_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--category",
+    required=True,
+    type=click.Choice(["face", "license_plate"]),
+    help="Detection category.",
+)
+@click.option(
+    "--model",
+    "model_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="ONNX model path.",
+)
+@click.option(
+    "--threshold",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help="Detection score threshold.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory for detections.jsonl, summary.json, and overlay.mp4.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+@click.option(
+    "--max-frames",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Maximum number of frames to process.",
+)
+def detect(
+    input_path: Path,
+    category: str,
+    model_path: Path,
+    threshold: float | None,
+    output_dir: Path,
+    overwrite: bool,
+    max_frames: int | None,
+) -> None:
+    """Run frame-level diagnostic detection."""
+    from redactor import detection
+
+    resolved_threshold = threshold
+    if resolved_threshold is None:
+        resolved_threshold = detection.DEFAULT_THRESHOLDS[category]
+
+    try:
+        summary = detection.run_detection(
+            input_path,
+            category=category,
+            model_path=model_path,
+            threshold=resolved_threshold,
+            output_dir=output_dir,
+            overwrite=overwrite,
+            max_frames=max_frames,
+        )
+    except (FileExistsError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Processed {summary['frames_processed']} frames; "
+        f"{summary['frames_containing_at_least_one_detection']} frames with detections; "
+        f"{summary['total_detections']} total detections."
+    )
+    click.echo(f"Wrote detections: {output_dir / 'detections.jsonl'}")
+    click.echo(f"Wrote summary: {output_dir / 'summary.json'}")
+    click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
+
+
 def _subprocess_message(exc: subprocess.CalledProcessError) -> str:
     stderr = exc.stderr.strip() if exc.stderr else ""
     return stderr or str(exc)
