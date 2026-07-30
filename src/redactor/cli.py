@@ -217,6 +217,127 @@ def detect(
     click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
 
 
+@main.command()
+@click.argument(
+    "input_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--detections",
+    "detections_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Face detections JSONL path.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory for tracking diagnostics.",
+)
+@click.option("--strong-threshold", default=0.70, show_default=True, type=click.FloatRange(0, 1))
+@click.option("--weak-threshold", default=0.45, show_default=True, type=click.FloatRange(0, 1))
+@click.option("--min-observed-hits", default=3, show_default=True, type=click.IntRange(min=1))
+@click.option("--min-strong-hits", default=2, show_default=True, type=click.IntRange(min=0))
+@click.option("--confirmation-window", default=5, show_default=True, type=click.IntRange(min=1))
+@click.option("--max-gap-seconds", default=0.30, show_default=True, type=float)
+@click.option("--backward-seconds", default=1.00, show_default=True, type=float)
+@click.option(
+    "--min-auto-median-score", default=0.70, show_default=True, type=click.FloatRange(0, 1)
+)
+@click.option(
+    "--max-auto-synthetic-fraction",
+    default=0.40,
+    show_default=True,
+    type=click.FloatRange(0, 1),
+)
+@click.option("--min-auto-area-fraction", default=0.0005, show_default=True, type=float)
+@click.option("--max-auto-area-fraction", default=0.08, show_default=True, type=float)
+@click.option("--max-tail-prediction-seconds", default=0.10, show_default=True, type=float)
+@click.option(
+    "--association-iou-threshold", default=0.15, show_default=True, type=click.FloatRange(0, 1)
+)
+@click.option("--association-center-distance", default=0.75, show_default=True, type=float)
+@click.option(
+    "--manual-overrides",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional manual seed JSON file.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+@click.option(
+    "--show-rejected-overlay", is_flag=True, help="Include rejected proposals in overlay.mp4."
+)
+def track(
+    input_path: Path,
+    detections_path: Path,
+    output_dir: Path,
+    strong_threshold: float,
+    weak_threshold: float,
+    min_observed_hits: int,
+    min_strong_hits: int,
+    confirmation_window: int,
+    max_gap_seconds: float,
+    backward_seconds: float,
+    min_auto_median_score: float,
+    max_auto_synthetic_fraction: float,
+    min_auto_area_fraction: float,
+    max_auto_area_fraction: float,
+    max_tail_prediction_seconds: float,
+    association_iou_threshold: float,
+    association_center_distance: float,
+    manual_overrides: Path | None,
+    overwrite: bool,
+    show_rejected_overlay: bool,
+) -> None:
+    """Run offline face temporal-safety tracking diagnostics."""
+    from redactor import tracking
+
+    try:
+        summary = tracking.run_tracking(
+            input_path,
+            detections_path=detections_path,
+            output_dir=output_dir,
+            strong_threshold=strong_threshold,
+            weak_threshold=weak_threshold,
+            min_observed_hits=min_observed_hits,
+            min_strong_hits=min_strong_hits,
+            confirmation_window=confirmation_window,
+            max_gap_seconds=max_gap_seconds,
+            backward_seconds=backward_seconds,
+            min_auto_median_score=min_auto_median_score,
+            max_auto_synthetic_fraction=max_auto_synthetic_fraction,
+            min_auto_area_fraction=min_auto_area_fraction,
+            max_auto_area_fraction=max_auto_area_fraction,
+            max_tail_prediction_seconds=max_tail_prediction_seconds,
+            association_iou_threshold=association_iou_threshold,
+            association_center_distance=association_center_distance,
+            manual_overrides=manual_overrides,
+            overwrite=overwrite,
+            show_rejected_overlay=show_rejected_overlay,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        ValueError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Processed {summary['frames_processed']} frames; "
+        f"{summary['auto_confirmed_tracks']} auto-confirmed tracks; "
+        f"{summary['review_candidate_tracks']} review candidates; "
+        f"{summary['rejected_tracks']} rejected proposals."
+    )
+    click.echo(f"Wrote tracks: {output_dir / 'tracks.jsonl'}")
+    click.echo(f"Wrote review flags: {output_dir / 'review_flags.json'}")
+    click.echo(f"Wrote review windows: {output_dir / 'review_windows.json'}")
+    click.echo(f"Wrote track quality: {output_dir / 'track_quality.json'}")
+    click.echo(f"Wrote summary: {output_dir / 'summary.json'}")
+    click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
+
+
 def _subprocess_message(exc: subprocess.CalledProcessError) -> str:
     stderr = exc.stderr.strip() if exc.stderr else ""
     return stderr or str(exc)

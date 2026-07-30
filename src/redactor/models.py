@@ -31,6 +31,57 @@ class Detection:
 
 
 @dataclass(frozen=True)
+class TrackBox:
+    frame_index: int
+    track_id: int
+    bbox_xyxy: tuple[int, int, int, int]
+    score: float | None
+    provenance: str
+    track_state: str
+    quality_status: str
+    render_eligible: bool
+    action: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.frame_index < 0:
+            raise ValueError("track box frame_index cannot be negative")
+        if self.track_id <= 0:
+            raise ValueError("track_id must be positive")
+        x1, y1, x2, y2 = self.bbox_xyxy
+        if x2 <= x1:
+            raise ValueError("track bbox must satisfy x2 > x1")
+        if y2 <= y1:
+            raise ValueError("track bbox must satisfy y2 > y1")
+        if self.score is not None and not isfinite(self.score):
+            raise ValueError("track score must be finite")
+        if self.provenance not in {
+            "observed_strong",
+            "observed_weak",
+            "interpolated",
+            "predicted",
+            "manual",
+        }:
+            raise ValueError("unsupported track provenance")
+        if self.track_state not in {"tentative", "active", "ended"}:
+            raise ValueError("unsupported track state")
+        if self.quality_status not in {"auto_confirmed", "review_candidate", "rejected"}:
+            raise ValueError("unsupported track quality status")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "bbox_xyxy": list(self.bbox_xyxy),
+            "frame_index": self.frame_index,
+            "provenance": self.provenance,
+            "quality_status": self.quality_status,
+            "render_eligible": self.render_eligible,
+            "score": self.score,
+            "track_id": self.track_id,
+            "track_state": self.track_state,
+        }
+
+
+@dataclass(frozen=True)
 class VideoStreamInfo:
     index: int
     codec: str | None
