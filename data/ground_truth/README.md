@@ -1,8 +1,13 @@
 # Ground-Truth Benchmarks
 
-`GroundTruth_v1.0.md` is the immutable semantic source of truth for the frozen benchmark version. Do not edit a frozen ground-truth version in place.
+Versioned `GroundTruth_*.md` files are immutable semantic sources of truth for frozen benchmark versions. Do not edit a frozen ground-truth version in place.
 
-`face_benchmark_v1.0.json` is the machine-readable face-evaluation mirror of the frozen Markdown. The Markdown remains authoritative if a human-readable statement and the JSON appear to disagree.
+| Version | Status | Meaning |
+|---|---|---|
+| v1.0 | Frozen, superseded for face detector evaluation | Initial reference registered before complete face-visibility verification. It remains immutable historical evidence. |
+| v1.1 | Current selected face benchmark | Corrected face benchmark after complete human verification of 660 unique face frames and 1,020 target decisions. |
+
+`face_benchmark_v1.1.json` is the current machine-readable face-evaluation mirror of `GroundTruth_v1.1.md`. The Markdown remains authoritative if a human-readable statement and the JSON appear to disagree.
 
 A new semantic version is required if mappings, targets, actions, scored ranges, ignore ranges, dense intervals, or acceptance rules change.
 

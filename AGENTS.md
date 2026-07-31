@@ -10,7 +10,9 @@ A material system change includes any change to detector model or model version,
 
 ## Ground-Truth Benchmark Rules
 
-1. `data/ground_truth/GroundTruth_v1.0.md` is a frozen source of truth.
+Default selected face benchmark: `data/ground_truth/face_benchmark_v1.1.json`.
+
+1. Versioned ground-truth files under `data/ground_truth/` are frozen sources of truth once created.
 2. Never edit a frozen ground-truth version in place.
 3. Every evaluation must validate ground-truth, video, and detection hashes.
 4. Zero-leak claims apply only to GOLD_DENSE intervals.

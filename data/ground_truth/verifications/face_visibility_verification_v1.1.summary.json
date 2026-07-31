@@ -1,0 +1,102 @@
+{
+  "changed_decisions_relative_to_v1_0": 60,
+  "changed_targets": [
+    "person_night_02"
+  ],
+  "corrected_denominators": {
+    "micro_total": 852,
+    "person_day_01": 300,
+    "person_night_01": 360,
+    "person_night_02": 192
+  },
+  "corrected_parent_ranges": {
+    "person_night_02": {
+      "detector_ignore": [
+        [
+          420,
+          425
+        ],
+        [
+          442,
+          478
+        ],
+        [
+          480,
+          483
+        ],
+        [
+          502,
+          535
+        ],
+        [
+          693,
+          779
+        ]
+      ],
+      "detector_scored": [
+        [
+          426,
+          441
+        ],
+        [
+          479,
+          479
+        ],
+        [
+          484,
+          501
+        ],
+        [
+          536,
+          692
+        ]
+      ],
+      "final_redaction": [
+        [
+          420,
+          779
+        ]
+      ]
+    }
+  },
+  "created_at": "2026-07-31T02:49:03Z",
+  "ground_truth_version": "1.1",
+  "person_night_02_counts": {
+    "detector_ignore": 168,
+    "detector_scored": 192,
+    "final_redaction_frames": 360
+  },
+  "reviewed_target_decisions": 1020,
+  "reviewed_unique_frames": 660,
+  "schema_version": "1.0",
+  "source_documents": {
+    "face_benchmark_v1_1": {
+      "file": "data/ground_truth/face_benchmark_v1.1.json",
+      "sha256": "eeac399a8181f8e80a05967cd5cb0b0504deae3f767d950275f2d44360370c92"
+    },
+    "ground_truth_v1_0": {
+      "file": "data/ground_truth/GroundTruth_v1.0.md",
+      "sha256": "09642acc0fe522dd0449fadbee7b8d9316af2b8391a063f4921b4133b7035b8b"
+    },
+    "ground_truth_v1_1": {
+      "file": "data/ground_truth/GroundTruth_v1.1.md",
+      "sha256": "1aaabb73a8dfbd6b75e6116f037d3263d760bbcb54757da910b19a7229b66065"
+    }
+  },
+  "uncertain_decisions": 0,
+  "unchanged_targets": [
+    "person_day_01",
+    "person_night_01"
+  ],
+  "verification_evidence": {
+    "copied_exactly_from": "artifacts/ground_truth_face_verification_v2/completed/ground_truth_face_verification.completed.json",
+    "file": "data/ground_truth/verifications/face_visibility_verification_v1.1.completed.json",
+    "sha256": "f4401d88fffdd9dd5a90ea0c04f94bca77d5dd6b12b8081343dbbab1fb0ce429"
+  },
+  "verification_result_inputs": {
+    "contiguous_change_ranges_json_sha256": "6253a7b08c7cd659a0007e0a5df8105e781eb761f283dd0ad7af22def4959856",
+    "label_changes_json_sha256": "289c5667a42dcc18f93f35270eecb01e4f7fbf8e8cfd43a67b013f1c24c74c1c",
+    "report_md_sha256": "ccae9c38d00374e06e0a97a676afe2c7f51743812cedcdb0cb7a12065a56847d",
+    "verification_summary_json_sha256": "d69e8df61b1461b26ef3e2948d539374c4d78225bae4c6ce3f751122a53f4b6e"
+  }
+}
