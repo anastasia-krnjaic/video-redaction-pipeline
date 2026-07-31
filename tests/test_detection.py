@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 from pathlib import Path
 
@@ -176,6 +177,209 @@ def test_json_representation_is_deterministic() -> None:
         '{"detections":[{"bbox_xyxy":[1,2,3,4],"category":"license_plate","score":0.75}],'
         '"frame_index":12}'
     )
+
+
+def test_adas_preprocess_uses_bgr_chw_float_tensor() -> None:
+    frame = np.array(
+        [
+            [[1, 2, 3], [4, 5, 6]],
+            [[7, 8, 9], [10, 11, 12]],
+        ],
+        dtype=np.uint8,
+    )
+
+    tensor = detection.preprocess_adas_frame(frame, input_width=2, input_height=2)
+
+    assert tensor.shape == (1, 3, 2, 2)
+    assert tensor.dtype == np.float32
+    assert tensor[0, :, 0, 0].tolist() == [1.0, 2.0, 3.0]
+    assert tensor[0, :, 1, 1].tolist() == [10.0, 11.0, 12.0]
+
+
+def test_adas_normalized_coordinate_conversion_and_boundary_clipping() -> None:
+    assert detection.normalized_to_adas_xyxy(0.25, 0.25, 0.75, 0.5, 1920, 1080) == (
+        480,
+        270,
+        1440,
+        540,
+    )
+    assert detection.normalized_to_adas_xyxy(-0.1, -0.2, 1.2, 1.1, 100, 80) == (
+        0,
+        0,
+        100,
+        80,
+    )
+    assert detection.normalized_to_adas_xyxy(0.5, 0.5, 0.5, 0.8, 100, 80) is None
+
+
+def test_adas_output_tensor_parsing_thresholding_and_ordering() -> None:
+    raw = np.array(
+        [
+            [0, 1, 0.30, 0.20, 0.20, 0.40, 0.40],
+            [0, 1, 0.199, 0.10, 0.10, 0.20, 0.20],
+            [0, 1, 0.20, 0.60, 0.60, 0.60, 0.70],
+            [0, 1, 0.90, 0.50, 0.50, 0.70, 0.80],
+            [-1, 1, 0.99, 0.00, 0.00, 1.00, 1.00],
+        ],
+        dtype=np.float32,
+    )
+
+    detections = detection.parse_adas_detections(
+        raw,
+        frame_width=100,
+        frame_height=80,
+        proposal_threshold=0.20,
+    )
+
+    assert [item.score for item in detections] == [
+        pytest.approx(0.90),
+        pytest.approx(0.30),
+    ]
+    assert [item.bbox_xyxy for item in detections] == [(50, 40, 70, 64), (20, 16, 40, 32)]
+    assert all(item.category == "face" for item in detections)
+    assert all(item.detector_id == detection.DETECTOR_BACKEND_ADAS for item in detections)
+    assert all(item.label == 1 for item in detections)
+
+
+def test_adas_proposal_classification_threshold_boundaries() -> None:
+    classify = detection.classify_observation
+
+    assert classify(0.199999, proposal_threshold=0.20, primary_threshold=0.30) == (
+        "below_proposal_floor"
+    )
+    assert classify(0.20, proposal_threshold=0.20, primary_threshold=0.30) == "weak"
+    assert classify(0.299999, proposal_threshold=0.20, primary_threshold=0.30) == "weak"
+    assert classify(0.30, proposal_threshold=0.20, primary_threshold=0.30) == "primary"
+
+
+def test_adas_frame_record_includes_canonical_metadata() -> None:
+    output = io.StringIO()
+
+    detection.write_frame_record(
+        output,
+        12,
+        [
+            Detection(
+                "face",
+                0.9,
+                (10, 20, 30, 40),
+                detector_id=detection.DETECTOR_BACKEND_ADAS,
+                label=1,
+            )
+        ],
+        clip_id="day_face",
+    )
+
+    assert json.loads(output.getvalue()) == {
+        "clip": "day_face",
+        "detections": [
+            {
+                "bbox_xyxy": [10, 20, 30, 40],
+                "candidate_id": "openvino_face_adas_0001:day_face:f0012:d00",
+                "category": "face",
+                "detector_id": "openvino_face_adas_0001",
+                "label": 1,
+                "score": 0.9,
+                "source_detection_index": 0,
+            }
+        ],
+        "frame_index": 12,
+    }
+
+
+def test_adas_empty_frame_record_includes_clip() -> None:
+    output = io.StringIO()
+
+    detection.write_frame_record(output, 5, [], clip_id="night_selective")
+
+    assert output.getvalue().strip() == '{"clip":"night_selective","detections":[],"frame_index":5}'
+
+
+def test_model_file_hashes_include_adas_xml_and_bin(tmp_path: Path) -> None:
+    xml = tmp_path / "face-detection-adas-0001.xml"
+    bin_path = tmp_path / "face-detection-adas-0001.bin"
+    xml.write_bytes(b"xml")
+    bin_path.write_bytes(b"bin")
+
+    assert detection.model_file_hashes(xml, bin_path) == {
+        "face-detection-adas-0001.bin": hashlib.sha256(b"bin").hexdigest(),
+        "face-detection-adas-0001.xml": hashlib.sha256(b"xml").hexdigest(),
+    }
+
+
+def test_missing_adas_model_fails_clearly(tmp_path: Path) -> None:
+    missing_xml = tmp_path / "missing.xml"
+
+    with pytest.raises(FileNotFoundError, match="model file not found"):
+        detection.OpenVINOFaceADASDetector(missing_xml)
+
+
+def test_backend_selection_keeps_yunet_selectable(monkeypatch: pytest.MonkeyPatch) -> None:
+    created: dict[str, object] = {}
+
+    class FakeYuNet:
+        detector_id = detection.DETECTOR_BACKEND_YUNET
+
+        def __init__(self, model_path: Path, threshold: float):
+            created["model_path"] = model_path
+            created["threshold"] = threshold
+
+        def detect(self, frame: np.ndarray) -> list[Detection]:
+            return []
+
+    monkeypatch.setattr(detection, "FaceYuNetDetector", FakeYuNet)
+    model_path = Path("models/face_detection_yunet_2023mar.onnx")
+
+    detector = detection.create_detector(
+        "face",
+        model_path,
+        0.45,
+        detector_backend=detection.DETECTOR_BACKEND_YUNET,
+    )
+
+    assert isinstance(detector, FakeYuNet)
+    assert created == {"model_path": model_path, "threshold": 0.45}
+
+
+def test_backend_selection_defaults_face_to_adas(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    xml = tmp_path / "face-detection-adas-0001.xml"
+    bin_path = tmp_path / "face-detection-adas-0001.bin"
+    xml.write_bytes(b"xml")
+    bin_path.write_bytes(b"bin")
+    created: dict[str, object] = {}
+
+    class FakeADAS:
+        detector_id = detection.DETECTOR_BACKEND_ADAS
+
+        def __init__(
+            self,
+            model_xml_path: Path,
+            *,
+            model_bin_path: Path | None,
+            proposal_threshold: float,
+            primary_threshold: float,
+        ):
+            created["model_xml_path"] = model_xml_path
+            created["model_bin_path"] = model_bin_path
+            created["proposal_threshold"] = proposal_threshold
+            created["primary_threshold"] = primary_threshold
+
+        def detect(self, frame: np.ndarray) -> list[Detection]:
+            return []
+
+    monkeypatch.setattr(detection, "OpenVINOFaceADASDetector", FakeADAS)
+
+    detector = detection.create_detector("face", xml, 0.20, adas_bin_path=bin_path)
+
+    assert isinstance(detector, FakeADAS)
+    assert created == {
+        "model_xml_path": xml,
+        "model_bin_path": bin_path,
+        "proposal_threshold": 0.20,
+        "primary_threshold": 0.30,
+    }
 
 
 def test_overwrite_protection(tmp_path: Path) -> None:

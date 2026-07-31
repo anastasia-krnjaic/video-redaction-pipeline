@@ -17,14 +17,14 @@ from redactor.models import TrackBox
 
 SCHEMA_VERSION = "1.0"
 
-DEFAULT_STRONG_THRESHOLD = 0.70
-DEFAULT_WEAK_THRESHOLD = 0.45
+DEFAULT_STRONG_THRESHOLD = 0.30
+DEFAULT_WEAK_THRESHOLD = 0.20
 DEFAULT_MIN_OBSERVED_HITS = 3
 DEFAULT_MIN_STRONG_HITS = 2
 DEFAULT_CONFIRMATION_WINDOW = 5
 DEFAULT_MAX_GAP_SECONDS = 0.30
 DEFAULT_BACKWARD_SECONDS = 1.00
-DEFAULT_MIN_AUTO_MEDIAN_SCORE = 0.70
+DEFAULT_MIN_AUTO_MEDIAN_SCORE = 0.30
 DEFAULT_MAX_AUTO_SYNTHETIC_FRACTION = 0.40
 DEFAULT_MIN_AUTO_AREA_FRACTION = 0.0005
 DEFAULT_MAX_AUTO_AREA_FRACTION = 0.08
@@ -48,6 +48,8 @@ class TrackObservation:
     score: float | None
     provenance: str
     action: str | None = None
+    detector_id: str | None = None
+    candidate_id: str | None = None
 
 
 @dataclass
@@ -404,6 +406,8 @@ def load_detection_records(
                         bbox_xyxy=_bbox_tuple(detection["bbox_xyxy"]),
                         score=score,
                         provenance="observed_weak",
+                        detector_id=detection.get("detector_id"),
+                        candidate_id=detection.get("candidate_id"),
                     )
                 )
             records[frame_index] = observations
@@ -535,6 +539,8 @@ def observations_for_frame(
                 score=observation.score,
                 provenance=provenance,
                 action=observation.action,
+                detector_id=observation.detector_id,
+                candidate_id=observation.candidate_id,
             )
         )
     return sorted(observations, key=observation_sort_key)
@@ -999,6 +1005,8 @@ def make_track_box(
         quality_status=track.quality_status,
         render_eligible=track.render_eligible,
         action=observation.action or track.action,
+        detector_id=observation.detector_id,
+        candidate_id=observation.candidate_id,
     )
 
 

@@ -238,6 +238,32 @@ def test_weak_only_repeated_evidence_becomes_review_candidate() -> None:
     assert "insufficient_strong_hits" in quality(result).quality_gate_failures
 
 
+def test_adas_weak_observations_do_not_independently_confirm() -> None:
+    settings = quality_settings(min_auto_median_score=0.30)
+    result = tracking.build_tracks(
+        {
+            0: [obs(0, score=0.20)],
+            1: [obs(1, score=0.25)],
+            2: [obs(2, score=0.29)],
+        },
+        manual_seeds={},
+        frame_count=5,
+        strong_threshold=0.30,
+        max_gap_frames=0,
+        max_tail_prediction_frames=0,
+        fps=10.0,
+        width=100,
+        height=100,
+        quality_settings=settings,
+        association_settings=association_settings(),
+    )
+
+    assert quality(result).quality_status == "review_candidate"
+    assert quality(result).strong_hits == 0
+    assert quality(result).weak_hits == 3
+    assert "insufficient_strong_hits" in quality(result).quality_gate_failures
+
+
 def test_high_quality_repeated_track_becomes_auto_confirmed() -> None:
     result = build({0: [obs(0, score=0.88)], 1: [obs(1, score=0.9)], 2: [obs(2, score=0.92)]})
 
@@ -459,6 +485,92 @@ def test_output_contains_one_record_per_input_frame_and_safe_paths(
     assert (output_dir / "track_quality.json").exists()
     assert FakeCapture.instances[0].path == str(input_path)
     assert FakeWriter.instances[0].path == str(output_dir / "overlay.mp4")
+
+
+def test_adas_detection_schema_loads_and_preserves_metadata(tmp_path: Path) -> None:
+    detections_path = tmp_path / "adas.detections.jsonl"
+    write_detections(
+        detections_path,
+        [
+            {
+                "clip": "day_face",
+                "frame_index": 0,
+                "detections": [
+                    {
+                        "bbox_xyxy": [10, 10, 30, 30],
+                        "candidate_id": "openvino_face_adas_0001:day_face:f0000:d00",
+                        "category": "face",
+                        "clip": "day_face",
+                        "detector_id": "openvino_face_adas_0001",
+                        "frame_index": 0,
+                        "label": 1,
+                        "score": 0.20,
+                        "source_detection_index": 0,
+                    },
+                    {
+                        "bbox_xyxy": [50, 10, 70, 30],
+                        "candidate_id": "openvino_face_adas_0001:day_face:f0000:d01",
+                        "category": "face",
+                        "clip": "day_face",
+                        "detector_id": "openvino_face_adas_0001",
+                        "frame_index": 0,
+                        "label": 1,
+                        "score": 0.30,
+                        "source_detection_index": 1,
+                    },
+                    {
+                        "bbox_xyxy": [80, 10, 90, 30],
+                        "candidate_id": "openvino_face_adas_0001:day_face:f0000:d02",
+                        "category": "face",
+                        "clip": "day_face",
+                        "detector_id": "openvino_face_adas_0001",
+                        "frame_index": 0,
+                        "label": 1,
+                        "score": 0.199,
+                        "source_detection_index": 2,
+                    },
+                ],
+            }
+        ],
+    )
+
+    records = tracking.load_detection_records(detections_path, weak_threshold=0.20)
+    observations = tracking.observations_for_frame(
+        0,
+        detections_by_frame=records,
+        manual_seeds={},
+        strong_threshold=0.30,
+    )
+
+    assert [item.provenance for item in observations] == ["observed_strong", "observed_weak"]
+    assert [item.candidate_id for item in observations] == [
+        "openvino_face_adas_0001:day_face:f0000:d01",
+        "openvino_face_adas_0001:day_face:f0000:d00",
+    ]
+    assert {item.detector_id for item in observations} == {"openvino_face_adas_0001"}
+
+    result = tracking.build_tracks(
+        records,
+        manual_seeds={},
+        frame_count=1,
+        strong_threshold=0.30,
+        max_gap_frames=0,
+        max_tail_prediction_frames=0,
+        fps=10.0,
+        width=100,
+        height=100,
+        quality_settings=quality_settings(
+            min_observed_hits=1,
+            min_strong_hits=1,
+            min_auto_median_score=0.30,
+        ),
+        association_settings=association_settings(),
+    )
+
+    track_box = boxes_at(result, 0)[0]
+    assert track_box.detector_id == "openvino_face_adas_0001"
+    assert track_box.candidate_id == "openvino_face_adas_0001:day_face:f0000:d01"
+    assert track_box.to_dict()["detector_id"] == "openvino_face_adas_0001"
 
 
 def test_overwrite_protection(tmp_path: Path) -> None:

@@ -1,5 +1,17 @@
 # System Overview Changelog
 
+## v005 — 2026-07-31
+
+Integrated ADAS as the primary face detector backend:
+
+- documented `openvino_face_adas_0001` as the default integrated source backend;
+- kept YuNet selectable as a comparison baseline and 0205 as an optional targeted fallback candidate;
+- recorded the selected ADAS thresholds `0.20` proposal/storage and `0.30` primary observation;
+- documented that weak ADAS observations may support tracking but do not independently confirm tracks;
+- recorded zero-mismatch parity against certified ADAS canonical detections under ignored integration artifacts;
+- separated integrated detector-call FPS from detection-pass, tracking, and postprocessing throughput;
+- clarified that ADAS tracking validation and reviewed rendering remain next phases and that final zero-leak claims have not yet been established.
+
 ## v004 — 2026-07-31
 
 Registered the completed ADAS selected-detector evaluation as tracked evidence:

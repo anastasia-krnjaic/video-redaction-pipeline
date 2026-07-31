@@ -20,7 +20,7 @@ Selected face detector policy:
 - Proposal/storage threshold: `0.20`.
 - Primary detector threshold: `0.30`.
 - Weak proposals from `0.20` through below `0.30` may support temporal tracking but must not independently confirm a track.
-- ADAS is selected by tracked evaluation evidence, but source-code integration has not happened yet.
+- ADAS is the integrated default face detector backend; YuNet remains selectable as a comparison baseline.
 
 1. Versioned ground-truth files under `data/ground_truth/` are frozen sources of truth once created.
 2. Never edit a frozen ground-truth version in place.

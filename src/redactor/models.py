@@ -10,6 +10,10 @@ class Detection:
     category: str
     score: float
     bbox_xyxy: tuple[int, int, int, int]
+    detector_id: str | None = None
+    label: int | None = None
+    source_detection_index: int | None = None
+    candidate_id: str | None = None
 
     def __post_init__(self) -> None:
         if not self.category:
@@ -27,6 +31,10 @@ class Detection:
             "bbox_xyxy": list(self.bbox_xyxy),
             "category": self.category,
             "score": self.score,
+            **_optional_dict_field("candidate_id", self.candidate_id),
+            **_optional_dict_field("detector_id", self.detector_id),
+            **_optional_dict_field("label", self.label),
+            **_optional_dict_field("source_detection_index", self.source_detection_index),
         }
 
 
@@ -41,6 +49,8 @@ class TrackBox:
     quality_status: str
     render_eligible: bool
     action: str | None = None
+    detector_id: str | None = None
+    candidate_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.frame_index < 0:
@@ -71,6 +81,8 @@ class TrackBox:
         return {
             "action": self.action,
             "bbox_xyxy": list(self.bbox_xyxy),
+            **_optional_dict_field("candidate_id", self.candidate_id),
+            **_optional_dict_field("detector_id", self.detector_id),
             "frame_index": self.frame_index,
             "provenance": self.provenance,
             "quality_status": self.quality_status,
@@ -79,6 +91,10 @@ class TrackBox:
             "track_id": self.track_id,
             "track_state": self.track_state,
         }
+
+
+def _optional_dict_field(key: str, value: Any) -> dict[str, Any]:
+    return {} if value is None else {key: value}
 
 
 @dataclass(frozen=True)

@@ -1,8 +1,8 @@
 # Video Redaction Pipeline - System Overview
 
-- **Document version:** v004
+- **Document version:** v005
 - **Last updated:** 2026-07-31
-- **System status:** ADAS selected as primary face detector by tracked raw-detector evaluation; source integration, tracking validation, and rendering remain next phases; plate detector selection in progress
+- **System status:** ADAS integrated as the primary face detector backend with parity against certified ADAS outputs; tracking validation and rendering remain next phases; plate detector selection in progress
 - **Implementation reference:** current working tree; base commit `7226499588c9477e45f50fd137ac54c9181a8282`
 - **Canonical document:** `docs/SYSTEM_OVERVIEW.md`
 
@@ -30,8 +30,8 @@ Input videos are local clips prepared for development and evaluation. Frame-leve
 | Area | Status | Notes |
 | --- | --- | --- |
 | Video ingestion | Implemented | Local media inspection, hashing, trimming, and contact sheets are implemented with FFprobe and FFmpeg helpers. |
-| Face detection | Selected for next integration | ADAS (`openvino_face_adas_0001`) is selected as the primary face detector by tracked evaluation evidence; source code has not yet been changed to integrate it. |
-| Face tracking | Implemented and awaiting ADAS validation | Face-only tracking v2 creates tracklets, quality states, review flags, review windows, overlays, and contact sheets; ADAS threshold policy still needs source integration and temporal validation. |
+| Face detection | Integrated primary backend | ADAS (`openvino_face_adas_0001`) is the default face detector backend and passed parity against the certified ADAS canonical detections. YuNet remains selectable as a comparison baseline. |
+| Face tracking | Implemented and awaiting ADAS temporal validation | Face-only tracking v2 creates tracklets, quality states, review flags, review windows, overlays, and contact sheets; it preserves weak and primary ADAS observations, but full ADAS tracking validation remains next. |
 | Analyst face review | Partially complete | ADAS raw-detector identity repair is complete for the evaluated detector; final track-level decisions are not yet fully applied to rendering. |
 | Manual face correction | Implemented in tracking diagnostics | Manual seed input can be loaded and connected to later automatic observations; the end-to-end analyst correction workflow is not complete. |
 | Face rendering | Planned | No final face-only redacted output is produced by the current implementation. |
@@ -50,7 +50,7 @@ Each detection record stores the frame index, category, confidence score, and a 
 
 ## 4.2 Confidence bands
 
-The selected ADAS face-detector policy uses two score bands. These values are registered as evaluation evidence and are the intended next face-detection policy; source integration is still pending. Older YuNet tracking diagnostics under ignored artifacts may use historical `0.45` and `0.70` values and should not be treated as the selected ADAS policy.
+The integrated ADAS face-detector policy uses two score bands. These values are registered as evaluation evidence and are now the default face-detection policy. Older YuNet tracking diagnostics under ignored artifacts may use historical `0.45` and `0.70` values and should not be treated as the selected ADAS policy.
 
 | Score range | Meaning | System behavior |
 | --- | --- | --- |
@@ -87,7 +87,7 @@ Association is based on temporal proximity, spatial overlap, center movement, an
 | Confirmation window | `5` frames | Evidence must be close together, not scattered across the clip. |
 | Minimum observed hits | `3` | Minimum real or manual observations for automatic confirmation. |
 | Minimum primary-threshold hits | `2` | Minimum primary-threshold model observations for automatic confirmation. |
-| Minimum automatic median score | `0.30` | Median scored observation must meet the selected ADAS primary threshold after source integration. |
+| Minimum automatic median score | `0.30` | Median scored observation must meet the selected ADAS primary threshold. |
 | Median area fraction | `0.0005` to `0.08` | Tracklet size must be plausible relative to the frame. |
 | Maximum synthetic fraction | `0.40` | Interpolated and predicted boxes cannot dominate an automatic tracklet. |
 | Association overlap threshold | `0.15` | Minimum intersection-over-union overlap when center movement is not enough. |
@@ -177,9 +177,11 @@ The selected primary face detector is ADAS:
 | Selected primary threshold | `0.30` |
 | Proposal/storage threshold | `0.20` |
 | Tracked evidence record | `data/evaluations/face_detector_adas_v1.0/` |
-| Integration status | Selected by evaluation; not yet integrated into source code. |
+| Integration status | Integrated as the default source backend; parity passed against certified canonical ADAS detections. |
 
 The ADAS selection is based on the three-model visual bake-off followed by completed ADAS-only GroundTruth v1.1 validation. YuNet remains an available comparison baseline. OpenVINO face-detection-0205 remains an optional targeted fallback candidate, but it was not fully re-adjudicated after ADAS selection.
+
+The integrated backend writes the same frame-record JSONL schema as the certified canonical ADAS output, including zero-detection frame records. Source-integration parity was checked in `artifacts/adas_detector_integration_parity_v1/` with zero mismatches for frame count, frame-index order, per-frame detection counts, detection ordering, scores, boxes, detector IDs, categories, model hashes, and zero-detection frames.
 
 At the selected primary threshold `0.30`, the certified ADAS raw-detector results are:
 
@@ -202,6 +204,8 @@ The tracked evaluation separates detector inference FPS from later tracking or p
 | Tracking or postprocessing FPS | `118.293567` | `138.296354` |
 
 The earlier ignored ADAS final report value `128.294961` is the arithmetic mean of tracking validation throughput, not detector inference throughput. The historical ignored report was left unchanged; the tracked evaluation record documents the discrepancy.
+
+The source-integration parity run also records detector-call timing for the integrated backend: day `123.741120` FPS and night `110.987860` FPS for the local parity run. That timing is separate from both the tracked evaluation bake-off FPS above and any tracking or postprocessing throughput.
 
 These are raw detector metrics. They do not measure tracking, interpolation, identity persistence, final rendering, or final redaction coverage. Raw detector misses still require temporal recovery and reviewed rendering evidence before any zero-leak claim can be made.
 
@@ -295,7 +299,7 @@ Detection-stage outputs:
 
 - `detections.jsonl`: one frame-indexed record per processed frame.
 - `overlay.mp4`: diagnostic overlay video without audio.
-- `summary.json`: model, source, threshold, processing, and count summary.
+- `summary.json`: model, source, thresholds, detector-inference timing, detection-pass timing, and count summary.
 
 Tracking-stage outputs:
 
@@ -323,7 +327,7 @@ Tracked evaluation records:
 - Manual review remains necessary.
 - The tracker creates tracklets rather than recognized identities.
 - Current analyst decisions are not yet fully applied to rendering.
-- ADAS is selected as the primary face detector, but source integration is not complete.
+- ADAS source integration has passed raw-detector parity, but full ADAS tracking validation is not complete.
 - Raw ADAS detector misses remain; temporal recovery and reviewed rendering must address them before final redaction claims.
 - Final zero-leak claims have not yet been established.
 - LPD-YuNet is not an acceptable final plate detector.
@@ -332,25 +336,26 @@ Tracked evaluation records:
 
 # 16. Next Planned Milestones
 
-1. Integrate ADAS and the `0.20` / `0.30` selected threshold policy into source configuration.
-2. Validate face tracking with ADAS proposals, including weak-proposal support and raw-detector miss recovery.
-3. Complete face tracklet review and identity grouping.
-4. Add manual seeds for unresolved face prefixes when tracking cannot recover misses.
-5. Produce and verify face-only selective redaction.
-6. Freeze the face branch after reviewed rendering evidence exists.
-7. Evaluate several alternative plate detectors separately.
-8. Select a plate detector and add temporal plate tracking.
-9. Combine face and plate regions in one renderer.
-10. Finalize audit and production documentation.
+1. Validate face tracking with ADAS proposals, including weak-proposal support and raw-detector miss recovery.
+2. Complete face tracklet review and identity grouping.
+3. Add manual seeds for unresolved face prefixes when tracking cannot recover misses.
+4. Produce and verify face-only selective redaction.
+5. Freeze the face branch after reviewed rendering evidence exists.
+6. Evaluate several alternative plate detectors separately.
+7. Select a plate detector and add temporal plate tracking.
+8. Combine face and plate regions in one renderer.
+9. Finalize audit and production documentation.
 
 # 17. Source Traceability
 
-This document reflects the current working tree on top of commit `7226499588c9477e45f50fd137ac54c9181a8282`. At the time this document was written, the working tree had uncommitted tracked ADAS evaluation-record and documentation changes.
+This document reflects the current working tree on top of commit `7226499588c9477e45f50fd137ac54c9181a8282`. At the time this document was written, the working tree had uncommitted tracked ADAS source-integration, tests, and documentation changes.
 
 Current local model files and hashes:
 
 | Model file | SHA-256 |
 | --- | --- |
+| `artifacts/face_detector_bakeoff_v2/models/face-detection-adas-0001/face-detection-adas-0001.xml` | `ef8fb491060e64da9d31893045f36dbb24f59455308e961274dd234190db997b` |
+| `artifacts/face_detector_bakeoff_v2/models/face-detection-adas-0001/face-detection-adas-0001.bin` | `54883903421c8ee5289334ca4da779976a8be66daf7d57e45d005d0bc2b8c637` |
 | `models/face_detection_yunet_2023mar.onnx` | `8f2383e4dd3cfbb4553ea8718107fc0423210dc964f9f4280604804ed2552fa4` |
 | `models/license_plate_detection_lpd_yunet_2023mar.onnx` | `6d4978a7b6d25514d5e24811b82bfb511d166bdd8ca3b03aa63c1623d4d039c7` |
 
@@ -370,6 +375,7 @@ Current local model files and hashes:
 | Historical YuNet face proposal baseline metrics | `artifacts/baseline/day_face_proposals_t045/summary.json`; `artifacts/baseline/night_face/summary.json` - local diagnostic outputs ignored by Git |
 | Selected ADAS face detector evaluation | `data/evaluations/face_detector_adas_v1.0/README.md`; `data/evaluations/face_detector_adas_v1.0/metrics.json`; `data/evaluations/face_detector_adas_v1.0/selected_thresholds.json`; `data/evaluations/face_detector_adas_v1.0/validation.json` |
 | ADAS corrected adjudication evidence | `data/evaluations/face_detector_adas_v1.0/adjudication.completed.corrected.json`; `data/evaluations/face_detector_adas_v1.0/correction_log.json` |
+| ADAS source-integration parity evidence | `artifacts/adas_detector_integration_parity_v1/report.md`; `artifacts/adas_detector_integration_parity_v1/parity_summary.json` - local diagnostic outputs ignored by Git |
 | Tracking-v2 metrics | `artifacts/tracking_v2/day_face/summary.json`; `artifacts/tracking_v2/night_face/summary.json`; `artifacts/tracking_v2/day_face/track_quality.json`; `artifacts/tracking_v2/night_face/track_quality.json` - local diagnostic outputs ignored by Git |
 | Analyst review package | `artifacts/tracking_v2_review/report.md`; `artifacts/tracking_v2_review/analyst_decisions.template.json` - local diagnostic outputs ignored by Git |
 | First tracker audit | `artifacts/tracking_audit/report.md` - local diagnostic output ignored by Git |

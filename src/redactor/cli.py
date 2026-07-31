@@ -155,15 +155,50 @@ def contact_sheet(
 @click.option(
     "--model",
     "model_path",
-    required=True,
+    required=False,
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
-    help="ONNX model path.",
+    help="Model path. For ADAS this is the XML path; for YuNet this is the ONNX path.",
+)
+@click.option(
+    "--detector-backend",
+    type=click.Choice(
+        ["openvino_face_adas_0001", "yunet", "license_plate_yunet"],
+        case_sensitive=True,
+    ),
+    default=None,
+    help="Detector backend. Face detection defaults to openvino_face_adas_0001.",
+)
+@click.option(
+    "--adas-xml",
+    "adas_xml_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="OpenVINO face-detection-adas-0001 XML path. REDACTOR_ADAS_XML is also honored.",
+)
+@click.option(
+    "--adas-bin",
+    "adas_bin_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="OpenVINO face-detection-adas-0001 BIN path. REDACTOR_ADAS_BIN is also honored.",
 )
 @click.option(
     "--threshold",
     type=click.FloatRange(0.0, 1.0),
     default=None,
-    help="Detection score threshold.",
+    help="Legacy detection score threshold. For ADAS, prefer --proposal-threshold.",
+)
+@click.option(
+    "--proposal-threshold",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help="Proposal storage threshold. ADAS default: 0.20.",
+)
+@click.option(
+    "--primary-threshold",
+    type=click.FloatRange(0.0, 1.0),
+    default=None,
+    help="Primary observation threshold. ADAS default: 0.30.",
 )
 @click.option(
     "--output-dir",
@@ -171,6 +206,21 @@ def contact_sheet(
     type=click.Path(file_okay=False, path_type=Path),
     help="Directory for detections.jsonl, summary.json, and overlay.mp4.",
 )
+@click.option(
+    "--detections-output",
+    "detections_output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional detections JSONL output path. Defaults to OUTPUT_DIR/detections.jsonl.",
+)
+@click.option(
+    "--clip-id",
+    type=str,
+    default=None,
+    help="Optional canonical clip id to embed in detection records.",
+)
+@click.option("--no-overlay", is_flag=True, help="Skip diagnostic overlay.mp4 generation.")
+@click.option("--no-summary", is_flag=True, help="Skip writing OUTPUT_DIR/summary.json.")
 @click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
 @click.option(
     "--max-frames",
@@ -181,30 +231,68 @@ def contact_sheet(
 def detect(
     input_path: Path,
     category: str,
-    model_path: Path,
+    model_path: Path | None,
+    detector_backend: str | None,
+    adas_xml_path: Path | None,
+    adas_bin_path: Path | None,
     threshold: float | None,
+    proposal_threshold: float | None,
+    primary_threshold: float | None,
     output_dir: Path,
+    detections_output_path: Path | None,
+    clip_id: str | None,
+    no_overlay: bool,
+    no_summary: bool,
     overwrite: bool,
     max_frames: int | None,
 ) -> None:
     """Run frame-level diagnostic detection."""
     from redactor import detection
 
-    resolved_threshold = threshold
+    resolved_backend = detection.resolve_detector_backend(category, detector_backend)
+    resolved_model_path = resolve_detection_model_path(
+        category=category,
+        detector_backend=resolved_backend,
+        model_path=model_path,
+        adas_xml_path=adas_xml_path,
+    )
+    resolved_adas_bin_path = (
+        adas_bin_path
+        if resolved_backend == detection.DETECTOR_BACKEND_ADAS and adas_bin_path is not None
+        else (
+            detection.default_adas_bin_path(resolved_model_path)
+            if resolved_backend == detection.DETECTOR_BACKEND_ADAS
+            else None
+        )
+    )
+    resolved_threshold = proposal_threshold if proposal_threshold is not None else threshold
     if resolved_threshold is None:
-        resolved_threshold = detection.DEFAULT_THRESHOLDS[category]
+        resolved_threshold = detection.default_proposal_threshold(category, resolved_backend)
 
     try:
         summary = detection.run_detection(
             input_path,
             category=category,
-            model_path=model_path,
+            model_path=resolved_model_path,
             threshold=resolved_threshold,
             output_dir=output_dir,
             overwrite=overwrite,
             max_frames=max_frames,
+            detector_backend=resolved_backend,
+            adas_bin_path=resolved_adas_bin_path,
+            primary_threshold=primary_threshold,
+            clip_id=clip_id,
+            detections_output_path=detections_output_path,
+            write_overlay_video=not no_overlay,
+            write_summary_file=not no_summary,
         )
-    except (FileExistsError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
         raise click.ClickException(str(exc)) from exc
 
     click.echo(
@@ -212,9 +300,13 @@ def detect(
         f"{summary['frames_containing_at_least_one_detection']} frames with detections; "
         f"{summary['total_detections']} total detections."
     )
-    click.echo(f"Wrote detections: {output_dir / 'detections.jsonl'}")
-    click.echo(f"Wrote summary: {output_dir / 'summary.json'}")
-    click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
+    click.echo(f"Detector inference FPS: {summary['detector_inference_fps']}")
+    click.echo(f"Detection-pass FPS: {summary['processing_fps']}")
+    click.echo(f"Wrote detections: {detections_output_path or output_dir / 'detections.jsonl'}")
+    if not no_summary:
+        click.echo(f"Wrote summary: {output_dir / 'summary.json'}")
+    if not no_overlay:
+        click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
 
 
 @main.command()
@@ -235,8 +327,22 @@ def detect(
     type=click.Path(file_okay=False, path_type=Path),
     help="Directory for tracking diagnostics.",
 )
-@click.option("--strong-threshold", default=0.70, show_default=True, type=click.FloatRange(0, 1))
-@click.option("--weak-threshold", default=0.45, show_default=True, type=click.FloatRange(0, 1))
+@click.option(
+    "--primary-threshold",
+    "--strong-threshold",
+    "strong_threshold",
+    default=None,
+    type=click.FloatRange(0, 1),
+    help="Primary/strong observation threshold. ADAS default: 0.30.",
+)
+@click.option(
+    "--proposal-threshold",
+    "--weak-threshold",
+    "weak_threshold",
+    default=None,
+    type=click.FloatRange(0, 1),
+    help="Proposal/weak observation threshold. ADAS default: 0.20.",
+)
 @click.option("--min-observed-hits", default=3, show_default=True, type=click.IntRange(min=1))
 @click.option("--min-strong-hits", default=2, show_default=True, type=click.IntRange(min=0))
 @click.option("--confirmation-window", default=5, show_default=True, type=click.IntRange(min=1))
@@ -293,13 +399,19 @@ def track(
     """Run offline face temporal-safety tracking diagnostics."""
     from redactor import tracking
 
+    resolved_strong_threshold = (
+        tracking.DEFAULT_STRONG_THRESHOLD if strong_threshold is None else strong_threshold
+    )
+    resolved_weak_threshold = (
+        tracking.DEFAULT_WEAK_THRESHOLD if weak_threshold is None else weak_threshold
+    )
     try:
         summary = tracking.run_tracking(
             input_path,
             detections_path=detections_path,
             output_dir=output_dir,
-            strong_threshold=strong_threshold,
-            weak_threshold=weak_threshold,
+            strong_threshold=resolved_strong_threshold,
+            weak_threshold=resolved_weak_threshold,
             min_observed_hits=min_observed_hits,
             min_strong_hits=min_strong_hits,
             confirmation_window=confirmation_window,
@@ -341,6 +453,26 @@ def track(
 def _subprocess_message(exc: subprocess.CalledProcessError) -> str:
     stderr = exc.stderr.strip() if exc.stderr else ""
     return stderr or str(exc)
+
+
+def resolve_detection_model_path(
+    *,
+    category: str,
+    detector_backend: str,
+    model_path: Path | None,
+    adas_xml_path: Path | None,
+) -> Path:
+    from redactor import detection
+
+    if detector_backend == detection.DETECTOR_BACKEND_ADAS:
+        return adas_xml_path or model_path or detection.default_adas_xml_path()
+    if model_path is not None:
+        return model_path
+    if category == "face":
+        raise click.ClickException("YuNet face detection requires --model with an ONNX path")
+    if category == "license_plate":
+        raise click.ClickException("license-plate detection requires --model with an ONNX path")
+    raise click.ClickException(f"unsupported category: {category}")
 
 
 if __name__ == "__main__":
