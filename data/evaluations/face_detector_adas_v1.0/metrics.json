@@ -1,0 +1,337 @@
+{
+  "benchmark": {
+    "ground_truth_version": "1.1",
+    "micro_denominator": 852,
+    "path": "data/ground_truth/face_benchmark_v1.1.json",
+    "sha256": "eeac399a8181f8e80a05967cd5cb0b0504deae3f767d950275f2d44360370c92",
+    "target_denominators": {
+      "person_day_01": 300,
+      "person_night_01": 360,
+      "person_night_02": 192
+    }
+  },
+  "evaluation_id": "face_detector_adas_v1.0",
+  "fps_provenance": {
+    "audit_conclusion": "The final ignored ADAS report label processing_fps=128.294961 is tracking/postprocessing throughput from ADAS tracking validation summaries. It is not detector inference FPS; detector inference FPS is 61.512487 day and 66.489572 night.",
+    "detector_inference_fps_day": 61.512487,
+    "detector_inference_fps_mean": 64.00103,
+    "detector_inference_fps_night": 66.489572,
+    "historical_final_report_processing_fps": 128.294961,
+    "historical_final_report_processing_fps_represents": "arithmetic mean of ADAS tracking validation processing_fps values, not detector inference throughput",
+    "historical_ignored_report_left_unchanged": true,
+    "source_scripts": {
+      "adas_finalizer_uses_tracking_validation_fps": "artifacts/face_ground_truth_eval_v1_1/adas_selected_evaluation_v1/finalize_adas_adjudication.py",
+      "detector_inference": "artifacts/face_detector_bakeoff_v2/openvino_face_adas_0001_reference.py",
+      "provisional_ground_truth_eval_uses_detector_fps": "artifacts/face_ground_truth_eval_v1_1/build_face_ground_truth_eval_v1_1.py"
+    },
+    "source_summaries": {
+      "detector_inference_day": "artifacts/face_detector_bakeoff_v2/adas_day/summary.json",
+      "detector_inference_night": "artifacts/face_detector_bakeoff_v2/adas_night/summary.json",
+      "tracking_or_postprocessing_day": "artifacts/adas_tracking_validation_v2/day_face/summary.json",
+      "tracking_or_postprocessing_night": "artifacts/adas_tracking_validation_v2/night_face/summary.json"
+    },
+    "tracking_or_postprocessing_fps_day": 118.293567,
+    "tracking_or_postprocessing_fps_mean": 128.294961,
+    "tracking_or_postprocessing_fps_night": 138.296354
+  },
+  "generated_at": "2026-07-31T18:02:54Z",
+  "primary_threshold_results": {
+    "day_extreme_profile_recall": 0.969697,
+    "denominators_by_target": {
+      "person_day_01": 300,
+      "person_night_01": 360,
+      "person_night_02": 192
+    },
+    "duplicate_proposals": 367,
+    "hits_by_target": {
+      "person_day_01": 299,
+      "person_night_01": 359,
+      "person_night_02": 175
+    },
+    "macro_recall": 0.968449,
+    "maximum_consecutive_misses_by_target": {
+      "person_day_01": 1,
+      "person_night_01": 1,
+      "person_night_02": 9
+    },
+    "micro_denominator": 852,
+    "micro_hits": 833,
+    "micro_recall": 0.9777,
+    "miss_run_count_by_target": {
+      "person_day_01": 1,
+      "person_night_01": 1,
+      "person_night_02": 4
+    },
+    "recall_by_target": {
+      "person_day_01": 0.996667,
+      "person_night_01": 0.997222,
+      "person_night_02": 0.911458
+    },
+    "threshold": 0.3,
+    "unmatched_proposals": 12,
+    "worst_target_recall": 0.911458
+  },
+  "raw_detector_recall_limitations": [
+    "Metrics count only frame-level ADAS detector hits on GroundTruth v1.1 detector-scored frames.",
+    "Tracking, interpolation, prediction, identity persistence, and final redaction coverage are not measured by this record.",
+    "Detector-ignore frames and full-video zero-leak claims require later reviewed tracking and rendering evidence."
+  ],
+  "schema_version": "1.0",
+  "selected_detector": "openvino_face_adas_0001",
+  "selected_detector_display_name": "OpenVINO face-detection-adas-0001",
+  "source_metrics_hash": "c9af6fceb87421f8cc74bb54d2aeff9cddba502005ce4d22c34c4f6947f13d29",
+  "threshold_0_20_results": {
+    "day_extreme_profile_recall": 0.969697,
+    "denominators_by_target": {
+      "person_day_01": 300,
+      "person_night_01": 360,
+      "person_night_02": 192
+    },
+    "duplicate_proposals": 382,
+    "hits_by_target": {
+      "person_day_01": 299,
+      "person_night_01": 359,
+      "person_night_02": 176
+    },
+    "macro_recall": 0.970185,
+    "maximum_consecutive_misses_by_target": {
+      "person_day_01": 1,
+      "person_night_01": 1,
+      "person_night_02": 9
+    },
+    "micro_denominator": 852,
+    "micro_hits": 834,
+    "micro_recall": 0.978873,
+    "miss_run_count_by_target": {
+      "person_day_01": 1,
+      "person_night_01": 1,
+      "person_night_02": 4
+    },
+    "recall_by_target": {
+      "person_day_01": 0.996667,
+      "person_night_01": 0.997222,
+      "person_night_02": 0.916667
+    },
+    "threshold": 0.2,
+    "unmatched_proposals": 22,
+    "worst_target_recall": 0.916667
+  },
+  "thresholds": [
+    {
+      "day_extreme_profile_recall": 0.969697,
+      "denominators_by_target": {
+        "person_day_01": 300,
+        "person_night_01": 360,
+        "person_night_02": 192
+      },
+      "duplicate_proposals": 382,
+      "hits_by_target": {
+        "person_day_01": 299,
+        "person_night_01": 359,
+        "person_night_02": 176
+      },
+      "macro_recall": 0.970185,
+      "maximum_consecutive_misses_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 9
+      },
+      "micro_denominator": 852,
+      "micro_hits": 834,
+      "micro_recall": 0.978873,
+      "miss_run_count_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 4
+      },
+      "recall_by_target": {
+        "person_day_01": 0.996667,
+        "person_night_01": 0.997222,
+        "person_night_02": 0.916667
+      },
+      "threshold": 0.2,
+      "unmatched_proposals": 22,
+      "worst_target_recall": 0.916667
+    },
+    {
+      "day_extreme_profile_recall": 0.969697,
+      "denominators_by_target": {
+        "person_day_01": 300,
+        "person_night_01": 360,
+        "person_night_02": 192
+      },
+      "duplicate_proposals": 367,
+      "hits_by_target": {
+        "person_day_01": 299,
+        "person_night_01": 359,
+        "person_night_02": 175
+      },
+      "macro_recall": 0.968449,
+      "maximum_consecutive_misses_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 9
+      },
+      "micro_denominator": 852,
+      "micro_hits": 833,
+      "micro_recall": 0.9777,
+      "miss_run_count_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 4
+      },
+      "recall_by_target": {
+        "person_day_01": 0.996667,
+        "person_night_01": 0.997222,
+        "person_night_02": 0.911458
+      },
+      "threshold": 0.3,
+      "unmatched_proposals": 12,
+      "worst_target_recall": 0.911458
+    },
+    {
+      "day_extreme_profile_recall": 0.909091,
+      "denominators_by_target": {
+        "person_day_01": 300,
+        "person_night_01": 360,
+        "person_night_02": 192
+      },
+      "duplicate_proposals": 356,
+      "hits_by_target": {
+        "person_day_01": 296,
+        "person_night_01": 359,
+        "person_night_02": 173
+      },
+      "macro_recall": 0.961644,
+      "maximum_consecutive_misses_by_target": {
+        "person_day_01": 3,
+        "person_night_01": 1,
+        "person_night_02": 9
+      },
+      "micro_denominator": 852,
+      "micro_hits": 828,
+      "micro_recall": 0.971831,
+      "miss_run_count_by_target": {
+        "person_day_01": 2,
+        "person_night_01": 1,
+        "person_night_02": 6
+      },
+      "recall_by_target": {
+        "person_day_01": 0.986667,
+        "person_night_01": 0.997222,
+        "person_night_02": 0.901042
+      },
+      "threshold": 0.4,
+      "unmatched_proposals": 7,
+      "worst_target_recall": 0.901042
+    },
+    {
+      "day_extreme_profile_recall": 0.878788,
+      "denominators_by_target": {
+        "person_day_01": 300,
+        "person_night_01": 360,
+        "person_night_02": 192
+      },
+      "duplicate_proposals": 342,
+      "hits_by_target": {
+        "person_day_01": 295,
+        "person_night_01": 359,
+        "person_night_02": 167
+      },
+      "macro_recall": 0.950116,
+      "maximum_consecutive_misses_by_target": {
+        "person_day_01": 3,
+        "person_night_01": 1,
+        "person_night_02": 9
+      },
+      "micro_denominator": 852,
+      "micro_hits": 821,
+      "micro_recall": 0.963615,
+      "miss_run_count_by_target": {
+        "person_day_01": 2,
+        "person_night_01": 1,
+        "person_night_02": 9
+      },
+      "recall_by_target": {
+        "person_day_01": 0.983333,
+        "person_night_01": 0.997222,
+        "person_night_02": 0.869792
+      },
+      "threshold": 0.5,
+      "unmatched_proposals": 5,
+      "worst_target_recall": 0.869792
+    },
+    {
+      "day_extreme_profile_recall": 0.848485,
+      "denominators_by_target": {
+        "person_day_01": 300,
+        "person_night_01": 360,
+        "person_night_02": 192
+      },
+      "duplicate_proposals": 326,
+      "hits_by_target": {
+        "person_day_01": 293,
+        "person_night_01": 359,
+        "person_night_02": 163
+      },
+      "macro_recall": 0.940949,
+      "maximum_consecutive_misses_by_target": {
+        "person_day_01": 7,
+        "person_night_01": 1,
+        "person_night_02": 9
+      },
+      "micro_denominator": 852,
+      "micro_hits": 815,
+      "micro_recall": 0.956573,
+      "miss_run_count_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 8
+      },
+      "recall_by_target": {
+        "person_day_01": 0.976667,
+        "person_night_01": 0.997222,
+        "person_night_02": 0.848958
+      },
+      "threshold": 0.6,
+      "unmatched_proposals": 1,
+      "worst_target_recall": 0.848958
+    },
+    {
+      "day_extreme_profile_recall": 0.848485,
+      "denominators_by_target": {
+        "person_day_01": 300,
+        "person_night_01": 360,
+        "person_night_02": 192
+      },
+      "duplicate_proposals": 314,
+      "hits_by_target": {
+        "person_day_01": 292,
+        "person_night_01": 359,
+        "person_night_02": 157
+      },
+      "macro_recall": 0.929421,
+      "maximum_consecutive_misses_by_target": {
+        "person_day_01": 8,
+        "person_night_01": 1,
+        "person_night_02": 10
+      },
+      "micro_denominator": 852,
+      "micro_hits": 808,
+      "micro_recall": 0.948357,
+      "miss_run_count_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 8
+      },
+      "recall_by_target": {
+        "person_day_01": 0.973333,
+        "person_night_01": 0.997222,
+        "person_night_02": 0.817708
+      },
+      "threshold": 0.7,
+      "unmatched_proposals": 1,
+      "worst_target_recall": 0.817708
+    }
+  ]
+}

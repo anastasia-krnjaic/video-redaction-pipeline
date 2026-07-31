@@ -1,5 +1,17 @@
 # System Overview Changelog
 
+## v004 — 2026-07-31
+
+Registered the completed ADAS selected-detector evaluation as tracked evidence:
+
+- documented `openvino_face_adas_0001` as the selected primary face detector;
+- recorded selected thresholds `0.30` primary and `0.20` proposal/storage;
+- summarized certified ADAS raw-detector recall on GroundTruth v1.1 denominators `300`, `360`, and `192`;
+- documented that raw detector misses still require temporal recovery and reviewed rendering;
+- clarified that YuNet remains a comparison baseline and 0205 remains an optional targeted fallback;
+- documented that final zero-leak claims have not yet been established;
+- separated detector inference FPS from tracking/postprocessing FPS provenance.
+
 ## v003 — 2026-07-31
 
 Selected corrected ground-truth benchmark v1.1 after complete human face-visibility verification:

@@ -1,0 +1,221 @@
+{
+  "adjudication_validation": {
+    "decision_count": 852,
+    "duplicate_nighttime_assignment_count": 0,
+    "known_duplicate_conflicts_resolved": {
+      "550": true,
+      "599": true,
+      "630": true
+    },
+    "missing_canonical_candidate_count": 0,
+    "missing_decision_count": 0,
+    "score_bbox_mismatch_count": 0,
+    "selected_candidate_count": 834,
+    "target_counts": {
+      "person_day_01": 300,
+      "person_night_01": 360,
+      "person_night_02": 192
+    },
+    "uncertain_count": 0,
+    "unreviewed_count": 0
+  },
+  "copied_files": {
+    "adjudication.completed.corrected.json": {
+      "byte_for_byte": true,
+      "destination": "data/evaluations/face_detector_adas_v1.0/adjudication.completed.corrected.json",
+      "destination_sha256": "8aaa96e35e511f22c3db2c5c2480a1b8e949c53d6d6bc04e31c25fbaa28966c8",
+      "source": "artifacts/face_ground_truth_eval_v1_1/adas_selected_evaluation_v2/adas_adjudication.completed.corrected.json",
+      "source_sha256": "8aaa96e35e511f22c3db2c5c2480a1b8e949c53d6d6bc04e31c25fbaa28966c8"
+    },
+    "correction_log.json": {
+      "byte_for_byte": true,
+      "destination": "data/evaluations/face_detector_adas_v1.0/correction_log.json",
+      "destination_sha256": "5517371ae1bb33da358182f4ed6d3a31c3a11e006cd0b40a590ffa3164fc35dc",
+      "source": "artifacts/face_ground_truth_eval_v1_1/adas_selected_evaluation_v2/correction_log.json",
+      "source_sha256": "5517371ae1bb33da358182f4ed6d3a31c3a11e006cd0b40a590ffa3164fc35dc"
+    }
+  },
+  "correction_log_validation": {
+    "changed_decision_count": 17,
+    "confirmed_repair_frame_count": 10,
+    "contains_only_actual_changes": true,
+    "correction_log_entry_count": 17,
+    "repair_frames": [
+      550,
+      551,
+      599,
+      608,
+      630,
+      631,
+      632,
+      639,
+      640,
+      648
+    ],
+    "unchanged_but_confirmed_count": 3
+  },
+  "errors": [],
+  "evaluation_id": "face_detector_adas_v1.0",
+  "fps_provenance": {
+    "audit_conclusion": "The final ignored ADAS report label processing_fps=128.294961 is tracking/postprocessing throughput from ADAS tracking validation summaries. It is not detector inference FPS; detector inference FPS is 61.512487 day and 66.489572 night.",
+    "detector_inference_fps_day": 61.512487,
+    "detector_inference_fps_mean": 64.00103,
+    "detector_inference_fps_night": 66.489572,
+    "historical_final_report_processing_fps": 128.294961,
+    "historical_final_report_processing_fps_represents": "arithmetic mean of ADAS tracking validation processing_fps values, not detector inference throughput",
+    "historical_ignored_report_left_unchanged": true,
+    "source_scripts": {
+      "adas_finalizer_uses_tracking_validation_fps": "artifacts/face_ground_truth_eval_v1_1/adas_selected_evaluation_v1/finalize_adas_adjudication.py",
+      "detector_inference": "artifacts/face_detector_bakeoff_v2/openvino_face_adas_0001_reference.py",
+      "provisional_ground_truth_eval_uses_detector_fps": "artifacts/face_ground_truth_eval_v1_1/build_face_ground_truth_eval_v1_1.py"
+    },
+    "source_summaries": {
+      "detector_inference_day": "artifacts/face_detector_bakeoff_v2/adas_day/summary.json",
+      "detector_inference_night": "artifacts/face_detector_bakeoff_v2/adas_night/summary.json",
+      "tracking_or_postprocessing_day": "artifacts/adas_tracking_validation_v2/day_face/summary.json",
+      "tracking_or_postprocessing_night": "artifacts/adas_tracking_validation_v2/night_face/summary.json"
+    },
+    "tracking_or_postprocessing_fps_day": 118.293567,
+    "tracking_or_postprocessing_fps_mean": 128.294961,
+    "tracking_or_postprocessing_fps_night": 138.296354
+  },
+  "generated_at": "2026-07-31T18:02:54Z",
+  "metrics_validation": {
+    "primary_threshold": 0.3,
+    "primary_threshold_results": {
+      "day_extreme_profile_recall": 0.969697,
+      "denominators_by_target": {
+        "person_day_01": 300,
+        "person_night_01": 360,
+        "person_night_02": 192
+      },
+      "duplicate_proposals": 367,
+      "hits_by_target": {
+        "person_day_01": 299,
+        "person_night_01": 359,
+        "person_night_02": 175
+      },
+      "macro_recall": 0.968449,
+      "maximum_consecutive_misses_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 9
+      },
+      "micro_denominator": 852,
+      "micro_hits": 833,
+      "micro_recall": 0.9777,
+      "miss_run_count_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 4
+      },
+      "recall_by_target": {
+        "person_day_01": 0.996667,
+        "person_night_01": 0.997222,
+        "person_night_02": 0.911458
+      },
+      "threshold": 0.3,
+      "unmatched_proposals": 12,
+      "worst_target_recall": 0.911458
+    },
+    "proposal_storage_threshold": 0.2,
+    "threshold_0_20_results": {
+      "day_extreme_profile_recall": 0.969697,
+      "denominators_by_target": {
+        "person_day_01": 300,
+        "person_night_01": 360,
+        "person_night_02": 192
+      },
+      "duplicate_proposals": 382,
+      "hits_by_target": {
+        "person_day_01": 299,
+        "person_night_01": 359,
+        "person_night_02": 176
+      },
+      "macro_recall": 0.970185,
+      "maximum_consecutive_misses_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 9
+      },
+      "micro_denominator": 852,
+      "micro_hits": 834,
+      "micro_recall": 0.978873,
+      "miss_run_count_by_target": {
+        "person_day_01": 1,
+        "person_night_01": 1,
+        "person_night_02": 4
+      },
+      "recall_by_target": {
+        "person_day_01": 0.996667,
+        "person_night_01": 0.997222,
+        "person_night_02": 0.916667
+      },
+      "threshold": 0.2,
+      "unmatched_proposals": 22,
+      "worst_target_recall": 0.916667
+    },
+    "thresholds": [
+      0.2,
+      0.3,
+      0.4,
+      0.5,
+      0.6,
+      0.7
+    ]
+  },
+  "recorded_hash_checks": {
+    "benchmark_source_document_sha256_matches_ground_truth": true,
+    "corrected_adas_canonical_sha256_matches_canonical": true,
+    "corrected_ground_truth_sha256_matches_ground_truth": true,
+    "corrected_review_data_sha256_matches_review_data": true,
+    "corrected_source_completed_sha256_matches_original": true,
+    "correction_log_corrected_adjudication_sha256_matches_corrected": true,
+    "source_validation_adas_hash_matches": true,
+    "source_validation_benchmark_hash_matches": true,
+    "source_validation_corrected_hash_matches": true,
+    "source_validation_correction_log_hash_matches": true,
+    "source_validation_ground_truth_hash_matches": true,
+    "source_validation_status_pass": true
+  },
+  "schema_version": "1.0",
+  "selected_detector": "openvino_face_adas_0001",
+  "status": "pass",
+  "tracked_file_hashes": {
+    "README.md": {
+      "bytes": 3820,
+      "path": "data/evaluations/face_detector_adas_v1.0/README.md",
+      "sha256": "8c4e36591c74df35f5518a813ba8dd1fab3e31db0847a15cb169a126a84b1681"
+    },
+    "adjudication.completed.corrected.json": {
+      "bytes": 410016,
+      "path": "data/evaluations/face_detector_adas_v1.0/adjudication.completed.corrected.json",
+      "sha256": "8aaa96e35e511f22c3db2c5c2480a1b8e949c53d6d6bc04e31c25fbaa28966c8"
+    },
+    "correction_log.json": {
+      "bytes": 23335,
+      "path": "data/evaluations/face_detector_adas_v1.0/correction_log.json",
+      "sha256": "5517371ae1bb33da358182f4ed6d3a31c3a11e006cd0b40a590ffa3164fc35dc"
+    },
+    "input_manifest.json": {
+      "bytes": 9255,
+      "path": "data/evaluations/face_detector_adas_v1.0/input_manifest.json",
+      "sha256": "6a27e585aade7ed1c75935599ec7a30b28cf6eece1b96bc12e7eb807f2fcdf78"
+    },
+    "metrics.json": {
+      "bytes": 10665,
+      "path": "data/evaluations/face_detector_adas_v1.0/metrics.json",
+      "sha256": "e0f36faeda2057dfaa12fdbff3ab8c19b47ca6b021bd2d84ba359b3373949ce2"
+    },
+    "selected_detector_decision.md": {
+      "bytes": 1723,
+      "path": "data/evaluations/face_detector_adas_v1.0/selected_detector_decision.md",
+      "sha256": "3cc3ed9c7a7f17c9ef155bbcdd1162b2e8efa29f0eb2bc41f8c65eb3a920f3a9"
+    },
+    "selected_thresholds.json": {
+      "bytes": 4872,
+      "path": "data/evaluations/face_detector_adas_v1.0/selected_thresholds.json",
+      "sha256": "8ff3b1e3dcd7f4340146b052c7335fb651bbf8c2f6c8aed721bc594ea5898ce8"
+    }
+  }
+}

@@ -1,0 +1,843 @@
+{
+  "schema_version": "1.0",
+  "export_kind": "adas_selected_evaluation_v2_correction_log",
+  "exported_at": "2026-07-31T16:27:09.971Z",
+  "selected_detector": "openvino_face_adas_0001",
+  "changed_decision_count": 17,
+  "corrections": [
+    {
+      "item_id": "night_selective:person_night_01:f0551",
+      "frame": 551,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_01",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0551:d00",
+        "score": 1,
+        "bbox_xyxy": [
+          1347,
+          922,
+          1544,
+          1080
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0551:d01",
+        "score": 0.99853515625,
+        "bbox_xyxy": [
+          717,
+          294,
+          837,
+          401
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0551:d00",
+            "score": 1,
+            "bbox_xyxy": [
+              1347,
+              922,
+              1544,
+              1080
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:25:44.727Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:25:44.727Z"
+    },
+    {
+      "item_id": "night_selective:person_night_01:f0599",
+      "frame": 599,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_01",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0599:d00",
+        "score": 0.998046875,
+        "bbox_xyxy": [
+          1434,
+          821,
+          1640,
+          1074
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0599:d01",
+        "score": 0.984375,
+        "bbox_xyxy": [
+          806,
+          173,
+          924,
+          284
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0599:d00",
+            "score": 0.998046875,
+            "bbox_xyxy": [
+              1434,
+              821,
+              1640,
+              1074
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:25:53.700Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:25:53.700Z"
+    },
+    {
+      "item_id": "night_selective:person_night_01:f0608",
+      "frame": 608,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_01",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0608:d00",
+        "score": 0.99951171875,
+        "bbox_xyxy": [
+          1577,
+          810,
+          1767,
+          1063
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0608:d01",
+        "score": 0.9990234375,
+        "bbox_xyxy": [
+          926,
+          160,
+          1055,
+          273
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0608:d00",
+            "score": 0.99951171875,
+            "bbox_xyxy": [
+              1577,
+              810,
+              1767,
+              1063
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:04.053Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:04.053Z"
+    },
+    {
+      "item_id": "night_selective:person_night_01:f0630",
+      "frame": 630,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_01",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0630:d00",
+        "score": 0.998046875,
+        "bbox_xyxy": [
+          1530,
+          795,
+          1717,
+          1064
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0630:d01",
+        "score": 0.9912109375,
+        "bbox_xyxy": [
+          899,
+          126,
+          1021,
+          240
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0630:d00",
+            "score": 0.998046875,
+            "bbox_xyxy": [
+              1530,
+              795,
+              1717,
+              1064
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:09.804Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:09.804Z"
+    },
+    {
+      "item_id": "night_selective:person_night_01:f0631",
+      "frame": 631,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_01",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0631:d00",
+        "score": 0.99755859375,
+        "bbox_xyxy": [
+          1511,
+          795,
+          1710,
+          1064
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0631:d01",
+        "score": 0.99267578125,
+        "bbox_xyxy": [
+          891,
+          126,
+          1010,
+          246
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0631:d00",
+            "score": 0.99755859375,
+            "bbox_xyxy": [
+              1511,
+              795,
+              1710,
+              1064
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:18.966Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:18.966Z"
+    },
+    {
+      "item_id": "night_selective:person_night_01:f0632",
+      "frame": 632,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_01",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0632:d00",
+        "score": 0.9990234375,
+        "bbox_xyxy": [
+          1499,
+          800,
+          1696,
+          1062
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0632:d01",
+        "score": 0.99853515625,
+        "bbox_xyxy": [
+          880,
+          123,
+          1004,
+          248
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0632:d00",
+            "score": 0.9990234375,
+            "bbox_xyxy": [
+              1499,
+              800,
+              1696,
+              1062
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:25.078Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:25.078Z"
+    },
+    {
+      "item_id": "night_selective:person_night_01:f0639",
+      "frame": 639,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_01",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0639:d00",
+        "score": 0.998046875,
+        "bbox_xyxy": [
+          1532,
+          793,
+          1718,
+          1060
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0639:d01",
+        "score": 0.9970703125,
+        "bbox_xyxy": [
+          883,
+          126,
+          1008,
+          242
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0639:d00",
+            "score": 0.998046875,
+            "bbox_xyxy": [
+              1532,
+              793,
+              1718,
+              1060
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:35.144Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:35.144Z"
+    },
+    {
+      "item_id": "night_selective:person_night_01:f0640",
+      "frame": 640,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_01",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0640:d00",
+        "score": 0.998046875,
+        "bbox_xyxy": [
+          1534,
+          793,
+          1721,
+          1061
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0640:d01",
+        "score": 0.99755859375,
+        "bbox_xyxy": [
+          885,
+          129,
+          1011,
+          243
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0640:d00",
+            "score": 0.998046875,
+            "bbox_xyxy": [
+              1534,
+              793,
+              1721,
+              1061
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:42.028Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:42.028Z"
+    },
+    {
+      "item_id": "night_selective:person_night_01:f0648",
+      "frame": 648,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_01",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0648:d00",
+        "score": 0.99853515625,
+        "bbox_xyxy": [
+          1484,
+          828,
+          1687,
+          1073
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0648:d01",
+        "score": 0.98681640625,
+        "bbox_xyxy": [
+          856,
+          163,
+          976,
+          275
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0648:d00",
+            "score": 0.99853515625,
+            "bbox_xyxy": [
+              1484,
+              828,
+              1687,
+              1073
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:27:05.660Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:27:05.660Z"
+    },
+    {
+      "item_id": "night_selective:person_night_02:f0550",
+      "frame": 550,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_02",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0550:d01",
+        "score": 0.99755859375,
+        "bbox_xyxy": [
+          711,
+          298,
+          829,
+          406
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0550:d00",
+        "score": 0.9990234375,
+        "bbox_xyxy": [
+          1339,
+          921,
+          1549,
+          1080
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0550:d01",
+            "score": 0.99755859375,
+            "bbox_xyxy": [
+              711,
+              298,
+              829,
+              406
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:25:17.817Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:25:17.817Z"
+    },
+    {
+      "item_id": "night_selective:person_night_02:f0551",
+      "frame": 551,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_02",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0551:d01",
+        "score": 0.99853515625,
+        "bbox_xyxy": [
+          717,
+          294,
+          837,
+          401
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0551:d00",
+        "score": 1,
+        "bbox_xyxy": [
+          1347,
+          922,
+          1544,
+          1080
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0551:d01",
+            "score": 0.99853515625,
+            "bbox_xyxy": [
+              717,
+              294,
+              837,
+              401
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:25:44.727Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:25:44.727Z"
+    },
+    {
+      "item_id": "night_selective:person_night_02:f0608",
+      "frame": 608,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_02",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0608:d01",
+        "score": 0.9990234375,
+        "bbox_xyxy": [
+          926,
+          160,
+          1055,
+          273
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0608:d00",
+        "score": 0.99951171875,
+        "bbox_xyxy": [
+          1577,
+          810,
+          1767,
+          1063
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0608:d01",
+            "score": 0.9990234375,
+            "bbox_xyxy": [
+              926,
+              160,
+              1055,
+              273
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:04.053Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:04.053Z"
+    },
+    {
+      "item_id": "night_selective:person_night_02:f0631",
+      "frame": 631,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_02",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0631:d01",
+        "score": 0.99267578125,
+        "bbox_xyxy": [
+          891,
+          126,
+          1010,
+          246
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0631:d00",
+        "score": 0.99755859375,
+        "bbox_xyxy": [
+          1511,
+          795,
+          1710,
+          1064
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0631:d01",
+            "score": 0.99267578125,
+            "bbox_xyxy": [
+              891,
+              126,
+              1010,
+              246
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:18.966Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:18.966Z"
+    },
+    {
+      "item_id": "night_selective:person_night_02:f0632",
+      "frame": 632,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_02",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0632:d01",
+        "score": 0.99853515625,
+        "bbox_xyxy": [
+          880,
+          123,
+          1004,
+          248
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0632:d00",
+        "score": 0.9990234375,
+        "bbox_xyxy": [
+          1499,
+          800,
+          1696,
+          1062
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0632:d01",
+            "score": 0.99853515625,
+            "bbox_xyxy": [
+              880,
+              123,
+              1004,
+              248
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:25.078Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:25.078Z"
+    },
+    {
+      "item_id": "night_selective:person_night_02:f0639",
+      "frame": 639,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_02",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0639:d01",
+        "score": 0.9970703125,
+        "bbox_xyxy": [
+          883,
+          126,
+          1008,
+          242
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0639:d00",
+        "score": 0.998046875,
+        "bbox_xyxy": [
+          1532,
+          793,
+          1718,
+          1060
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0639:d01",
+            "score": 0.9970703125,
+            "bbox_xyxy": [
+              883,
+              126,
+              1008,
+              242
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:35.144Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:35.144Z"
+    },
+    {
+      "item_id": "night_selective:person_night_02:f0640",
+      "frame": 640,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_02",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0640:d01",
+        "score": 0.99755859375,
+        "bbox_xyxy": [
+          885,
+          129,
+          1011,
+          243
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0640:d00",
+        "score": 0.998046875,
+        "bbox_xyxy": [
+          1534,
+          793,
+          1721,
+          1061
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0640:d01",
+            "score": 0.99755859375,
+            "bbox_xyxy": [
+              885,
+              129,
+              1011,
+              243
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:26:42.028Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:26:42.028Z"
+    },
+    {
+      "item_id": "night_selective:person_night_02:f0648",
+      "frame": 648,
+      "detector": "openvino_face_adas_0001",
+      "target": "person_night_02",
+      "old_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0648:d01",
+        "score": 0.98681640625,
+        "bbox_xyxy": [
+          856,
+          163,
+          976,
+          275
+        ]
+      },
+      "new_decision": {
+        "review_status": "reviewed",
+        "choice": "candidate",
+        "candidate_id": "openvino_face_adas_0001:night_selective:f0648:d00",
+        "score": 0.99853515625,
+        "bbox_xyxy": [
+          1484,
+          828,
+          1687,
+          1073
+        ],
+        "repair": {
+          "package": "adas_selected_evaluation_v2",
+          "previous_decision": {
+            "review_status": "reviewed",
+            "choice": "candidate",
+            "candidate_id": "openvino_face_adas_0001:night_selective:f0648:d01",
+            "score": 0.98681640625,
+            "bbox_xyxy": [
+              856,
+              163,
+              976,
+              275
+            ]
+          },
+          "note": "",
+          "timestamp": "2026-07-31T16:27:05.660Z"
+        }
+      },
+      "reason": "",
+      "timestamp": "2026-07-31T16:27:05.660Z"
+    }
+  ],
+  "corrected_adjudication_sha256": "8aaa96e35e511f22c3db2c5c2480a1b8e949c53d6d6bc04e31c25fbaa28966c8"
+}

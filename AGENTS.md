@@ -12,6 +12,16 @@ A material system change includes any change to detector model or model version,
 
 Default selected face benchmark: `data/ground_truth/face_benchmark_v1.1.json`.
 
+Default selected face detector evidence record: `data/evaluations/face_detector_adas_v1.0/`.
+
+Selected face detector policy:
+
+- Primary detector: `openvino_face_adas_0001`.
+- Proposal/storage threshold: `0.20`.
+- Primary detector threshold: `0.30`.
+- Weak proposals from `0.20` through below `0.30` may support temporal tracking but must not independently confirm a track.
+- ADAS is selected by tracked evaluation evidence, but source-code integration has not happened yet.
+
 1. Versioned ground-truth files under `data/ground_truth/` are frozen sources of truth once created.
 2. Never edit a frozen ground-truth version in place.
 3. Every evaluation must validate ground-truth, video, and detection hashes.
@@ -21,4 +31,6 @@ Default selected face benchmark: `data/ground_truth/face_benchmark_v1.1.json`.
 7. Final redaction coverage may use reviewed tracking and interpolation.
 8. Reference ROIs may be used for candidate search but not as automatic scoring boxes.
 9. New ground-truth semantics require a new version.
-10. Future detector, tracker, renderer, and evaluation work must use the newest explicitly selected ground-truth version.
+10. Raw ADAS detector misses still require temporal recovery and reviewed rendering evidence; final zero-leak claims have not yet been established.
+11. YuNet remains an available comparison baseline, and OpenVINO face-detection-0205 remains an optional targeted fallback candidate.
+12. Future detector, tracker, renderer, and evaluation work must use the newest explicitly selected ground-truth version and selected face-detector evidence record.
