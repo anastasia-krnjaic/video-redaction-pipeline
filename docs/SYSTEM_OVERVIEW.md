@@ -1,9 +1,9 @@
 # Video Redaction Pipeline - System Overview
 
-- **Document version:** v001
+- **Document version:** v002
 - **Last updated:** 2026-07-30
-- **System status:** Face pipeline under analyst review; plate detector selection in progress
-- **Implementation reference:** current working tree; base commit `be198461dae0802a470414cc9f4e1d8a8792a8ac`
+- **System status:** Face pipeline under analyst review; ground-truth benchmark v1.0 registered; plate detector selection in progress
+- **Implementation reference:** current working tree; base commit `7226499588c9477e45f50fd137ac54c9181a8282`
 - **Canonical document:** `docs/SYSTEM_OVERVIEW.md`
 
 # 1. Purpose
@@ -236,9 +236,35 @@ The current evaluation set contains four local scenarios:
 | Close daytime plate clip | Tests close plate localization under changing scale, perspective, camera motion, and partial occlusion. |
 | Optional distant-plate stress case | Qualitative stress test for a small visually ambiguous plate; not required for final success. |
 
-The workflow uses automated proposals plus targeted human review rather than a complete manual ground-truth dataset. Formal recall, precision, or overlap metrics must not be claimed without independent labels. Current evaluation notes define success through reviewed output behavior, not through full-dataset statistical claims.
+The workflow uses automated proposals plus targeted human review rather than a complete manual ground-truth dataset. Formal recall, precision, or overlap metrics must not be claimed outside the explicitly registered benchmark semantics.
 
-# 13. Current Outputs
+# 13. Ground Truth and Evaluation
+
+The frozen benchmark source is `data/ground_truth/GroundTruth_v1.0.md`, with machine-readable face-evaluation fields mirrored in `data/ground_truth/face_benchmark_v1.0.json`. The Markdown document remains the semantic source of truth and must not be edited in place.
+
+The benchmark distinguishes two review levels:
+
+| Level | Meaning | Allowed claims |
+| --- | --- | --- |
+| `GOLD_DENSE` | Every frame in the interval was visually reviewed at native frame rate. | Zero-leak claims may be made only for these intervals after the corresponding output is reviewed. |
+| `CONTEXT_ONLY` | Surrounding clip context was reviewed to confirm scene and target selection. | Useful for debugging and scene selection, but not for per-frame zero-leak claims. |
+
+The current face benchmark uses `30000/1001` fps, zero-based frame indexes, half-open time intervals, and 1920x1080 `xyxy` pixel coordinates. The registered face target-frame denominators are:
+
+| Target | Action | Detector-scored face frames |
+| --- | --- | ---: |
+| `person_day_01` | redact | `300` |
+| `person_night_01` | keep | `360` |
+| `person_night_02` | redact | `252` |
+| **Micro total** |  | `912` |
+
+Raw detector recall and final redaction coverage are separate metrics. Raw detector recall is scored only on detector-scored frames, excludes detector-ignore frames, and does not count tracker-only, predicted, or interpolated boxes as detector hits. Final redaction coverage may use reviewed tracking and interpolation, but a single visible uncovered target frame in a certified redact interval remains a failure.
+
+The benchmark contains temporal labels and reference search ROIs, but it does not contain tight per-frame scoring boxes. Detector-hit adjudication therefore requires visual target correspondence. Reference ROIs may guide candidate search and review triage, but they are not automatic scoring boxes.
+
+The current day-close-plate clip is not the registered day-plate gold interval. The frozen day-plate gold interval describes the earlier far-plate clip; `eval_day_plate_close.mp4` requires a future versioned mapping before it can be treated as plate ground truth.
+
+# 14. Current Outputs
 
 Detection-stage outputs:
 
@@ -262,17 +288,17 @@ Analyst-stage outputs:
 - Review contact sheets and track-quality tables are available as local diagnostic review aids.
 - Final analyst decisions, final rendered redaction output, unified face/plate rendering, production audit manifests, and final verifier output are planned but not yet implemented.
 
-# 14. Current Limitations
+# 15. Current Limitations
 
 - Difficult faces may still be missed before their first detection.
 - Manual review remains necessary.
 - The tracker creates tracklets rather than recognized identities.
 - Current analyst decisions are not yet fully applied to rendering.
 - LPD-YuNet is not an acceptable final plate detector.
-- No full ground-truth recall claim is available.
+- Ground truth is currently certified only for the frozen dense benchmark windows, not for full source videos or full evaluation clips.
 - The production manifest and final verifier are not complete.
 
-# 15. Next Planned Milestones
+# 16. Next Planned Milestones
 
 1. Complete face tracklet review.
 2. Group approved face tracklets into logical identities.
@@ -284,9 +310,9 @@ Analyst-stage outputs:
 8. Combine face and plate regions in one renderer.
 9. Finalize audit and production documentation.
 
-# 16. Source Traceability
+# 17. Source Traceability
 
-This document reflects the current working tree on top of commit `be198461dae0802a470414cc9f4e1d8a8792a8ac`. At the time this document was written, the working tree had uncommitted changes, including modified `README.md`, `src/redactor/cli.py`, and `src/redactor/models.py`, plus untracked `src/redactor/tracking.py` and `tests/test_tracking.py`.
+This document reflects the current working tree on top of commit `7226499588c9477e45f50fd137ac54c9181a8282`. At the time this document was written, the working tree had uncommitted ground-truth benchmark registration changes.
 
 Current local model files and hashes:
 
@@ -303,6 +329,8 @@ Current local model files and hashes:
 | Face tracking and quality gates | `src/redactor/tracking.py`; `tests/test_tracking.py` |
 | Detection and media behavior tests | `tests/test_detection.py`; `tests/test_media.py`; `tests/test_models.py` |
 | Evaluation clips and policies | `data/evaluation_plan.yaml`; `data/source.yaml` |
+| Frozen ground-truth source | `data/ground_truth/GroundTruth_v1.0.md` |
+| Machine-readable face benchmark | `data/ground_truth/face_benchmark_v1.0.json` |
 | Evaluation clip metadata | `artifacts/eval_day_face.metadata.json`; `artifacts/eval_night_selective.metadata.json`; `artifacts/eval_day_plate_close.metadata.json`; `artifacts/eval_day_plate.metadata.json` - local diagnostic outputs ignored by Git |
 | Face proposal baseline metrics | `artifacts/baseline/day_face_proposals_t045/summary.json`; `artifacts/baseline/night_face/summary.json` - local diagnostic outputs ignored by Git |
 | Tracking-v2 metrics | `artifacts/tracking_v2/day_face/summary.json`; `artifacts/tracking_v2/night_face/summary.json`; `artifacts/tracking_v2/day_face/track_quality.json`; `artifacts/tracking_v2/night_face/track_quality.json` - local diagnostic outputs ignored by Git |

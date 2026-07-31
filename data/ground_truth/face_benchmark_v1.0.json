@@ -1,0 +1,157 @@
+{
+  "acceptance_criteria": {
+    "detector_ignore_frames_excluded_from_raw_detector_recall": true,
+    "final_redaction_coverage_may_use_reviewed_tracking_and_interpolation": true,
+    "keep_face_false_redaction_frames_allowed": 0,
+    "license_plate_text_must_not_be_stored": true,
+    "one_visible_target_frame_miss_fails_final_redaction": true,
+    "raw_detector_hit_requires_visual_target_correspondence": true,
+    "tracker_only_and_interpolated_boxes_count_as_raw_detector_hits": false,
+    "unresolved_prefix_allowed": false,
+    "zero_leak_claims_apply_only_to_gold_dense_intervals": true
+  },
+  "certification": "GOLD_DENSE_WINDOWS_ONLY",
+  "clips": {
+    "day_face": {
+      "dense_parent_frame_range_inclusive": [
+        300,
+        599
+      ],
+      "derivative_evaluation_clip": {
+        "file": "artifacts/eval_day_face.mp4",
+        "frame_count": 1079,
+        "sha256": "fa131aa652a1f4bf3b88b88f66522bf8cd34cae23655da9a10cb053a6cb4c33d"
+      },
+      "targets": {
+        "person_day_01": {
+          "action": "redact",
+          "category": "face",
+          "detector_ignore_parent_ranges_inclusive": [],
+          "detector_scored_parent_ranges_inclusive": [
+            [
+              300,
+              599
+            ]
+          ],
+          "difficult_parent_ranges_inclusive": {
+            "extreme_profile": [
+              [
+                480,
+                512
+              ]
+            ]
+          },
+          "expected_face_denominator": 300,
+          "final_redaction_parent_ranges_inclusive": [
+            [
+              300,
+              599
+            ]
+          ],
+          "reference_search_roi_xyxy": [
+            960,
+            80,
+            1360,
+            520
+          ]
+        }
+      }
+    },
+    "night_selective": {
+      "dense_parent_frame_range_inclusive": [
+        420,
+        779
+      ],
+      "derivative_evaluation_clip": {
+        "file": "artifacts/eval_night_selective.mp4",
+        "frame_count": 1589,
+        "sha256": "0b55aa3a497941711ac8634a049c557637e20928e8d3bd8b63e5b030b6b272e0"
+      },
+      "targets": {
+        "person_night_01": {
+          "action": "keep",
+          "category": "face",
+          "detector_ignore_parent_ranges_inclusive": [],
+          "detector_scored_parent_ranges_inclusive": [
+            [
+              420,
+              779
+            ]
+          ],
+          "expected_face_denominator": 360,
+          "final_redaction_parent_ranges_inclusive": [],
+          "keep_clear_parent_ranges_inclusive": [
+            [
+              420,
+              779
+            ]
+          ],
+          "reference_search_roi_xyxy": [
+            380,
+            120,
+            800,
+            500
+          ]
+        },
+        "person_night_02": {
+          "action": "redact",
+          "category": "face",
+          "detector_ignore_parent_ranges_inclusive": [
+            [
+              447,
+              478
+            ],
+            [
+              704,
+              779
+            ]
+          ],
+          "detector_scored_parent_ranges_inclusive": [
+            [
+              420,
+              446
+            ],
+            [
+              479,
+              703
+            ]
+          ],
+          "expected_face_denominator": 252,
+          "final_redaction_parent_ranges_inclusive": [
+            [
+              420,
+              779
+            ]
+          ],
+          "reference_search_roi_xyxy": [
+            1160,
+            620,
+            1760,
+            1080
+          ]
+        }
+      }
+    }
+  },
+  "coordinate_system": {
+    "bbox_format": "xyxy",
+    "height": 1080,
+    "origin": "top_left",
+    "units": "pixels",
+    "width": 1920
+  },
+  "expected_face_denominators": {
+    "micro_total": 912,
+    "person_day_01": 300,
+    "person_night_01": 360,
+    "person_night_02": 252
+  },
+  "fps": "30000/1001",
+  "frame_indexing": "zero_based",
+  "ground_truth_version": "1.0",
+  "reference_search_rois_are_tight_scoring_boxes": false,
+  "schema_version": "1.0",
+  "source_document": "data/ground_truth/GroundTruth_v1.0.md",
+  "source_document_sha256": "09642acc0fe522dd0449fadbee7b8d9316af2b8391a063f4921b4133b7035b8b",
+  "time_interval_convention": "half_open"
+}
