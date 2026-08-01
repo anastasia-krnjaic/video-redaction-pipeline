@@ -1,32 +1,12 @@
 # Video Redaction Pipeline
 
-Video Redaction Pipeline is a small Python project for inspecting local video files,
-creating lightweight development artifacts, and running baseline frame-level detections.
+Video Redaction Pipeline is a local Python project for building and auditing a face-redaction workflow on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`).
 
-Redaction, identity grouping, rendering policies, manifests, and a UI are not implemented
-yet.
+The pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, and write diagnostic artifacts. Final redaction rendering, a review UI, automated benchmark runners, and license-plate work are not part of the current supported workflow.
 
-## Current Scope
+## Install
 
-- Inspect container, video, and optional audio metadata with FFprobe.
-- Calculate SHA-256 hashes with chunked reads.
-- Create short MP4 development clips with FFmpeg.
-- Create JPEG contact sheets with FFmpeg filters.
-- Run diagnostic face or license-plate detection over every decoded video frame.
-- Run an offline face-only temporal-safety layer over frame-indexed detections.
-- Provide a small `redactor` command-line interface.
-
-## Architecture
-
-- `src/redactor/cli.py` handles commands and user-facing validation.
-- `src/redactor/media.py` handles hashing, probing, trimming, contact sheets, and tool checks.
-- `src/redactor/detection.py` handles OpenCV-based diagnostic detection runs.
-- `src/redactor/tracking.py` handles face-only temporal-safety diagnostics.
-- `src/redactor/models.py` defines metadata dataclasses.
-
-## Installation
-
-Use Python 3.11 and install the project in editable mode:
+Use Python 3.11 or 3.12 and install the project in editable mode:
 
 ```bash
 python -m venv .venv
@@ -40,85 +20,90 @@ FFmpeg and FFprobe must be available on `PATH`:
 redactor doctor
 ```
 
-## CLI Examples
+OpenVINO is required for the active face detector. The ADAS model XML/BIN files are local model inputs and are not tracked in Git. By default the CLI looks for:
 
-Inspect a local sample:
+```text
+models/face-detection-adas-0001/face-detection-adas-0001.xml
+models/face-detection-adas-0001/face-detection-adas-0001.bin
+```
+
+You can also pass `--adas-xml` and `--adas-bin`, or set `REDACTOR_ADAS_XML` and `REDACTOR_ADAS_BIN`.
+
+## Supported Face Workflow
+
+Run the current face pipeline:
+
+```bash
+redactor face-pipeline artifacts/eval_day_face.mp4 \
+  --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
+  --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
+  --output-dir artifacts/face_pipeline/day_face \
+  --overwrite
+```
+
+The command runs:
+
+1. ADAS face detection at proposal threshold `0.20`.
+2. Ordinary face tracking with primary observation threshold `0.30`.
+3. Optional privacy gap recovery when target track IDs are provided.
+
+For privacy gap recovery on a known target track, add target and safety-track IDs:
+
+```bash
+redactor face-pipeline artifacts/eval_night_selective.mp4 \
+  --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
+  --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
+  --target-track-id 8 \
+  --keep-track-id 10 \
+  --competing-track-id 10 \
+  --frame-start 420 \
+  --frame-end 779 \
+  --output-dir artifacts/face_pipeline/night_selective \
+  --overwrite
+```
+
+Privacy recovery writes machine-readable interval decisions. A gap may be accepted automatically, accepted after configured refinement, marked `needs_review`, or rejected. Synthetic privacy regions never count as raw detector hits.
+
+## Output Layout
+
+A face-pipeline run writes subdirectories under the output directory:
+
+| Directory | Contents |
+| --- | --- |
+| `detection/` | `detections.jsonl`, `summary.json`, optional `overlay.mp4`. |
+| `tracking/` | `tracks.jsonl`, `summary.json`, track quality, review flags/windows, contact sheets, and overlay. |
+| `privacy_gap_recovery/` | `privacy_regions.jsonl`, `interval_decisions.json`, `metrics.json`, `summary.json`, optional overlay. Written only when target track IDs are provided. |
+
+Generated artifacts belong under `artifacts/` and are ignored by Git.
+
+## Advanced Diagnostics
+
+Lower-level commands remain available for focused debugging:
 
 ```bash
 redactor inspect data/raw/bodycam_sample.mp4 --output artifacts/bodycam_sample.metadata.json
+redactor contact-sheet data/raw/bodycam_sample.mp4 artifacts/bodycam_sample_contact_sheet.jpg --interval-seconds 30 --columns 5 --max-frames 10
+redactor trim data/raw/bodycam_sample.mp4 artifacts/smoke_clip.mp4 --start 0 --duration 5
+redactor detect artifacts/eval_day_face.mp4 --category face --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin --output-dir artifacts/diagnostics/day_face --overwrite
+redactor track artifacts/eval_day_face.mp4 --detections artifacts/diagnostics/day_face/detections.jsonl --output-dir artifacts/diagnostics/day_face_tracking --overwrite
+redactor recover-face-gaps artifacts/eval_night_selective.mp4 --tracks artifacts/diagnostics/night_tracking/tracks.jsonl --target-track-id 8 --keep-track-id 10 --output-dir artifacts/diagnostics/night_gap_recovery --overwrite
 ```
 
-Create a contact sheet:
+These commands are useful during development, but `face-pipeline` is the supported entry point for the current face workflow.
 
-```bash
-redactor contact-sheet data/raw/bodycam_sample.mp4 artifacts/bodycam_sample_contact_sheet.jpg \
-  --interval-seconds 30 \
-  --columns 5 \
-  --max-frames 10
-```
+## Current Evidence And History
 
-Create a short development clip:
+The selected detector evidence record lives in `data/evaluations/face_detector_adas_v1.0/`. It records the ADAS-only corrected adjudication, raw-detector metrics, selected thresholds, and FPS provenance audit.
 
-```bash
-redactor trim data/raw/bodycam_sample.mp4 artifacts/smoke_clip.mp4 \
-  --start 0 \
-  --duration 5
-```
+The earlier three-model face detector comparison is preserved as history under `docs/archive/face_detector_bakeoff/`. OpenCV YuNet and OpenVINO `face-detection-0205` are not active face detector backends and are not selectable in the supported face pipeline.
 
-Run a face-detection diagnostic:
+Detailed architecture notes live in `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`. The broader system explanation lives in `docs/SYSTEM_OVERVIEW.md`.
 
-```bash
-redactor detect artifacts/eval_day_face.mp4 \
-  --category face \
-  --model models/face_detection_yunet_2023mar.onnx \
-  --threshold 0.60 \
-  --output-dir artifacts/baseline/day_face \
-  --overwrite
-```
+## Current Limitations
 
-Detection outputs include `detections.jsonl`, `summary.json`, and a diagnostic
-`overlay.mp4`. The overlay does not include audio.
-
-Run face temporal-safety diagnostics:
-
-```bash
-redactor track artifacts/eval_day_face.mp4 \
-  --detections artifacts/baseline/day_face_proposals_t045/detections.jsonl \
-  --output-dir artifacts/tracking/day_face \
-  --overwrite
-```
-
-Tracking outputs include `tracks.jsonl`, `summary.json`, `track_quality.json`,
-`review_flags.json`, `review_windows.json`, per-track diagnostic contact sheets, and a
-diagnostic `overlay.mp4` without audio. This layer classifies face tracklets as
-`auto_confirmed`, `review_candidate`, or `rejected`, fills only short reviewable gaps,
-and does not claim automatic zero-leak performance.
-
-## Local Models
-
-Model binaries are stored locally in `models/` and are excluded from Git.
-
-- `models/face_detection_yunet_2023mar.onnx`: YuNet face detector from the
-  official OpenCV Zoo model repository. The model files in that directory are licensed
-  under the MIT License.
-- `models/license_plate_detection_lpd_yunet_2023mar.onnx`: LPD-YuNet license-plate
-  detector from the official OpenCV Zoo model repository. The model files in that
-  directory are licensed under the Apache 2.0 License.
-
-The license-plate model was trained with Chinese license plates, so results on other
-plate styles may be limited. The detection command records each local model SHA-256 in
-`summary.json`.
-
-## Data Policy
-
-Source videos belong in `data/raw/` and are not committed. Generated files belong in
-`artifacts/` and are not committed. `data/source.yaml` documents the local sample for this
-phase but is not parsed by the application.
-
-## Roadmap
-
-- Add detection modules for faces and license plates.
-- Add analyst decision records.
-- Add redaction rendering.
-- Add processing manifests.
-- Add evaluation outputs for quality checks.
+- The project does not yet produce final redacted video output.
+- Face identity grouping and review decisions are still diagnostic, not a complete analyst workflow.
+- Privacy gap recovery can reduce temporal gaps, but uncertain intervals must remain review-required.
+- Raw detector recall, tracking coverage, privacy recovery, and final redaction quality are separate claims.
+- No final zero-leak claim has been established.
+- License-plate detection and plate tracking are intentionally outside the current Face Pipeline v1 cleanup.

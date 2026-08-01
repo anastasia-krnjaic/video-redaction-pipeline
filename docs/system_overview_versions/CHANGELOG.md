@@ -1,5 +1,27 @@
 # System Overview Changelog
 
+## v007 — 2026-08-01
+
+Consolidated Face Pipeline v1 around ADAS-only face detection:
+
+- removed OpenCV YuNet from the active face detector runtime path and face-pipeline CLI;
+- documented OpenVINO `face-detection-adas-0001` as the only active face detector backend;
+- moved the three-model detector bake-off context into `docs/archive/face_detector_bakeoff/`;
+- rewrote the canonical overview for a broader reader and moved technical details into `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`;
+- clarified that historical YuNet and OpenVINO 0205 comparison material is not supported production behavior;
+- preserved existing tracking and privacy gap-recovery behavior and evidence boundaries.
+
+## v006 — 2026-08-01
+
+Integrated reusable face privacy gap recovery after ordinary ADAS tracking:
+
+- added a tracked post-tracking component for privacy-region continuity across face-track gaps;
+- documented interpolation, bidirectional tracking, one-sided tracking, preserved accepted regions, and conservative review/rejection paths;
+- recorded scale-normalized safety checks for center motion, forward/backward disagreement, scale changes, keep-person overlap, competing identities, scene cuts, gap duration, invalid boxes, and jumps;
+- clarified that optional bottom-connected visual refinement is strategy-specific and disabled by default;
+- documented that privacy coverage remains separate from raw detector recall and does not establish final zero-leak rendering claims;
+- added a non-authoritative ignored night regression artifact preserving accepted `adas_privacy_bridge_v2` regions.
+
 ## v005 — 2026-07-31
 
 Integrated ADAS as the primary face detector backend:

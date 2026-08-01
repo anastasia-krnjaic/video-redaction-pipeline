@@ -17,7 +17,6 @@ from redactor.models import Detection
 
 SCHEMA_VERSION = "1.0"
 DETECTOR_BACKEND_ADAS = "openvino_face_adas_0001"
-DETECTOR_BACKEND_YUNET = "yunet"
 DETECTOR_BACKEND_LICENSE_PLATE_YUNET = "license_plate_yunet"
 DEFAULT_FACE_DETECTOR_BACKEND = DETECTOR_BACKEND_ADAS
 DEFAULT_ADAS_PROPOSAL_THRESHOLD = 0.20
@@ -59,47 +58,6 @@ class DetectionStats:
         return self.min_detections_in_frame if self.min_detections_in_frame is not None else 0
 
 
-class FaceYuNetDetector:
-    detector_id = DETECTOR_BACKEND_YUNET
-
-    def __init__(self, model_path: Path, threshold: float, nms_threshold: float = NMS_THRESHOLD):
-        try:
-            self.detector = cv.FaceDetectorYN.create(
-                str(model_path),
-                "",
-                (320, 320),
-                threshold,
-                nms_threshold,
-                5000,
-            )
-        except cv.error as exc:
-            raise ValueError(f"failed to load face model {model_path.name}") from exc
-        self.threshold = threshold
-        self.model_path = model_path
-
-    def detect(self, frame: np.ndarray) -> list[Detection]:
-        height, width = frame.shape[:2]
-        self.detector.setInputSize((width, height))
-        _, faces = self.detector.detect(frame)
-        if faces is None:
-            return []
-
-        detections: list[Detection] = []
-        for face in faces:
-            score = float(face[-1])
-            bbox = xywh_to_clipped_xyxy(
-                float(face[0]),
-                float(face[1]),
-                float(face[2]),
-                float(face[3]),
-                width,
-                height,
-            )
-            if bbox is not None:
-                detections.append(Detection("face", score, bbox, detector_id=self.detector_id))
-        return sorted(detections, key=detection_sort_key)
-
-
 class OpenVINOFaceADASDetector:
     detector_id = DETECTOR_BACKEND_ADAS
     expected_color_order = "BGR"
@@ -127,7 +85,7 @@ class OpenVINOFaceADASDetector:
         except ImportError as exc:
             raise RuntimeError(
                 "OpenVINO is required for openvino_face_adas_0001; install the openvino "
-                "Python package or use --detector-backend yunet"
+                "Python package and provide the ADAS XML/BIN model files"
             ) from exc
 
         self.openvino_version = ov.__version__
@@ -460,8 +418,6 @@ def create_detector(
                 primary_threshold=primary_threshold,
             ),
         )
-    if category == "face" and backend == DETECTOR_BACKEND_YUNET:
-        return FaceYuNetDetector(model_path, threshold)
     if category == "license_plate" and backend == DETECTOR_BACKEND_LICENSE_PLATE_YUNET:
         return LicensePlateYuNetDetector(model_path, threshold)
     if category == "face":
@@ -769,11 +725,16 @@ def detection_sort_key(detection: Detection) -> tuple[float, tuple[int, int, int
 
 
 def resolve_detector_backend(category: str, detector_backend: str | None) -> str:
-    if detector_backend:
-        return detector_backend
     if category == "face":
+        if detector_backend not in {None, DETECTOR_BACKEND_ADAS}:
+            raise ValueError(
+                "unsupported face detector backend: "
+                f"{detector_backend}; active face detector is {DETECTOR_BACKEND_ADAS}"
+            )
         return DEFAULT_FACE_DETECTOR_BACKEND
     if category == "license_plate":
+        if detector_backend not in {None, DETECTOR_BACKEND_LICENSE_PLATE_YUNET}:
+            raise ValueError(f"unsupported license-plate detector backend: {detector_backend}")
         return DETECTOR_BACKEND_LICENSE_PLATE_YUNET
     raise ValueError(f"unsupported category: {category}")
 

@@ -20,7 +20,7 @@ Selected face detector policy:
 - Proposal/storage threshold: `0.20`.
 - Primary detector threshold: `0.30`.
 - Weak proposals from `0.20` through below `0.30` may support temporal tracking but must not independently confirm a track.
-- ADAS is the integrated default face detector backend; YuNet remains selectable as a comparison baseline.
+- ADAS is the only active face detector backend. Historical YuNet and OpenVINO 0205 comparison material must stay in the archive/evidence record and must not be reintroduced into the active runtime path without a new explicit model-selection task.
 
 1. Versioned ground-truth files under `data/ground_truth/` are frozen sources of truth once created.
 2. Never edit a frozen ground-truth version in place.
@@ -32,5 +32,7 @@ Selected face detector policy:
 8. Reference ROIs may be used for candidate search but not as automatic scoring boxes.
 9. New ground-truth semantics require a new version.
 10. Raw ADAS detector misses still require temporal recovery and reviewed rendering evidence; final zero-leak claims have not yet been established.
-11. YuNet remains an available comparison baseline, and OpenVINO face-detection-0205 remains an optional targeted fallback candidate.
+11. OpenCV YuNet and OpenVINO face-detection-0205 are historical comparison models, not active production face detector backends.
 12. Future detector, tracker, renderer, and evaluation work must use the newest explicitly selected ground-truth version and selected face-detector evidence record.
+13. Face privacy gap recovery is a downstream continuity layer, not detector recall. It must preserve provenance, separate detector/ordinary-tracker evidence from synthetic privacy regions, and emit `needs_review` or `rejected` intervals when bidirectional, one-sided, scene-cut, keep-overlap, identity-competition, jump, scale, or validity checks fail.
+14. The optional bottom-connected visual-component refinement is strategy-specific and disabled by default; do not encode clip-specific frame numbers, person IDs, or coordinates in production recovery logic.

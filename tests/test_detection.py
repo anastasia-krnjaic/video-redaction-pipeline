@@ -7,7 +7,9 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from click.testing import CliRunner
 
+from redactor import cli as redactor_cli
 from redactor import detection
 from redactor.models import Detection, MediaInfo, VideoStreamInfo
 
@@ -314,31 +316,53 @@ def test_missing_adas_model_fails_clearly(tmp_path: Path) -> None:
         detection.OpenVINOFaceADASDetector(missing_xml)
 
 
-def test_backend_selection_keeps_yunet_selectable(monkeypatch: pytest.MonkeyPatch) -> None:
-    created: dict[str, object] = {}
+def test_face_backend_rejects_removed_yunet_selection() -> None:
+    with pytest.raises(ValueError, match="active face detector is openvino_face_adas_0001"):
+        detection.resolve_detector_backend("face", "yunet")
 
-    class FakeYuNet:
-        detector_id = detection.DETECTOR_BACKEND_YUNET
 
-        def __init__(self, model_path: Path, threshold: float):
-            created["model_path"] = model_path
-            created["threshold"] = threshold
+def test_face_pipeline_help_has_no_detector_bakeoff_selector() -> None:
+    result = CliRunner().invoke(redactor_cli.main, ["face-pipeline", "--help"])
 
-        def detect(self, frame: np.ndarray) -> list[Detection]:
-            return []
+    assert result.exit_code == 0
+    assert "--detector-backend" not in result.output
+    assert "yunet" not in result.output.lower()
+    assert "face-detection-adas-0001" in result.output
 
-    monkeypatch.setattr(detection, "FaceYuNetDetector", FakeYuNet)
-    model_path = Path("models/face_detection_yunet_2023mar.onnx")
 
-    detector = detection.create_detector(
-        "face",
-        model_path,
-        0.45,
-        detector_backend=detection.DETECTOR_BACKEND_YUNET,
+def test_removed_face_yunet_backend_is_rejected_by_cli(tmp_path: Path) -> None:
+    input_path = tmp_path / "input.mp4"
+    input_path.write_bytes(b"not a real video")
+
+    detect_result = CliRunner().invoke(
+        redactor_cli.main,
+        [
+            "detect",
+            str(input_path),
+            "--category",
+            "face",
+            "--detector-backend",
+            "yunet",
+            "--output-dir",
+            str(tmp_path / "detect"),
+        ],
+    )
+    pipeline_result = CliRunner().invoke(
+        redactor_cli.main,
+        [
+            "face-pipeline",
+            str(input_path),
+            "--detector-backend",
+            "yunet",
+            "--output-dir",
+            str(tmp_path / "pipeline"),
+        ],
     )
 
-    assert isinstance(detector, FakeYuNet)
-    assert created == {"model_path": model_path, "threshold": 0.45}
+    assert detect_result.exit_code != 0
+    assert "Invalid value for '--detector-backend'" in detect_result.output
+    assert pipeline_result.exit_code != 0
+    assert "No such option '--detector-backend'" in pipeline_result.output
 
 
 def test_backend_selection_defaults_face_to_adas(

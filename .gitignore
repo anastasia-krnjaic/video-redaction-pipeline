@@ -7,8 +7,8 @@ data/raw/*
 artifacts/*
 !artifacts/.gitkeep
 
-# Local model binaries
-models/*.onnx
+# Local model files
+models/**
 !models/.gitkeep
 
 # Python caches

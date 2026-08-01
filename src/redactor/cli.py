@@ -157,16 +157,16 @@ def contact_sheet(
     "model_path",
     required=False,
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
-    help="Model path. For ADAS this is the XML path; for YuNet this is the ONNX path.",
+    help="Model path. For face detection this is the ADAS XML path.",
 )
 @click.option(
     "--detector-backend",
     type=click.Choice(
-        ["openvino_face_adas_0001", "yunet", "license_plate_yunet"],
+        ["openvino_face_adas_0001", "license_plate_yunet"],
         case_sensitive=True,
     ),
     default=None,
-    help="Detector backend. Face detection defaults to openvino_face_adas_0001.",
+    help=("Advanced detector backend. Face detection supports only openvino_face_adas_0001."),
 )
 @click.option(
     "--adas-xml",
@@ -450,6 +450,317 @@ def track(
     click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
 
 
+@main.command("recover-face-gaps")
+@click.argument(
+    "input_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--tracks",
+    "tracks_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Frame-indexed face tracks JSONL path.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory for privacy gap-recovery outputs.",
+)
+@click.option(
+    "--target-track-id",
+    "target_track_ids",
+    multiple=True,
+    required=True,
+    type=int,
+    help="Track id belonging to the privacy target. Repeat for fragmented identities.",
+)
+@click.option(
+    "--keep-track-id",
+    "keep_track_ids",
+    multiple=True,
+    type=int,
+    help="Track id for a keep identity that generated privacy regions must avoid.",
+)
+@click.option(
+    "--competing-track-id",
+    "competing_track_ids",
+    multiple=True,
+    type=int,
+    help="Track id for another identity used as a proximity/switch safety check.",
+)
+@click.option("--frame-start", type=int, default=None, help="Inclusive recovery span start.")
+@click.option("--frame-end", type=int, default=None, help="Inclusive recovery span end.")
+@click.option(
+    "--preserved-regions",
+    "preserved_regions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional accepted privacy-region JSONL to preserve where it already covers a gap.",
+)
+@click.option("--short-interpolation-gap-frames", default=9, show_default=True, type=int)
+@click.option("--max-bridge-gap-frames", default=180, show_default=True, type=int)
+@click.option("--max-one-sided-gap-frames", default=45, show_default=True, type=int)
+@click.option("--max-raw-disagreement-norm", default=1.50, show_default=True, type=float)
+@click.option("--max-refined-disagreement-norm", default=0.75, show_default=True, type=float)
+@click.option("--max-center-jump-norm", default=0.85, show_default=True, type=float)
+@click.option("--max-scale-change", default=0.65, show_default=True, type=float)
+@click.option("--max-keep-overlap-fraction", default=0.01, show_default=True, type=float)
+@click.option("--competing-identity-distance-norm", default=0.35, show_default=True, type=float)
+@click.option("--scene-cut-mean-delta", default=45.0, show_default=True, type=float)
+@click.option(
+    "--visual-refinement",
+    type=click.Choice(["none", "bottom_component"], case_sensitive=True),
+    default="none",
+    show_default=True,
+    help="Optional visual refinement strategy. The bottom-component strategy is opt-in.",
+)
+@click.option(
+    "--conservative-fallback",
+    "conservative_fallback_enabled",
+    is_flag=True,
+    help="Emit conservative fallback review records instead of hard rejection where applicable.",
+)
+@click.option(
+    "--no-preserve-existing-regions",
+    "preserve_existing_regions",
+    flag_value=False,
+    default=True,
+    help="Regenerate gaps even when preserved regions cover them.",
+)
+@click.option("--no-overlay", is_flag=True, help="Skip diagnostic overlay.mp4 generation.")
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+def recover_face_gaps(
+    input_path: Path,
+    tracks_path: Path,
+    output_dir: Path,
+    target_track_ids: tuple[int, ...],
+    keep_track_ids: tuple[int, ...],
+    competing_track_ids: tuple[int, ...],
+    frame_start: int | None,
+    frame_end: int | None,
+    preserved_regions_path: Path | None,
+    short_interpolation_gap_frames: int,
+    max_bridge_gap_frames: int,
+    max_one_sided_gap_frames: int,
+    max_raw_disagreement_norm: float,
+    max_refined_disagreement_norm: float,
+    max_center_jump_norm: float,
+    max_scale_change: float,
+    max_keep_overlap_fraction: float,
+    competing_identity_distance_norm: float,
+    scene_cut_mean_delta: float,
+    visual_refinement: str,
+    conservative_fallback_enabled: bool,
+    preserve_existing_regions: bool,
+    no_overlay: bool,
+    overwrite: bool,
+) -> None:
+    """Recover privacy regions across face-track gaps after ordinary tracking."""
+    from redactor import privacy_gap_recovery
+
+    settings = privacy_gap_recovery.PrivacyGapRecoverySettings(
+        short_interpolation_gap_frames=short_interpolation_gap_frames,
+        max_bridge_gap_frames=max_bridge_gap_frames,
+        max_one_sided_gap_frames=max_one_sided_gap_frames,
+        max_raw_disagreement_norm=max_raw_disagreement_norm,
+        max_refined_disagreement_norm=max_refined_disagreement_norm,
+        max_center_jump_norm=max_center_jump_norm,
+        max_scale_change=max_scale_change,
+        max_keep_overlap_fraction=max_keep_overlap_fraction,
+        competing_identity_distance_norm=competing_identity_distance_norm,
+        scene_cut_mean_delta=scene_cut_mean_delta,
+        enable_visual_refinement=visual_refinement != "none",
+        visual_refinement=visual_refinement,
+        conservative_fallback_enabled=conservative_fallback_enabled,
+        render_overlay=not no_overlay,
+        preserve_existing_regions=preserve_existing_regions,
+    )
+    try:
+        summary = privacy_gap_recovery.run_privacy_gap_recovery(
+            input_path,
+            tracks_path=tracks_path,
+            output_dir=output_dir,
+            target_track_ids=target_track_ids,
+            keep_track_ids=keep_track_ids,
+            competing_track_ids=competing_track_ids,
+            frame_start=frame_start,
+            frame_end=frame_end,
+            preserved_regions_path=preserved_regions_path,
+            settings=settings,
+            overwrite=overwrite,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    metrics = summary["metrics"]
+    click.echo(
+        f"Considered {metrics['gaps_considered']} gaps; "
+        f"{metrics['accepted_intervals']} accepted; "
+        f"{metrics['needs_review_intervals']} need review; "
+        f"{metrics['rejected_intervals']} rejected."
+    )
+    click.echo(
+        f"Recovered {metrics['recovered_frames']} frames; "
+        f"{metrics['unresolved_frames']} unresolved."
+    )
+    click.echo(f"Wrote privacy regions: {output_dir / 'privacy_regions.jsonl'}")
+    click.echo(f"Wrote interval decisions: {output_dir / 'interval_decisions.json'}")
+    click.echo(f"Wrote metrics: {output_dir / 'metrics.json'}")
+    if not no_overlay:
+        click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
+
+
+@main.command("face-pipeline")
+@click.argument(
+    "input_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Root directory for detection, tracking, and privacy gap-recovery outputs.",
+)
+@click.option(
+    "--model",
+    "model_path",
+    required=False,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Face model path. For ADAS this is the XML path.",
+)
+@click.option(
+    "--adas-xml",
+    "adas_xml_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="OpenVINO face-detection-adas-0001 XML path. REDACTOR_ADAS_XML is also honored.",
+)
+@click.option(
+    "--adas-bin",
+    "adas_bin_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="OpenVINO face-detection-adas-0001 BIN path. REDACTOR_ADAS_BIN is also honored.",
+)
+@click.option("--proposal-threshold", default=0.20, show_default=True, type=click.FloatRange(0, 1))
+@click.option("--primary-threshold", default=0.30, show_default=True, type=click.FloatRange(0, 1))
+@click.option("--target-track-id", "target_track_ids", multiple=True, type=int)
+@click.option("--keep-track-id", "keep_track_ids", multiple=True, type=int)
+@click.option("--competing-track-id", "competing_track_ids", multiple=True, type=int)
+@click.option(
+    "--frame-start", type=int, default=None, help="Inclusive privacy recovery span start."
+)
+@click.option("--frame-end", type=int, default=None, help="Inclusive privacy recovery span end.")
+@click.option("--max-frames", type=click.IntRange(min=1), default=None)
+@click.option("--no-detection-overlay", is_flag=True)
+@click.option("--no-recovery-overlay", is_flag=True)
+@click.option("--overwrite", is_flag=True, help="Replace outputs in non-empty output directories.")
+def face_pipeline(
+    input_path: Path,
+    output_dir: Path,
+    model_path: Path | None,
+    adas_xml_path: Path | None,
+    adas_bin_path: Path | None,
+    proposal_threshold: float,
+    primary_threshold: float,
+    target_track_ids: tuple[int, ...],
+    keep_track_ids: tuple[int, ...],
+    competing_track_ids: tuple[int, ...],
+    frame_start: int | None,
+    frame_end: int | None,
+    max_frames: int | None,
+    no_detection_overlay: bool,
+    no_recovery_overlay: bool,
+    overwrite: bool,
+) -> None:
+    """Run face detection, ordinary tracking, and optional privacy gap recovery."""
+    from redactor import detection, privacy_gap_recovery, tracking
+
+    resolved_backend = detection.resolve_detector_backend("face", None)
+    resolved_model_path = resolve_detection_model_path(
+        category="face",
+        detector_backend=resolved_backend,
+        model_path=model_path,
+        adas_xml_path=adas_xml_path,
+    )
+    resolved_adas_bin = (
+        adas_bin_path
+        if resolved_backend == detection.DETECTOR_BACKEND_ADAS and adas_bin_path is not None
+        else (
+            detection.default_adas_bin_path(resolved_model_path)
+            if resolved_backend == detection.DETECTOR_BACKEND_ADAS
+            else None
+        )
+    )
+    detection_dir = output_dir / "detection"
+    tracking_dir = output_dir / "tracking"
+    recovery_dir = output_dir / "privacy_gap_recovery"
+    try:
+        detection_summary = detection.run_detection(
+            input_path,
+            category="face",
+            model_path=resolved_model_path,
+            threshold=proposal_threshold,
+            output_dir=detection_dir,
+            overwrite=overwrite,
+            max_frames=max_frames,
+            detector_backend=resolved_backend,
+            adas_bin_path=resolved_adas_bin,
+            primary_threshold=primary_threshold,
+            write_overlay_video=not no_detection_overlay,
+        )
+        tracking_summary = tracking.run_tracking(
+            input_path,
+            detections_path=detection_dir / "detections.jsonl",
+            output_dir=tracking_dir,
+            strong_threshold=primary_threshold,
+            weak_threshold=proposal_threshold,
+            overwrite=overwrite,
+        )
+        click.echo(
+            f"Detection processed {detection_summary['frames_processed']} frames; "
+            f"tracking produced {tracking_summary['auto_confirmed_tracks']} auto-confirmed tracks."
+        )
+        if target_track_ids:
+            recovery_summary = privacy_gap_recovery.run_privacy_gap_recovery(
+                input_path,
+                tracks_path=tracking_dir / "tracks.jsonl",
+                output_dir=recovery_dir,
+                target_track_ids=target_track_ids,
+                keep_track_ids=keep_track_ids,
+                competing_track_ids=competing_track_ids,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                settings=privacy_gap_recovery.PrivacyGapRecoverySettings(
+                    render_overlay=not no_recovery_overlay,
+                ),
+                overwrite=overwrite,
+            )
+            metrics = recovery_summary["metrics"]
+            click.echo(
+                f"Privacy gap recovery considered {metrics['gaps_considered']} gaps; "
+                f"recovered {metrics['recovered_frames']} frames."
+            )
+        else:
+            click.echo("Skipped privacy gap recovery because no --target-track-id was provided.")
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 def _subprocess_message(exc: subprocess.CalledProcessError) -> str:
     stderr = exc.stderr.strip() if exc.stderr else ""
     return stderr or str(exc)
@@ -469,7 +780,7 @@ def resolve_detection_model_path(
     if model_path is not None:
         return model_path
     if category == "face":
-        raise click.ClickException("YuNet face detection requires --model with an ONNX path")
+        raise click.ClickException("face detection requires an ADAS XML model path")
     if category == "license_plate":
         raise click.ClickException("license-plate detection requires --model with an ONNX path")
     raise click.ClickException(f"unsupported category: {category}")
