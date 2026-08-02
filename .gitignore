@@ -3,6 +3,13 @@ data/raw/*
 !data/raw/.gitkeep
 !data/source.yaml
 
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example
+*.env
+local.env
+
 # Generated artifacts
 artifacts/*
 !artifacts/.gitkeep
@@ -24,6 +31,11 @@ __pycache__/
 venv/
 env/
 ENV/
+
+# Browser and session state
+browser_state/
+session_state/
+.codex/browser_state/
 
 # macOS
 .DS_Store

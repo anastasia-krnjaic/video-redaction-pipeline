@@ -1,5 +1,15 @@
 # System Overview Changelog
 
+## v008 — 2026-08-01
+
+Added Face Redaction Renderer v1 to the documented Face Pipeline:
+
+- documented `render-faces` as the explicit rendering step after privacy gap recovery;
+- added preview and final rendering semantics, including final export blocking for review-required, rejected, unresolved, or invalid privacy regions;
+- documented Gaussian blur, pixelation, privacy margins, provenance-preserving manifests, audio remuxing, and FFprobe media validation;
+- clarified that rendering applies accepted privacy regions without converting them into detector evidence;
+- recorded processed-frame accounting for `--max-frames` so source-video frame counts are distinct from processed-frame counts.
+
 ## v007 — 2026-08-01
 
 Consolidated Face Pipeline v1 around ADAS-only face detection:

@@ -487,6 +487,48 @@ def test_output_contains_one_record_per_input_frame_and_safe_paths(
     assert FakeWriter.instances[0].path == str(output_dir / "overlay.mp4")
 
 
+def test_tracking_summary_distinguishes_source_and_processed_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "video.mp4"
+    detections_path = tmp_path / "detections.jsonl"
+    output_dir = tmp_path / "tracking"
+    write_detections(
+        detections_path,
+        [
+            {
+                "frame_index": 0,
+                "detections": [{"category": "face", "score": 0.9, "bbox_xyxy": [10, 10, 30, 30]}],
+            },
+            {"frame_index": 1, "detections": []},
+        ],
+    )
+    patch_video_io(monkeypatch, frame_count=10)
+    monkeypatch.setattr(
+        tracking.media,
+        "probe_media",
+        lambda path: media_info_for(path, frame_count="10"),
+    )
+
+    summary = tracking.run_tracking(
+        input_path,
+        detections_path=detections_path,
+        output_dir=output_dir,
+        max_gap_seconds=0,
+        overwrite=True,
+    )
+
+    lines = (output_dir / "tracks.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert FakeCapture.instances[0].read_calls == 2
+    assert FakeWriter.instances[0].write_count == 2
+    assert summary["source_video_frame_count"] == 10
+    assert summary["input_detection_frame_count"] == 2
+    assert summary["processed_frame_count"] == 2
+    assert summary["frames_processed"] == 2
+
+
 def test_adas_detection_schema_loads_and_preserves_metadata(tmp_path: Path) -> None:
     detections_path = tmp_path / "adas.detections.jsonl"
     write_detections(

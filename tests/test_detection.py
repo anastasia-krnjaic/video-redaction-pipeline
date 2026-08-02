@@ -513,3 +513,7 @@ def test_max_frames_stops_incremental_video_reads(
 
     assert FakeCapture.instances[0].read_calls == 2
     assert FakeWriter.instances[0].write_count == 2
+    summary = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
+    assert summary["source_video_frame_count"] == 3
+    assert summary["processed_frame_count"] == 2
+    assert summary["frames_processed"] == 2

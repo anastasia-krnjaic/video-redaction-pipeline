@@ -618,6 +618,123 @@ def recover_face_gaps(
         click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
 
 
+@main.command("render-faces")
+@click.argument(
+    "input_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--privacy-regions",
+    "privacy_regions_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Privacy regions JSONL from face gap recovery or preserved reviewed corrections.",
+)
+@click.option(
+    "--interval-decisions",
+    "interval_decisions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional interval decision JSON for final-approval checks.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory for redacted video and render manifests.",
+)
+@click.option(
+    "--output-video",
+    "output_video_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional MP4 output path. Defaults to OUTPUT_DIR/redacted_MODE.mp4.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["preview", "final"], case_sensitive=True),
+    default="preview",
+    show_default=True,
+    help="Preview is visibly non-final; final refuses unsafe or unresolved intervals.",
+)
+@click.option(
+    "--method",
+    type=click.Choice(["gaussian_blur", "pixelate"], case_sensitive=True),
+    default="gaussian_blur",
+    show_default=True,
+    help="Face redaction method.",
+)
+@click.option("--margin-pixels", default=0, show_default=True, type=click.IntRange(min=0))
+@click.option("--margin-fraction", default=0.0, show_default=True, type=float)
+@click.option("--blur-kernel", default=51, show_default=True, type=click.IntRange(min=3))
+@click.option("--pixel-size", default=12, show_default=True, type=click.IntRange(min=2))
+@click.option(
+    "--comparison-frames",
+    default=0,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Optional number of side-by-side diagnostic frames to write.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+def render_faces(
+    input_path: Path,
+    privacy_regions_path: Path,
+    interval_decisions_path: Path | None,
+    output_dir: Path,
+    output_video_path: Path | None,
+    mode: str,
+    method: str,
+    margin_pixels: int,
+    margin_fraction: float,
+    blur_kernel: int,
+    pixel_size: int,
+    comparison_frames: int,
+    overwrite: bool,
+) -> None:
+    """Render accepted face privacy regions into a redacted MP4."""
+    from redactor import rendering
+
+    settings = rendering.RenderSettings(
+        mode=mode,
+        method=method,
+        margin_pixels=margin_pixels,
+        margin_fraction=margin_fraction,
+        blur_kernel=blur_kernel,
+        pixel_size=pixel_size,
+    )
+    try:
+        summary = rendering.run_face_render(
+            input_path,
+            privacy_regions_path=privacy_regions_path,
+            interval_decisions_path=interval_decisions_path,
+            output_dir=output_dir,
+            output_video_path=output_video_path,
+            settings=settings,
+            comparison_frames=comparison_frames,
+            overwrite=overwrite,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Rendered {summary['processed_frame_count']} frames; "
+        f"{summary['rendered_region_count']} privacy regions."
+    )
+    if summary["preview_non_final"]:
+        click.echo("Output is a non-final preview.")
+    else:
+        click.echo(f"Final approval status: {summary['final_approval_status']}")
+    click.echo(f"Wrote video: {output_dir / str(summary['output_video'])}")
+    click.echo(f"Wrote manifest: {output_dir / 'render_manifest.json'}")
+    click.echo(f"Wrote validation: {output_dir / 'validation.json'}")
+
+
 @main.command("face-pipeline")
 @click.argument(
     "input_path",

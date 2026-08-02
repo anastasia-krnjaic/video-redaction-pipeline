@@ -242,7 +242,9 @@ def run_tracking(
     source_info = media.probe_media(input_video)
     frame_rate = source_info.video_stream.nominal_frame_rate
     fps = rational_to_float(frame_rate) or 30.0
-    frame_count = _frame_count(source_info.video_stream.frame_count, detections_path)
+    source_video_frame_count = _optional_int(source_info.video_stream.frame_count)
+    detection_frame_count = detection_record_frame_count(detections_path)
+    frame_count = detection_frame_count
     max_gap_frames = seconds_to_frames(max_gap_seconds, fps)
     backward_frames = seconds_to_frames(backward_seconds, fps)
     max_tail_prediction_frames = seconds_to_frames(max_tail_prediction_seconds, fps)
@@ -294,6 +296,8 @@ def run_tracking(
         detections_path=detections_path,
         source_sha256=source_info.sha256,
         detections_sha256=media.sha256_file(detections_path),
+        source_video_frame_count=source_video_frame_count,
+        detection_frame_count=detection_frame_count,
         strong_threshold=strong_threshold,
         weak_threshold=weak_threshold,
         min_observed_hits=min_observed_hits,
@@ -1296,6 +1300,8 @@ def build_summary(
     detections_path: Path,
     source_sha256: str,
     detections_sha256: str,
+    source_video_frame_count: int | None,
+    detection_frame_count: int,
     strong_threshold: float,
     weak_threshold: float,
     min_observed_hits: int,
@@ -1326,6 +1332,7 @@ def build_summary(
         "elapsed_seconds": round(elapsed_seconds, 6),
         "ended_tracks": result.total_track_proposals,
         "frames_processed": frames_processed,
+        "input_detection_frame_count": detection_frame_count,
         "interpolated_frames": result.interpolated_frames,
         "manual_seed_count": result.manual_seed_count,
         "max_auto_area_fraction": max_auto_area_fraction,
@@ -1340,6 +1347,7 @@ def build_summary(
         "opencv_version": cv.__version__,
         "predicted_frames": result.predicted_frames,
         "processing_fps": round(processing_fps, 6),
+        "processed_frame_count": frames_processed,
         "quality_gate_failure_counts": quality_gate_failure_counts(result.track_qualities),
         "rejected_tracks": len(result.rejected_track_ids),
         "review_candidate_tracks": len(result.review_candidate_track_ids),
@@ -1347,6 +1355,7 @@ def build_summary(
         "review_windows": len(result.review_windows),
         "schema_version": SCHEMA_VERSION,
         "source_filename": input_video.name,
+        "source_video_frame_count": source_video_frame_count,
         "source_sha256": source_sha256,
         "strong_observations": result.strong_observations,
         "strong_threshold": strong_threshold,
@@ -1561,18 +1570,22 @@ def seconds_to_frames(seconds: float, fps: float) -> int:
     return max(0, math.ceil(seconds * fps))
 
 
-def _frame_count(source_frame_count: str | None, detections_path: Path) -> int:
-    if source_frame_count is not None:
-        try:
-            return int(source_frame_count)
-        except ValueError:
-            pass
+def detection_record_frame_count(detections_path: Path) -> int:
     max_frame = -1
     with detections_path.open(encoding="utf-8") as file:
         for line in file:
             if line.strip():
                 max_frame = max(max_frame, int(json.loads(line)["frame_index"]))
     return max_frame + 1
+
+
+def _optional_int(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
 
 
 def _bbox_tuple(values: list[int] | tuple[int, int, int, int]) -> tuple[int, int, int, int]:

@@ -2,7 +2,7 @@
 
 Video Redaction Pipeline is a local Python project for building and auditing a face-redaction workflow on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`).
 
-The pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, and write diagnostic artifacts. Final redaction rendering, a review UI, automated benchmark runners, and license-plate work are not part of the current supported workflow.
+The pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, and render face-redacted preview or approved final MP4s from accepted privacy regions. A full review UI, automated benchmark runners, and license-plate work are not part of the current supported workflow.
 
 ## Install
 
@@ -64,6 +64,22 @@ redactor face-pipeline artifacts/eval_night_selective.mp4 \
 
 Privacy recovery writes machine-readable interval decisions. A gap may be accepted automatically, accepted after configured refinement, marked `needs_review`, or rejected. Synthetic privacy regions never count as raw detector hits.
 
+Render a face-redacted preview or approved final MP4 from the privacy regions:
+
+```bash
+redactor render-faces artifacts/eval_night_selective.mp4 \
+  --privacy-regions artifacts/face_pipeline/night_selective/privacy_gap_recovery/privacy_regions.jsonl \
+  --interval-decisions artifacts/face_pipeline/night_selective/privacy_gap_recovery/interval_decisions.json \
+  --output-dir artifacts/face_pipeline/night_selective/render_preview \
+  --mode preview \
+  --method gaussian_blur \
+  --margin-fraction 0.15 \
+  --comparison-frames 120 \
+  --overwrite
+```
+
+Preview mode may render accepted regions even when some intervals still need review, and the output is explicitly marked non-final. Final mode refuses export when relevant intervals are `needs_review` or `rejected`, when privacy-required frames remain unresolved, or when invalid boxes are present. Preserved reviewed corrections can be rendered in final mode while keeping their provenance.
+
 ## Output Layout
 
 A face-pipeline run writes subdirectories under the output directory:
@@ -73,6 +89,7 @@ A face-pipeline run writes subdirectories under the output directory:
 | `detection/` | `detections.jsonl`, `summary.json`, optional `overlay.mp4`. |
 | `tracking/` | `tracks.jsonl`, `summary.json`, track quality, review flags/windows, contact sheets, and overlay. |
 | `privacy_gap_recovery/` | `privacy_regions.jsonl`, `interval_decisions.json`, `metrics.json`, `summary.json`, optional overlay. Written only when target track IDs are provided. |
+| `render/` or chosen render directory | Redacted MP4, `render_manifest.json`, `render_summary.json`, `validation.json`, `processing_log.jsonl`, and optional comparison clip. |
 
 Generated artifacts belong under `artifacts/` and are ignored by Git.
 
@@ -87,6 +104,7 @@ redactor trim data/raw/bodycam_sample.mp4 artifacts/smoke_clip.mp4 --start 0 --d
 redactor detect artifacts/eval_day_face.mp4 --category face --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin --output-dir artifacts/diagnostics/day_face --overwrite
 redactor track artifacts/eval_day_face.mp4 --detections artifacts/diagnostics/day_face/detections.jsonl --output-dir artifacts/diagnostics/day_face_tracking --overwrite
 redactor recover-face-gaps artifacts/eval_night_selective.mp4 --tracks artifacts/diagnostics/night_tracking/tracks.jsonl --target-track-id 8 --keep-track-id 10 --output-dir artifacts/diagnostics/night_gap_recovery --overwrite
+redactor render-faces artifacts/eval_night_selective.mp4 --privacy-regions artifacts/diagnostics/night_gap_recovery/privacy_regions.jsonl --interval-decisions artifacts/diagnostics/night_gap_recovery/interval_decisions.json --output-dir artifacts/diagnostics/night_render_preview --mode preview --overwrite
 ```
 
 These commands are useful during development, but `face-pipeline` is the supported entry point for the current face workflow.
@@ -101,9 +119,9 @@ Detailed architecture notes live in `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`. The
 
 ## Current Limitations
 
-- The project does not yet produce final redacted video output.
-- Face identity grouping and review decisions are still diagnostic, not a complete analyst workflow.
+- Final face rendering is supported only from accepted privacy-region inputs and remains bounded by the quality of the upstream tracking, recovery, and review evidence.
+- Face identity grouping and review decisions are still diagnostic inputs, not a complete analyst workflow.
 - Privacy gap recovery can reduce temporal gaps, but uncertain intervals must remain review-required.
 - Raw detector recall, tracking coverage, privacy recovery, and final redaction quality are separate claims.
-- No final zero-leak claim has been established.
+- No universal or production-wide zero-leak claim has been established.
 - License-plate detection and plate tracking are intentionally outside the current Face Pipeline v1 cleanup.
