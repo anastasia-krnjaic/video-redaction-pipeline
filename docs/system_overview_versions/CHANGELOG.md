@@ -1,5 +1,16 @@
 # System Overview Changelog
 
+## v009 — 2026-08-02
+
+Added machine-readable face ground truth and automated Face Pipeline v1 evaluation:
+
+- documented `data/ground_truth/redaction_ground_truth_v1.0.json` as the selected machine-readable redaction ground truth for Face Pipeline v1;
+- added `validate-ground-truth` and `evaluate-faces` workflow notes;
+- documented detector, automatic, and reviewed-final evaluation modes;
+- clarified that renderer approval is not by itself a ground-truth privacy-quality result;
+- clarified that tracking, synthetic privacy recovery, and reviewed/preserved corrections do not count as raw detector hits;
+- recorded evaluator outputs and current limits of range-level truth.
+
 ## v008 — 2026-08-01
 
 Added Face Redaction Renderer v1 to the documented Face Pipeline:

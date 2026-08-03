@@ -1,5 +1,14 @@
 # Ground-Truth Changelog
 
+## redaction_ground_truth_v1.0 - 2026-08-02
+
+Created the selected machine-readable redaction-ground-truth schema and Face Pipeline v1 JSON file.
+
+- Derived from frozen `GroundTruth_v1.1.md` and `face_benchmark_v1.1.json`.
+- Preserved existing face semantics, dense windows, detector-scored ranges, detector-ignore ranges, privacy-required ranges, and keep-clear ranges.
+- Added no new per-frame boxes or keyframes.
+- Added schema support for future object classes while evaluating only face objects in this milestone.
+
 ## v1.1 - 2026-07-31
 
 Created after complete human face-visibility verification of `GroundTruth_v1.0.md`.

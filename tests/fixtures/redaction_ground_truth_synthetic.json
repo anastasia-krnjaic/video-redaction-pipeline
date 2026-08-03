@@ -1,0 +1,75 @@
+{
+    "schema_version": "1.0",
+    "ground_truth_id": "synthetic_redaction_ground_truth_v1",
+    "status": "test_fixture",
+    "annotation_scope": {
+        "range_convention": "inclusive_frame_ranges",
+        "box_truth_level": "range_level_truth_with_optional_reference_rois",
+        "notes": ["Compact fixture for face-pipeline evaluation tests."]
+    },
+    "coordinate_system": {
+        "bbox_format": "xyxy",
+        "height": 80,
+        "origin": "top_left",
+        "units": "pixels",
+        "width": 100
+    },
+    "clips": [
+        {
+            "clip_id": "synthetic_clip",
+            "source_video": {
+                "path": "tests/fixtures/synthetic_source.mp4",
+                "sha256": "04c767fd3d68b42476a64bb0c0edec569938a96cf2af218e0af8973e52792233"
+            },
+            "fps": "30/1",
+            "source_frame_count": 10,
+            "duration_seconds": 0.333333,
+            "evaluated_frame_range": [0, 9],
+            "objects": [
+                {
+                    "object_id": "redact_face",
+                    "object_type": "face",
+                    "policy": "redact",
+                    "description": "Synthetic redact face.",
+                    "detector_scored_ranges": [[0, 4], [6, 6]],
+                    "detector_ignore_ranges": [[5, 5]],
+                    "privacy_required_ranges": [[0, 9]],
+                    "keep_clear_ranges": [],
+                    "per_frame_boxes": [],
+                    "keyframe_boxes": [],
+                    "reference_roi_xyxy": [10, 10, 40, 40],
+                    "visibility_notes": ["Frame 5 is detector-ignore but privacy-required."],
+                    "occlusion_notes": [],
+                    "annotation_provenance": {
+                        "source": "tests/fixtures/redaction_ground_truth_synthetic.json",
+                        "reviewed_unique_frames": 10
+                    },
+                    "review_status": "synthetic_fixture"
+                },
+                {
+                    "object_id": "keep_face",
+                    "object_type": "face",
+                    "policy": "keep",
+                    "description": "Synthetic keep face.",
+                    "detector_scored_ranges": [[0, 9]],
+                    "detector_ignore_ranges": [],
+                    "privacy_required_ranges": [],
+                    "keep_clear_ranges": [[0, 9]],
+                    "per_frame_boxes": [],
+                    "keyframe_boxes": [],
+                    "reference_roi_xyxy": [60, 10, 90, 40],
+                    "visibility_notes": ["Keep face must remain unredacted."],
+                    "occlusion_notes": [],
+                    "annotation_provenance": {
+                        "source": "tests/fixtures/redaction_ground_truth_synthetic.json",
+                        "reviewed_unique_frames": 10
+                    },
+                    "review_status": "synthetic_fixture"
+                }
+            ],
+            "review_level": "synthetic"
+        }
+    ],
+    "review_status": "synthetic_fixture",
+    "free_text_notes": ["No per-frame ground-truth boxes are provided."]
+}

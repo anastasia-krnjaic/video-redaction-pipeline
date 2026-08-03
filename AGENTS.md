@@ -12,6 +12,8 @@ A material system change includes any change to detector model or model version,
 
 Default selected face benchmark: `data/ground_truth/face_benchmark_v1.1.json`.
 
+Default selected machine-readable redaction ground truth: `data/ground_truth/redaction_ground_truth_v1.0.json`.
+
 Default selected face detector evidence record: `data/evaluations/face_detector_adas_v1.0/`.
 
 Selected face detector policy:
@@ -38,3 +40,6 @@ Selected face detector policy:
 14. The optional bottom-connected visual-component refinement is strategy-specific and disabled by default; do not encode clip-specific frame numbers, person IDs, or coordinates in production recovery logic.
 15. Face rendering must consume privacy regions without reclassifying them as detector evidence. Preview renders must remain visibly or machine-readably non-final. Final renders must block when relevant intervals need review, are rejected, contain unresolved privacy-required frames, or contain invalid boxes.
 16. When `--max-frames` is used, summaries must distinguish total source-video frames from the frames actually processed by detection, tracking, recovery, or rendering.
+17. Face evaluation must use `redactor evaluate-faces` modes explicitly: `detector`, `automatic`, or `reviewed_final`. Never count tracking, synthetic privacy bridges, preserved regions, or reviewed corrections as raw detector hits.
+18. Machine-readable redaction ground truth may represent range-level truth, detector-scored ranges, detector-ignore ranges, privacy-required ranges, and optional boxes only where boxes actually exist. Do not invent per-frame boxes for evaluation.
+19. Renderer approval is not by itself ground-truth privacy-quality proof. The evaluator must separately attribute detector, ordinary-tracker, automatic privacy recovery, preserved/reviewed corrections, and rendering evidence.

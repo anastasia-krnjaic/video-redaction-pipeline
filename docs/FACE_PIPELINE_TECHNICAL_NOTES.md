@@ -153,6 +153,51 @@ Preserved reviewed corrections are renderable in final mode, but their provenanc
 
 FFprobe validation records expected and observed resolution, frame rate, frame count, duration, audio presence, and audio stream duration when present. MP4 container frame counts may differ from decoded writer counts by a small documented tolerance; the renderer records both the internal rendered-frame count and FFprobe validation result.
 
+## Machine-Readable Ground Truth And Evaluation
+
+The selected machine-readable redaction ground truth is `data/ground_truth/redaction_ground_truth_v1.0.json`. It derives from frozen GroundTruth v1.1 and the face benchmark v1.1 JSON. It supports future object types such as license plates, but the current evaluator only scores face objects.
+
+The schema records:
+
+- clip ID, source video hash, FPS, source frame count, and evaluated frame range;
+- object ID, object type, and policy (`redact`, `keep`, or `ignore`);
+- detector-scored ranges;
+- detector-ignore ranges;
+- privacy-required ranges;
+- keep-clear ranges;
+- optional per-frame boxes or keyframes only when those annotations actually exist;
+- visibility, occlusion, provenance, review status, and notes.
+
+`redactor validate-ground-truth` validates required fields, frame ranges, policies, object IDs, boxes, contradictory ranges, and optional source-video hashes.
+
+`redactor evaluate-faces` writes:
+
+- `metrics.json`;
+- `object_metrics.json`;
+- `interval_decisions.json`;
+- `failures.json`;
+- `render_validation.json`;
+- `summary_table.csv`;
+- `report.md`;
+- concise failure visual evidence when a decodable source video is available.
+
+Evaluation modes:
+
+- `detector`: raw ADAS observations only. The evaluator uses the corrected ADAS adjudication as identity truth for detector-scored frames. Tracking, synthetic privacy boxes, and reviewed corrections never count as detector hits.
+- `automatic`: detector, ordinary tracking, and automatically accepted privacy recovery. Preserved or manual reviewed corrections are excluded, and unresolved or review-required privacy frames keep the run in `review_required`.
+- `reviewed_final`: includes explicitly reviewed or preserved corrections and can validate the rendered-video manifest, output hash, and FFprobe media checks.
+
+Final statuses are:
+
+- `detector_evaluated`;
+- `review_required`;
+- `passed_automatic`;
+- `passed_reviewed_final`;
+- `failed_privacy_acceptance`;
+- `failed_input_validation`.
+
+Because current face truth is range-level, the evaluator reports object-frame recall and frame coverage. It does not claim IoU accuracy, pixel-level rendered privacy, or universal zero-leak performance.
+
 ## Processed-Frame Accounting
 
 Detection and tracking summaries distinguish:

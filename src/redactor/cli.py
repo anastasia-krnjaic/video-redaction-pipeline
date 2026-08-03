@@ -735,6 +735,202 @@ def render_faces(
     click.echo(f"Wrote validation: {output_dir / 'validation.json'}")
 
 
+@main.command("validate-ground-truth")
+@click.argument(
+    "ground_truth_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--source-video",
+    "source_video_values",
+    multiple=True,
+    help="Optional clip_id=video_path source hash validation. Repeat per clip.",
+)
+def validate_ground_truth(
+    ground_truth_path: Path,
+    source_video_values: tuple[str, ...],
+) -> None:
+    """Validate machine-readable redaction ground truth."""
+    from redactor import evaluation
+
+    source_video_paths = _parse_source_video_values(source_video_values)
+    try:
+        result = evaluation.validate_ground_truth_file(
+            ground_truth_path,
+            source_video_paths=source_video_paths,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Ground truth {result['ground_truth_id']} schema {result['schema_version']}: "
+        f"{result['status']} ({result['error_count']} errors)"
+    )
+    for error in result["errors"]:
+        click.echo(f"- {error}")
+    if result["status"] != "valid":
+        raise click.ClickException("ground-truth validation failed")
+
+
+@main.command("evaluate-faces")
+@click.option(
+    "--ground-truth",
+    "ground_truth_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Machine-readable redaction ground-truth JSON.",
+)
+@click.option("--clip-id", required=True, help="Clip id inside the ground-truth file.")
+@click.option(
+    "--mode",
+    required=True,
+    type=click.Choice(["detector", "automatic", "reviewed_final"], case_sensitive=True),
+    help="Evaluation mode.",
+)
+@click.option(
+    "--source-video",
+    "source_video_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Source video for hash validation and visual evidence.",
+)
+@click.option(
+    "--detections",
+    "detections_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="ADAS detection JSONL.",
+)
+@click.option(
+    "--adjudication",
+    "adjudication_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Corrected ADAS adjudication JSON for detector identity anchors.",
+)
+@click.option(
+    "--tracks",
+    "tracks_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Ordinary face-tracking JSONL.",
+)
+@click.option(
+    "--privacy-regions",
+    "privacy_regions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Privacy-region JSONL from gap recovery or preserved reviewed corrections.",
+)
+@click.option(
+    "--interval-decisions",
+    "interval_decisions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Privacy gap interval-decision JSON.",
+)
+@click.option(
+    "--preserved-regions",
+    "preserved_regions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional preserved reviewed regions used by reviewed_final runs.",
+)
+@click.option(
+    "--rendered-video",
+    "rendered_video_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional rendered output video.",
+)
+@click.option(
+    "--render-manifest",
+    "render_manifest_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional render_manifest.json.",
+)
+@click.option(
+    "--render-validation",
+    "render_validation_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional renderer validation.json.",
+)
+@click.option(
+    "--detector-threshold",
+    default=0.30,
+    show_default=True,
+    type=click.FloatRange(0, 1),
+    help="Primary detector threshold used for detector recall.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory for evaluation reports.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+def evaluate_faces(
+    ground_truth_path: Path,
+    clip_id: str,
+    mode: str,
+    source_video_path: Path,
+    detections_path: Path,
+    adjudication_path: Path | None,
+    tracks_path: Path | None,
+    privacy_regions_path: Path | None,
+    interval_decisions_path: Path | None,
+    preserved_regions_path: Path | None,
+    rendered_video_path: Path | None,
+    render_manifest_path: Path | None,
+    render_validation_path: Path | None,
+    detector_threshold: float,
+    output_dir: Path,
+    overwrite: bool,
+) -> None:
+    """Evaluate the face pipeline against machine-readable ground truth."""
+    from redactor import evaluation
+
+    try:
+        metrics = evaluation.run_face_evaluation(
+            ground_truth_path=ground_truth_path,
+            clip_id=clip_id,
+            mode=mode,
+            source_video_path=source_video_path,
+            detections_path=detections_path,
+            output_dir=output_dir,
+            adjudication_path=adjudication_path,
+            tracks_path=tracks_path,
+            privacy_regions_path=privacy_regions_path,
+            interval_decisions_path=interval_decisions_path,
+            preserved_regions_path=preserved_regions_path,
+            rendered_video_path=rendered_video_path,
+            render_manifest_path=render_manifest_path,
+            render_validation_path=render_validation_path,
+            detector_threshold=detector_threshold,
+            overwrite=overwrite,
+        )
+    except (FileExistsError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Evaluation status: {metrics['acceptance']['final_status']} "
+        f"for {metrics['clip_id']} ({metrics['evaluation_mode']})"
+    )
+    click.echo(
+        f"Detector recall: {metrics['detector']['frames_with_valid_detection']}/"
+        f"{metrics['detector']['detector_scored_object_frames']} "
+        f"({metrics['detector']['object_frame_recall']})"
+    )
+    click.echo(
+        f"Privacy coverage: {metrics['privacy']['covered_privacy_frames']}/"
+        f"{metrics['privacy']['privacy_required_frames']} "
+        f"({metrics['privacy']['privacy_coverage']})"
+    )
+    click.echo(f"Wrote evaluation report: {output_dir / 'report.md'}")
+
+
 @main.command("face-pipeline")
 @click.argument(
     "input_path",
@@ -881,6 +1077,18 @@ def face_pipeline(
 def _subprocess_message(exc: subprocess.CalledProcessError) -> str:
     stderr = exc.stderr.strip() if exc.stderr else ""
     return stderr or str(exc)
+
+
+def _parse_source_video_values(values: tuple[str, ...]) -> dict[str, Path]:
+    parsed: dict[str, Path] = {}
+    for value in values:
+        if "=" not in value:
+            raise click.ClickException("--source-video must use clip_id=path")
+        clip_id, raw_path = value.split("=", 1)
+        if not clip_id or not raw_path:
+            raise click.ClickException("--source-video must use clip_id=path")
+        parsed[clip_id] = Path(raw_path)
+    return parsed
 
 
 def resolve_detection_model_path(

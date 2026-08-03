@@ -1,0 +1,163 @@
+{
+    "schema_version": "1.0",
+    "schema": "data/ground_truth/redaction_ground_truth_schema_v1.0.json",
+    "ground_truth_id": "redaction_ground_truth_v1.0",
+    "status": "selected_machine_readable_face_ground_truth",
+    "created_from": {
+        "human_readable_ground_truth": "data/ground_truth/GroundTruth_v1.1.md",
+        "human_readable_ground_truth_sha256": "1aaabb73a8dfbd6b75e6116f037d3263d760bbcb54757da910b19a7229b66065",
+        "face_benchmark": "data/ground_truth/face_benchmark_v1.1.json",
+        "face_benchmark_sha256": "eeac399a8181f8e80a05967cd5cb0b0504deae3f767d950275f2d44360370c92",
+        "ground_truth_version": "1.1"
+    },
+    "annotation_scope": {
+        "certification": "GOLD_DENSE_WINDOWS_ONLY",
+        "frame_indexing": "zero_based",
+        "range_convention": "inclusive_frame_ranges",
+        "box_truth_level": "range_level_truth_with_optional_reference_rois",
+        "per_frame_boxes_available": false,
+        "keyframe_boxes_available": false,
+        "reviewed_privacy_regions_are_pipeline_evidence_not_ground_truth": true,
+        "notes": [
+            "This file consolidates existing frozen GroundTruth v1.1 face semantics into a general redaction-object schema.",
+            "It does not add new annotations or boxes.",
+            "Reference ROIs are review/search aids, not tight scoring boxes."
+        ]
+    },
+    "coordinate_system": {
+        "bbox_format": "xyxy",
+        "height": 1080,
+        "origin": "top_left",
+        "units": "pixels",
+        "width": 1920
+    },
+    "clips": [
+        {
+            "clip_id": "day_face",
+            "source_video": {
+                "path": "artifacts/eval_day_face.mp4",
+                "sha256": "fa131aa652a1f4bf3b88b88f66522bf8cd34cae23655da9a10cb053a6cb4c33d"
+            },
+            "fps": "30000/1001",
+            "source_frame_count": 1079,
+            "duration_seconds": 36.002633,
+            "evaluated_frame_range": [300, 599],
+            "review_level": "GOLD_DENSE",
+            "objects": [
+                {
+                    "object_id": "person_day_01",
+                    "object_type": "face",
+                    "policy": "redact",
+                    "description": "Face of the stopped man in the blue-and-white patterned shirt beside the white police vehicle.",
+                    "detector_scored_ranges": [[300, 599]],
+                    "detector_ignore_ranges": [],
+                    "privacy_required_ranges": [[300, 599]],
+                    "keep_clear_ranges": [],
+                    "per_frame_boxes": [],
+                    "keyframe_boxes": [],
+                    "reference_roi_xyxy": [960, 80, 1360, 520],
+                    "visibility_notes": [
+                        "Facial region is present in 300/300 evaluated frames.",
+                        "Extreme profile/head-away view occurs around parent frames 480-512 but remains detector-scored."
+                    ],
+                    "occlusion_notes": [
+                        "Profile rotation and partial self-occlusion are present but do not remove the face from the detector-scored set."
+                    ],
+                    "annotation_provenance": {
+                        "source": "data/ground_truth/GroundTruth_v1.1.md",
+                        "source_section": "7.2 Daytime face",
+                        "reviewed_unique_frames": 300,
+                        "reviewed_target_decisions": 300
+                    },
+                    "review_status": "frozen_gold_dense",
+                    "notes": "No tight per-frame boxes are available in GroundTruth v1.1."
+                }
+            ]
+        },
+        {
+            "clip_id": "night_selective",
+            "source_video": {
+                "path": "artifacts/eval_night_selective.mp4",
+                "sha256": "0b55aa3a497941711ac8634a049c557637e20928e8d3bd8b63e5b030b6b272e0"
+            },
+            "fps": "30000/1001",
+            "source_frame_count": 1589,
+            "duration_seconds": 53.019633,
+            "evaluated_frame_range": [420, 779],
+            "review_level": "GOLD_DENSE",
+            "objects": [
+                {
+                    "object_id": "person_night_01",
+                    "object_type": "face",
+                    "policy": "keep",
+                    "description": "Standing person centered near the white pickup; lower face covered by a gaiter/mask.",
+                    "detector_scored_ranges": [[420, 779]],
+                    "detector_ignore_ranges": [],
+                    "privacy_required_ranges": [],
+                    "keep_clear_ranges": [[420, 779]],
+                    "per_frame_boxes": [],
+                    "keyframe_boxes": [],
+                    "reference_roi_xyxy": [380, 120, 800, 500],
+                    "visibility_notes": [
+                        "Upper face/eyes are localizable in 360/360 evaluated frames.",
+                        "The lower face is covered, but the instance remains detector-scored."
+                    ],
+                    "occlusion_notes": [
+                        "Lower-face covering is not detector-ignore for this target."
+                    ],
+                    "annotation_provenance": {
+                        "source": "data/ground_truth/GroundTruth_v1.1.md",
+                        "source_section": "7.3 person_night_01",
+                        "reviewed_unique_frames": 360,
+                        "reviewed_target_decisions": 360
+                    },
+                    "review_status": "frozen_gold_dense",
+                    "notes": "This is a keep target; redaction of the identifiable face area is a selective-redaction false positive."
+                },
+                {
+                    "object_id": "person_night_02",
+                    "object_type": "face",
+                    "policy": "redact",
+                    "description": "Seated/crouched person wearing a black cap near the lower-right portion of the frame.",
+                    "detector_scored_ranges": [[426, 441], [479, 479], [484, 501], [536, 692]],
+                    "detector_ignore_ranges": [
+                        [420, 425],
+                        [442, 478],
+                        [480, 483],
+                        [502, 535],
+                        [693, 779]
+                    ],
+                    "privacy_required_ranges": [[420, 779]],
+                    "keep_clear_ranges": [],
+                    "per_frame_boxes": [],
+                    "keyframe_boxes": [],
+                    "reference_roi_xyxy": [1160, 620, 1760, 1080],
+                    "visibility_notes": [
+                        "Detector-scored visible/partial-face frames total 192.",
+                        "Detector-ignore cap/edge-only frames total 168.",
+                        "Continuous conservative privacy redaction is required for 360 frames."
+                    ],
+                    "occlusion_notes": [
+                        "Cap/head remains visible during detector-ignore ranges, but no defensible facial region is available.",
+                        "Detector-ignore frames are excluded from raw detector recall and still require privacy continuity."
+                    ],
+                    "annotation_provenance": {
+                        "source": "data/ground_truth/GroundTruth_v1.1.md",
+                        "source_section": "7.3 person_night_02",
+                        "reviewed_unique_frames": 360,
+                        "reviewed_target_decisions": 360,
+                        "face_visibility_verification": "data/ground_truth/verifications/face_visibility_verification_v1.1.completed.json"
+                    },
+                    "review_status": "frozen_gold_dense",
+                    "notes": "The single detector-scored parent frame 479 is intentionally preserved."
+                }
+            ]
+        }
+    ],
+    "review_status": "derived_from_frozen_ground_truth_without_semantic_change",
+    "free_text_notes": [
+        "This version is selected for automated Face Pipeline v1 evaluation.",
+        "License-plate objects remain in the human-readable GroundTruth v1.1 document but are not evaluated by the face evaluator.",
+        "Reviewed privacy bridge regions are supplied to the evaluator as pipeline evidence, not as ground-truth boxes."
+    ]
+}

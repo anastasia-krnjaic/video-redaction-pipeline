@@ -1,0 +1,52 @@
+{
+    "schema_id": "redaction_ground_truth_schema_v1.0",
+    "schema_version": "1.0",
+    "description": "Machine-readable redaction ground-truth schema for range-level object policy, visibility, and privacy requirements. The schema supports face objects now and license-plate objects in later milestones.",
+    "coordinate_system": {"bbox_format": "xyxy", "origin": "top_left", "units": "pixels"},
+    "required_top_level_fields": ["schema_version", "ground_truth_id", "clips"],
+    "clip_fields": {
+        "required": [
+            "clip_id",
+            "source_video",
+            "fps",
+            "source_frame_count",
+            "evaluated_frame_range",
+            "objects"
+        ],
+        "source_video": {"required": ["path", "sha256"]}
+    },
+    "object_fields": {
+        "required": [
+            "object_id",
+            "object_type",
+            "policy",
+            "detector_scored_ranges",
+            "detector_ignore_ranges",
+            "privacy_required_ranges",
+            "keep_clear_ranges",
+            "annotation_provenance",
+            "review_status"
+        ],
+        "object_type_values": ["face", "license_plate"],
+        "policy_values": ["redact", "keep", "ignore"],
+        "range_format": ["start_frame_inclusive", "end_frame_inclusive"],
+        "optional_box_fields": ["per_frame_boxes", "keyframe_boxes", "reference_roi_xyxy"]
+    },
+    "validation_rules": [
+        "schema_version must be supported by the evaluator",
+        "clip IDs must be unique",
+        "object IDs must be unique within the file",
+        "frame ranges must be inclusive integer pairs with start <= end",
+        "frame ranges must be inside source_frame_count",
+        "evaluated_frame_range must be inside source_frame_count",
+        "policies must be redact, keep, or ignore",
+        "object_type must be face or license_plate",
+        "redact objects may have privacy_required_ranges",
+        "keep objects may have keep_clear_ranges",
+        "detector_scored_ranges and detector_ignore_ranges must not overlap for the same object",
+        "privacy_required_ranges and keep_clear_ranges must not overlap for the same object",
+        "bbox coordinates must be four numbers in xyxy order and must have positive area",
+        "source_video.sha256 must match the local source video when the source video is provided for validation",
+        "range-level truth must not be upgraded to per-frame box truth unless per-frame boxes actually exist"
+    ]
+}

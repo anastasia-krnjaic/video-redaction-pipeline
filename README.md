@@ -2,7 +2,7 @@
 
 Video Redaction Pipeline is a local Python project for building and auditing a face-redaction workflow on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`).
 
-The pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, and render face-redacted preview or approved final MP4s from accepted privacy regions. A full review UI, automated benchmark runners, and license-plate work are not part of the current supported workflow.
+The pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, and evaluate those outputs against machine-readable face ground truth. A full review UI and license-plate work are not part of the current supported workflow.
 
 ## Install
 
@@ -80,6 +80,49 @@ redactor render-faces artifacts/eval_night_selective.mp4 \
 
 Preview mode may render accepted regions even when some intervals still need review, and the output is explicitly marked non-final. Final mode refuses export when relevant intervals are `needs_review` or `rejected`, when privacy-required frames remain unresolved, or when invalid boxes are present. Preserved reviewed corrections can be rendered in final mode while keeping their provenance.
 
+## Face Evaluation
+
+The selected machine-readable face ground truth is:
+
+```text
+data/ground_truth/redaction_ground_truth_v1.0.json
+```
+
+It derives from frozen GroundTruth v1.1 without adding new boxes or per-frame annotations. Validate it against local source clips:
+
+```bash
+redactor validate-ground-truth data/ground_truth/redaction_ground_truth_v1.0.json \
+  --source-video day_face=artifacts/eval_day_face.mp4 \
+  --source-video night_selective=artifacts/eval_night_selective.mp4
+```
+
+Run the automated evaluator in one of three explicit modes:
+
+```bash
+redactor evaluate-faces \
+  --ground-truth data/ground_truth/redaction_ground_truth_v1.0.json \
+  --clip-id night_selective \
+  --mode automatic \
+  --source-video artifacts/eval_night_selective.mp4 \
+  --detections artifacts/adas_detector_integration_parity_v1/night_integrated.detections.jsonl \
+  --adjudication data/evaluations/face_detector_adas_v1.0/adjudication.completed.corrected.json \
+  --tracks artifacts/adas_integrated_tracking_validation_v1/runs/current_cli_default/night/tracks.jsonl \
+  --privacy-regions artifacts/face_renderer_v1/night_auto_preview/recovery/privacy_regions.jsonl \
+  --interval-decisions artifacts/face_renderer_v1/night_auto_preview/recovery/interval_decisions.json \
+  --output-dir artifacts/face_pipeline_evaluation_v1/night_automatic \
+  --overwrite
+```
+
+Evaluation modes:
+
+| Mode | Meaning |
+| --- | --- |
+| `detector` | Raw ADAS observations only. Tracking and privacy regions do not count as detector hits. |
+| `automatic` | Detector, ordinary tracking, and automatically accepted privacy recovery. Preserved/manual corrections are excluded. |
+| `reviewed_final` | Includes explicitly reviewed or preserved corrections and may validate the rendered video manifest/media. |
+
+The evaluator reports detector recall, tracking coverage, privacy coverage, provenance counts, unresolved frames, interval decisions, render-manifest consistency, and failure-focused visual evidence. It does not claim pixel-level privacy verification unless that measurement is explicitly implemented.
+
 ## Output Layout
 
 A face-pipeline run writes subdirectories under the output directory:
@@ -113,6 +156,8 @@ These commands are useful during development, but `face-pipeline` is the support
 
 The selected detector evidence record lives in `data/evaluations/face_detector_adas_v1.0/`. It records the ADAS-only corrected adjudication, raw-detector metrics, selected thresholds, and FPS provenance audit.
 
+The current machine-readable redaction ground truth is `data/ground_truth/redaction_ground_truth_v1.0.json`. Current non-authoritative automated evaluation artifacts are written under `artifacts/face_pipeline_evaluation_v1/`.
+
 The earlier three-model face detector comparison is preserved as history under `docs/archive/face_detector_bakeoff/`. OpenCV YuNet and OpenVINO `face-detection-0205` are not active face detector backends and are not selectable in the supported face pipeline.
 
 Detailed architecture notes live in `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`. The broader system explanation lives in `docs/SYSTEM_OVERVIEW.md`.
@@ -123,5 +168,6 @@ Detailed architecture notes live in `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`. The
 - Face identity grouping and review decisions are still diagnostic inputs, not a complete analyst workflow.
 - Privacy gap recovery can reduce temporal gaps, but uncertain intervals must remain review-required.
 - Raw detector recall, tracking coverage, privacy recovery, and final redaction quality are separate claims.
+- Automated evaluation currently uses range-level face truth and reviewed pipeline evidence; it does not invent missing per-frame boxes.
 - No universal or production-wide zero-leak claim has been established.
 - License-plate detection and plate tracking are intentionally outside the current Face Pipeline v1 cleanup.

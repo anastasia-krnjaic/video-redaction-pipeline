@@ -9,9 +9,13 @@ Versioned `GroundTruth_*.md` files are immutable semantic sources of truth for f
 
 `face_benchmark_v1.1.json` is the current machine-readable face-evaluation mirror of `GroundTruth_v1.1.md`. The Markdown remains authoritative if a human-readable statement and the JSON appear to disagree.
 
+`redaction_ground_truth_v1.0.json` is the selected machine-readable redaction-ground-truth file for Face Pipeline v1 automated evaluation. It derives from GroundTruth v1.1 and `face_benchmark_v1.1.json` without adding new boxes or changing semantics. Its companion schema description is `redaction_ground_truth_schema_v1.0.json`.
+
 A new semantic version is required if mappings, targets, actions, scored ranges, ignore ranges, dense intervals, or acceptance rules change.
 
 Detector recall and final redaction coverage are separate metrics. Detector recall is scored only on detector-scored frames and requires visual target correspondence. Final redaction coverage may use reviewed tracking and interpolation.
+
+Automated evaluation must keep detector, ordinary tracking, synthetic privacy recovery, reviewed/preserved corrections, and rendering evidence separate.
 
 Reference ROIs are search aids, not tight scoring boxes. Exact detector-hit adjudication requires visual target correspondence.
 
