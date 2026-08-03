@@ -931,6 +931,246 @@ def evaluate_faces(
     click.echo(f"Wrote evaluation report: {output_dir / 'report.md'}")
 
 
+@main.command("build-review-bundle")
+@click.option(
+    "--source-video",
+    "source_video_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Source video used by the pipeline.",
+)
+@click.option("--case-id", default=None, help="Stable case or clip id for the bundle.")
+@click.option(
+    "--detections",
+    "detections_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional detection JSONL.",
+)
+@click.option(
+    "--tracks",
+    "tracks_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional tracking JSONL.",
+)
+@click.option(
+    "--track-quality",
+    "track_quality_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional track_quality.json.",
+)
+@click.option(
+    "--track-review-flags",
+    "track_review_flags_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional review_flags.json from tracking.",
+)
+@click.option(
+    "--track-review-windows",
+    "track_review_windows_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional review_windows.json from tracking.",
+)
+@click.option(
+    "--privacy-regions",
+    "privacy_regions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional privacy_regions.jsonl.",
+)
+@click.option(
+    "--interval-decisions",
+    "interval_decisions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional interval_decisions.json.",
+)
+@click.option(
+    "--render-manifest",
+    "render_manifest_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional render_manifest.json.",
+)
+@click.option(
+    "--render-validation",
+    "render_validation_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional renderer validation.json.",
+)
+@click.option(
+    "--automatic-preview-video",
+    "automatic_preview_video_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional automatic preview video for evidence clips.",
+)
+@click.option(
+    "--reviewed-final-video",
+    "reviewed_final_video_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional reviewed-final video for evidence clips.",
+)
+@click.option(
+    "--evaluation-dir",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Optional evaluator output directory.",
+)
+@click.option(
+    "--ground-truth",
+    "ground_truth_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional machine-readable ground truth for manifesting benchmark context.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Review bundle output directory.",
+)
+@click.option("--random-sample-count", default=3, show_default=True, type=click.IntRange(min=0))
+@click.option(
+    "--random-sample-frames",
+    default=24,
+    show_default=True,
+    type=click.IntRange(min=1),
+)
+@click.option("--random-seed", default=20260803, show_default=True, type=int)
+@click.option("--merge-gap-frames", default=12, show_default=True, type=click.IntRange(min=0))
+@click.option("--context-frames", default=18, show_default=True, type=click.IntRange(min=0))
+@click.option("--no-visuals", is_flag=True, help="Skip clip/contact-sheet generation.")
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+def build_review_bundle(
+    source_video_path: Path,
+    case_id: str | None,
+    detections_path: Path | None,
+    tracks_path: Path | None,
+    track_quality_path: Path | None,
+    track_review_flags_path: Path | None,
+    track_review_windows_path: Path | None,
+    privacy_regions_path: Path | None,
+    interval_decisions_path: Path | None,
+    render_manifest_path: Path | None,
+    render_validation_path: Path | None,
+    automatic_preview_video_path: Path | None,
+    reviewed_final_video_path: Path | None,
+    evaluation_dir: Path | None,
+    ground_truth_path: Path | None,
+    output_dir: Path,
+    random_sample_count: int,
+    random_sample_frames: int,
+    random_seed: int,
+    merge_gap_frames: int,
+    context_frames: int,
+    no_visuals: bool,
+    overwrite: bool,
+) -> None:
+    """Build a local HTML review bundle from face pipeline evidence."""
+    from redactor import review_bundle
+
+    config = review_bundle.ReviewBundleConfig(
+        case_id=case_id,
+        random_sample_count=random_sample_count,
+        random_sample_frame_count=random_sample_frames,
+        random_seed=random_seed,
+        merge_gap_frames=merge_gap_frames,
+        context_frames=context_frames,
+        generate_visuals=not no_visuals,
+    )
+    try:
+        summary = review_bundle.build_review_bundle(
+            source_video_path=source_video_path,
+            output_dir=output_dir,
+            config=config,
+            detections_path=detections_path,
+            tracks_path=tracks_path,
+            track_quality_path=track_quality_path,
+            track_review_flags_path=track_review_flags_path,
+            track_review_windows_path=track_review_windows_path,
+            privacy_regions_path=privacy_regions_path,
+            interval_decisions_path=interval_decisions_path,
+            render_manifest_path=render_manifest_path,
+            render_validation_path=render_validation_path,
+            automatic_preview_video_path=automatic_preview_video_path,
+            reviewed_final_video_path=reviewed_final_video_path,
+            evaluation_dir=evaluation_dir,
+            ground_truth_path=ground_truth_path,
+            overwrite=overwrite,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        if isinstance(exc, subprocess.CalledProcessError):
+            raise click.ClickException(_subprocess_message(exc)) from exc
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Built review bundle: {summary['total_items']} items, "
+        f"{summary['blocking_items']} blocking."
+    )
+    click.echo(f"Open: {output_dir / 'index.html'}")
+
+
+@main.command("validate-review-decisions")
+@click.option(
+    "--queue",
+    "queue_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="review_queue.json from a review bundle.",
+)
+@click.option(
+    "--decisions",
+    "decisions_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Exported review decisions JSON.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional validation JSON output path.",
+)
+def validate_review_decisions(
+    queue_path: Path,
+    decisions_path: Path,
+    output_path: Path | None,
+) -> None:
+    """Validate exported local review decisions against a review queue."""
+    from redactor import review_bundle
+
+    try:
+        result = review_bundle.validate_review_decisions(queue_path, decisions_path)
+        if output_path is not None:
+            review_bundle.write_json(output_path, result)
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Review decisions {result['status']}: {result['decision_count']} decisions, "
+        f"{result['unresolved_blocking_item_count']} unresolved blocking items."
+    )
+    if result["errors"]:
+        for error in result["errors"]:
+            click.echo(f"- {error}")
+        raise click.ClickException("review decision validation failed")
+
+
 @main.command("face-pipeline")
 @click.argument(
     "input_path",

@@ -2,7 +2,7 @@
 
 Video Redaction Pipeline is a local Python project for building and auditing a face-redaction workflow on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`).
 
-The pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, and evaluate those outputs against machine-readable face ground truth. A full review UI and license-plate work are not part of the current supported workflow.
+The pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. A full correction UI and license-plate work are not part of the current supported workflow.
 
 ## Install
 
@@ -123,6 +123,34 @@ Evaluation modes:
 
 The evaluator reports detector recall, tracking coverage, privacy coverage, provenance counts, unresolved frames, interval decisions, render-manifest consistency, and failure-focused visual evidence. It does not claim pixel-level privacy verification unless that measurement is explicitly implemented.
 
+## Review Bundles
+
+After rendering or evaluation, build a compact local bundle so a reviewer can inspect risky intervals without opening the full video or reading JSON by hand:
+
+```bash
+redactor build-review-bundle \
+  --source-video artifacts/eval_night_selective.mp4 \
+  --case-id night_automatic_review_v1 \
+  --privacy-regions artifacts/face_renderer_v1/night_auto_preview/recovery/privacy_regions.jsonl \
+  --interval-decisions artifacts/face_renderer_v1/night_auto_preview/recovery/interval_decisions.json \
+  --render-manifest artifacts/face_renderer_v1/night_auto_preview/render_preview/render_manifest.json \
+  --render-validation artifacts/face_renderer_v1/night_auto_preview/render_preview/validation.json \
+  --automatic-preview-video artifacts/face_renderer_v1/night_auto_preview/render_preview/redacted_preview.mp4 \
+  --evaluation-dir artifacts/face_pipeline_evaluation_v1/night_automatic \
+  --output-dir artifacts/review/night_automatic \
+  --overwrite
+```
+
+The bundle contains `index.html`, a review queue, contact sheets, short evidence clips, local CSS/JS, a checklist, and a decision-export template. It separates pipeline-derived risk, Ground-Truth-only benchmark evidence, and deterministic random audit samples. A clean queue does not prove that every missed face was found.
+
+Reviewer choices are stored in browser-local state until explicitly exported. Validate an exported decisions file with:
+
+```bash
+redactor validate-review-decisions \
+  --queue artifacts/review/night_automatic/review_queue.json \
+  --decisions artifacts/review/night_automatic/decisions/review_decisions.json
+```
+
 ## Output Layout
 
 A face-pipeline run writes subdirectories under the output directory:
@@ -133,6 +161,7 @@ A face-pipeline run writes subdirectories under the output directory:
 | `tracking/` | `tracks.jsonl`, `summary.json`, track quality, review flags/windows, contact sheets, and overlay. |
 | `privacy_gap_recovery/` | `privacy_regions.jsonl`, `interval_decisions.json`, `metrics.json`, `summary.json`, optional overlay. Written only when target track IDs are provided. |
 | `render/` or chosen render directory | Redacted MP4, `render_manifest.json`, `render_summary.json`, `validation.json`, `processing_log.jsonl`, and optional comparison clip. |
+| review bundle directory | Local `index.html`, queue/summary/config JSON, contact sheets, short clips, decision template, and checklist. |
 
 Generated artifacts belong under `artifacts/` and are ignored by Git.
 
@@ -169,5 +198,6 @@ Detailed architecture notes live in `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`. The
 - Privacy gap recovery can reduce temporal gaps, but uncertain intervals must remain review-required.
 - Raw detector recall, tracking coverage, privacy recovery, and final redaction quality are separate claims.
 - Automated evaluation currently uses range-level face truth and reviewed pipeline evidence; it does not invent missing per-frame boxes.
+- Automated review bundles highlight known risks and audit samples, but cannot detect every possible silent miss without Ground Truth.
 - No universal or production-wide zero-leak claim has been established.
 - License-plate detection and plate tracking are intentionally outside the current Face Pipeline v1 cleanup.

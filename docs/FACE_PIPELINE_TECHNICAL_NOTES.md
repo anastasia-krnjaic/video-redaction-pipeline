@@ -198,6 +198,34 @@ Final statuses are:
 
 Because current face truth is range-level, the evaluator reports object-frame recall and frame coverage. It does not claim IoU accuracy, pixel-level rendered privacy, or universal zero-leak performance.
 
+## Automated Review Bundles
+
+`redactor build-review-bundle` builds a self-contained local review package from pipeline artifacts. The command is intentionally a review layer, not a correction UI and not an approval override.
+
+Inputs may include:
+
+- source video;
+- detections and tracks;
+- privacy regions and interval decisions;
+- render manifest and render validation;
+- automatic preview and reviewed-final videos;
+- evaluator output directory;
+- machine-readable Ground Truth for benchmark context.
+
+The review queue schema is versioned as `face_review_queue_schema_v1.0`. Each item records a stable item ID, clip/case ID, source video hash, object category, optional object or track IDs, frame/timestamp span, severity, blocking status, source stage, reason codes, explanation, provenance, metrics, unresolved-frame count, candidate-region status, review status, allowed actions, visual-evidence paths, and creation metadata.
+
+Reason-code families are deliberately separated:
+
+- pipeline risk, such as `needs_review_interval`, `rejected_interval`, `unresolved_privacy_frames`, `invalid_box`, `long_detection_gap`, `one_sided_recovery`, `excessive_bidirectional_disagreement`, `excessive_center_jump`, `excessive_scale_change`, `possible_identity_competition`, `possible_keep_person_overlap`, `scene_cut_inside_track`, `track_fragmentation`, `render_validation_failure`, and `media_validation_failure`;
+- Ground-Truth-only evaluation evidence, such as `ground_truth_detector_miss` and `ground_truth_privacy_miss`;
+- non-blocking `random_audit_sample` items.
+
+Nearby or overlapping events are merged only when they describe the same practical review interval. Distinct `needs_review`, `rejected`, or preserved reviewed intervals remain separate cards. Raw detector misses remain detector evidence and are not folded into privacy blockers.
+
+The generated bundle contains local `index.html`, `INDEX.md`, `REVIEW_CHECKLIST.md`, queue/summary/config JSON, local CSS/JS, contact sheets, short clips, and a decisions template. HTML and JSON paths are relative so the bundle can be moved as a folder. No external JavaScript, CSS, fonts, analytics, or network calls are used.
+
+The HTML page stores temporary decisions in browser-local state. Reviewers must explicitly export decisions before closing the page or moving machines. `redactor validate-review-decisions` validates the exported file against the original queue, rejects duplicate or unknown item IDs, checks status/action compatibility, and reports unresolved blocking items. It does not alter privacy regions. A `correction_required` decision preserves the final blocker until valid corrected regions are supplied and normal validation passes.
+
 ## Processed-Frame Accounting
 
 Detection and tracking summaries distinguish:

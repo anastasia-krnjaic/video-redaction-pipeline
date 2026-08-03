@@ -1,13 +1,13 @@
 # Video Redaction Pipeline - System Overview
 
-- **Document version:** v009
-- **Last updated:** 2026-08-02
-- **System status:** Face Pipeline v1 is integrated for ADAS face detection, ordinary tracking, privacy gap recovery, face redaction rendering from accepted privacy regions, and automated evaluation against machine-readable face ground truth. License-plate work is not part of the current completed pipeline.
+- **Document version:** v010
+- **Last updated:** 2026-08-03
+- **System status:** Face Pipeline v1 is integrated for ADAS face detection, ordinary tracking, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local automated review bundles. License-plate work is not part of the current completed pipeline.
 - **Canonical document:** `docs/SYSTEM_OVERVIEW.md`
 
 ## What The System Is For
 
-This repository builds a local video-redaction pipeline. Its current focus is face privacy: finding faces, keeping those detections connected over time, rendering accepted privacy regions, and clearly marking any interval that needs human review before it can be trusted for final redaction.
+This repository builds a local video-redaction pipeline. Its current focus is face privacy: finding faces, keeping those detections connected over time, rendering accepted privacy regions, measuring the result against available truth, and creating a compact review package for intervals that deserve human attention.
 
 The system is not a finished automatic redaction product, and it does not make a universal zero-leak claim. It produces structured evidence, diagnostic outputs, non-final previews, and approved face-redacted MP4s when the available privacy-region evidence passes final safety gates.
 
@@ -21,6 +21,7 @@ A user provides a local video clip and local ADAS model files. The supported fac
 4. Preserve accepted corrections so they can be reused instead of regenerated.
 5. Render a non-final preview or an approved final face-redacted MP4 from accepted privacy regions.
 6. Evaluate detector, automatic, or reviewed-final results against machine-readable face ground truth.
+7. Build a local review bundle that gathers risk intervals, visual evidence, and deterministic audit samples.
 
 The main command is:
 
@@ -63,6 +64,20 @@ redactor evaluate-faces \
   --output-dir artifacts/face_pipeline_evaluation_v1/day_reviewed_final
 ```
 
+The review bundle command turns pipeline artifacts into a local HTML package:
+
+```bash
+redactor build-review-bundle \
+  --source-video artifacts/eval_night_selective.mp4 \
+  --case-id night_automatic_review_v1 \
+  --privacy-regions artifacts/face_renderer_v1/night_auto_preview/recovery/privacy_regions.jsonl \
+  --interval-decisions artifacts/face_renderer_v1/night_auto_preview/recovery/interval_decisions.json \
+  --render-manifest artifacts/face_renderer_v1/night_auto_preview/render_preview/render_manifest.json \
+  --automatic-preview-video artifacts/face_renderer_v1/night_auto_preview/render_preview/redacted_preview.mp4 \
+  --evaluation-dir artifacts/face_pipeline_evaluation_v1/night_automatic \
+  --output-dir artifacts/review/night_automatic
+```
+
 ## How The Pipeline Works
 
 ```mermaid
@@ -79,6 +94,7 @@ flowchart LR
   G --> J["Face rendering"]
   J --> K["Preview or approved final MP4"]
   K --> L["Automated evaluation report"]
+  L --> M["Local review bundle"]
 ```
 
 The stages are:
@@ -90,6 +106,7 @@ The stages are:
 - **Review preservation:** keeps accepted corrections so future runs do not have to rediscover them.
 - **Face rendering:** applies blur or pixelation to accepted privacy regions on the original-resolution video.
 - **Evaluation:** compares detector observations, tracking, privacy regions, preserved corrections, and render manifests against the selected machine-readable face ground truth.
+- **Review bundle:** gathers risk items, benchmark-only failures, random audit samples, clips, contact sheets, and reviewer decision export into a local folder.
 
 ## Why Detection Is Not Enough
 
@@ -142,6 +159,20 @@ The evaluator has three modes:
 
 The evaluator keeps these claims separate. A reviewed correction can complete a final privacy-region result, but it does not improve raw detector recall. A renderer approval says the renderer accepted and applied its input regions; it is not, by itself, proof that the regions match ground truth.
 
+## Automated Review Bundles
+
+After processing or evaluation, the system can build a local review bundle. The bundle is meant to save reviewer time: it selects short intervals that look risky, creates contact sheets and short clips, and presents them in `index.html`.
+
+Review items come from three sources:
+
+- **Pipeline-derived risk:** review-required or rejected intervals, unresolved frames, invalid boxes, suspicious provenance changes, tracking fragmentation, render or media validation failures, and similar signals.
+- **Ground-Truth-derived benchmark evidence:** known detector misses, uncovered privacy-required frames, or keep-person false redaction when machine-readable Ground Truth and evaluator outputs are available.
+- **Random audit samples:** deterministic samples from apparently normal intervals, used to reduce the chance that silent problems are missed.
+
+The review bundle never proves that no face was missed. On a new production video, Ground Truth usually does not exist, so the bundle can only show risks the pipeline can infer plus random audit samples.
+
+The HTML page stores temporary reviewer choices in browser-local state and provides an explicit export button for a decisions JSON file. Exported decisions can be validated against the original queue, but they do not directly rewrite privacy regions or override renderer/evaluator approval. If an interval still lacks valid reviewed privacy regions, final export remains blocked.
+
 ## Current Face-Detector Decision
 
 The active face detector is OpenVINO `face-detection-adas-0001`, recorded in outputs as `openvino_face_adas_0001`.
@@ -165,6 +196,7 @@ A face-pipeline run writes ignored artifacts under the selected output directory
 - `privacy_gap_recovery/`: privacy regions, interval decisions, metrics, source hashes, and optional overlay.
 - render directory chosen by the user: face-redacted MP4, render manifest, summary, validation, processing log, and optional diagnostic comparison clip.
 - evaluation directory chosen by the user: metrics, object metrics, interval decisions, failures, render-validation summary, report, summary table, and concise visual evidence for failures.
+- review bundle directory chosen by the user: local HTML, review queue and summary JSON, local CSS/JS, short clips, contact sheets, checklist, and review-decision template/export files.
 
 The render manifest records the source video hash, privacy-region input hash, rendering mode, redaction method, provenance counts, unresolved intervals, review status, output video hash, audio handling, and final approval status.
 
@@ -180,13 +212,14 @@ Implemented:
 - face redaction rendering with preview and final approval modes;
 - machine-readable face ground truth derived from frozen GroundTruth v1.1;
 - automated face evaluation in detector, automatic, and reviewed-final modes;
+- automated local review bundles with risk queues, concise visual evidence, deterministic audit samples, and exported-decision validation;
 - FFprobe validation of rendered media resolution, frame rate, duration, frame count, and audio presence;
 - tracked ADAS detector evaluation evidence;
 - historical archive for the detector bake-off.
 
 Not yet implemented:
 
-- complete analyst review workflow;
+- correction UI for drawing or editing privacy regions;
 - license-plate pipeline work.
 
 ## Known Limitations
@@ -196,6 +229,7 @@ Not yet implemented:
 - Raw detector recall is not the same as tracking coverage or privacy-region coverage.
 - Machine-readable face ground truth is range-level for the evaluated clips; it does not provide tight per-frame boxes for IoU scoring.
 - Automated evaluation does not perform pixel-level rendered privacy verification.
+- Automated review queues cannot detect every possible silent missed face, especially without Ground Truth.
 - Rendered face video quality is only as good as the accepted privacy-region evidence supplied to the renderer.
 - Automatically recovered privacy regions must still be treated according to their interval decision.
 - Universal or production-wide zero-leak claims have not been established.
@@ -203,7 +237,7 @@ Not yet implemented:
 
 ## Next Planned Stages
 
-1. Complete review handling for face-track and privacy-gap decisions.
+1. Add a correction workflow that can supply reviewed privacy regions for review-required intervals.
 2. Expand validation of rendered face-only outputs before making broader redaction-quality claims.
 3. Freeze the evaluated Face Pipeline v1 state before adding new object classes.
 4. Only after the face pipeline is coherent, resume separate license-plate detector work.

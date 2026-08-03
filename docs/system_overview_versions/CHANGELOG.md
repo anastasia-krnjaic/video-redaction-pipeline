@@ -1,5 +1,15 @@
 # System Overview Changelog
 
+## v010 — 2026-08-03
+
+Added Automated Review Bundle v1 to the documented Face Pipeline:
+
+- documented `build-review-bundle` and `validate-review-decisions`;
+- described pipeline-derived risks, Ground-Truth-only benchmark evidence, and deterministic random audit samples as separate review item sources;
+- clarified that review bundles do not prove absence of silent misses and do not override renderer or evaluator approval;
+- documented exported local review decisions and blocker preservation for intervals that still need corrected privacy regions;
+- recorded the local-only bundle structure with relative assets, contact sheets, short clips, queue JSON, summary JSON, and checklist.
+
 ## v009 — 2026-08-02
 
 Added machine-readable face ground truth and automated Face Pipeline v1 evaluation:
