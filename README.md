@@ -31,13 +31,15 @@ You can also pass `--adas-xml` and `--adas-bin`, or set `REDACTOR_ADAS_XML` and 
 
 ## Supported Face Workflow
 
-Run the current face pipeline:
+Run the current full-video face workflow:
 
 ```bash
-redactor face-pipeline artifacts/eval_day_face.mp4 \
+redactor redact-video input.mp4 \
+  --faces \
+  --policy redact_all \
   --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
   --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
-  --output-dir artifacts/face_pipeline/day_face \
+  --output-dir artifacts/cases/input_face_redaction \
   --overwrite
 ```
 
@@ -45,34 +47,41 @@ The command runs:
 
 1. ADAS face detection at proposal threshold `0.20`.
 2. Ordinary face tracking with primary observation threshold `0.30`.
-3. Optional privacy gap recovery when target track IDs are provided.
+3. A full-video face track census.
+4. A case privacy policy. The supported default is `redact_all`.
+5. Privacy-region compilation and gap recovery for redacted tracks.
+6. A non-final automatic preview.
+7. A local review bundle for unresolved or risky intervals.
+8. A final output status. Final export remains blocked while review blockers remain.
 
-For privacy gap recovery on a known target track, add target and safety-track IDs:
+The normal workflow does not require target-track IDs, frame windows, source-video-specific coordinates, or Ground Truth. Ground Truth is benchmark/evaluation input only; it is not the production privacy policy.
+
+To keep a person visible, create an explicit case-policy choice:
 
 ```bash
-redactor face-pipeline artifacts/eval_night_selective.mp4 \
+redactor redact-video input.mp4 \
+  --faces \
+  --policy redact_all_except_keep \
+  --keep-track-id KEEP_TRACK_ID \
   --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
   --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
-  --target-track-id 8 \
-  --keep-track-id 10 \
-  --competing-track-id 10 \
-  --frame-start 420 \
-  --frame-end 779 \
-  --output-dir artifacts/face_pipeline/night_selective \
+  --output-dir artifacts/cases/input_face_redaction_keep_track_10 \
   --overwrite
 ```
 
+Use the generated `track_census.json` and `track_gallery/index.html` to understand track IDs before making a keep decision. Ambiguous or unsupported fragments remain review blockers.
+
 Privacy recovery writes machine-readable interval decisions. A gap may be accepted automatically, accepted after configured refinement, marked `needs_review`, or rejected. Synthetic privacy regions never count as raw detector hits.
 
-Render a face-redacted preview or approved final MP4 from the privacy regions:
+Lower-level rendering remains available for diagnostics or reviewed correction workflows:
 
 ```bash
-redactor render-faces artifacts/eval_night_selective.mp4 \
-  --privacy-regions artifacts/face_pipeline/night_selective/privacy_gap_recovery/privacy_regions.jsonl \
-  --interval-decisions artifacts/face_pipeline/night_selective/privacy_gap_recovery/interval_decisions.json \
-  --output-dir artifacts/face_pipeline/night_selective/render_preview \
+redactor render-faces input.mp4 \
+  --privacy-regions artifacts/cases/input_face_redaction/privacy_regions/privacy_regions.jsonl \
+  --interval-decisions artifacts/cases/input_face_redaction/privacy_regions/interval_decisions.json \
+  --output-dir artifacts/cases/input_face_redaction/render_preview \
   --mode preview \
-  --method gaussian_blur \
+  --method pixelate \
   --margin-fraction 0.15 \
   --comparison-frames 120 \
   --overwrite
@@ -130,38 +139,68 @@ After rendering or evaluation, build a compact local bundle so a reviewer can in
 ```bash
 redactor build-review-bundle \
   --source-video artifacts/eval_night_selective.mp4 \
-  --case-id night_automatic_review_v1 \
+  --case-id night_case_review_v1_2_3 \
   --privacy-regions artifacts/face_renderer_v1/night_auto_preview/recovery/privacy_regions.jsonl \
   --interval-decisions artifacts/face_renderer_v1/night_auto_preview/recovery/interval_decisions.json \
   --render-manifest artifacts/face_renderer_v1/night_auto_preview/render_preview/render_manifest.json \
   --render-validation artifacts/face_renderer_v1/night_auto_preview/render_preview/validation.json \
   --automatic-preview-video artifacts/face_renderer_v1/night_auto_preview/render_preview/redacted_preview.mp4 \
   --evaluation-dir artifacts/face_pipeline_evaluation_v1/night_automatic \
-  --output-dir artifacts/review/night_automatic \
+  --corrected-privacy-regions artifacts/face_renderer_v1/night_reviewed_final/recovery/privacy_regions.jsonl \
+  --corrected-interval-decisions artifacts/face_renderer_v1/night_reviewed_final/recovery/interval_decisions.json \
+  --output-dir artifacts/review/night_case_review \
+  --review-render-method pixelate \
+  --review-margin-fraction 0.15 \
+  --review-pixel-size 16 \
   --overwrite
 ```
 
-The bundle contains `index.html`, a review queue, contact sheets, short evidence clips, local CSS/JS, a checklist, and a decision-export template. It separates pipeline-derived risk, Ground-Truth-only benchmark evidence, and deterministic random audit samples. A clean queue does not prove that every missed face was found.
+The bundle contains `index.html`, a raw review queue, a smaller reviewer-task list, contact sheets, short evidence clips, local CSS/JS, a checklist, and a decision-export template. It separates pipeline-derived risk, Ground-Truth-only benchmark evidence, and deterministic random audit samples. A clean queue does not prove that every missed face was found.
+
+Review Bundle v1.2.3 presents reviewer tasks instead of raw signal counts. The default guided workflow groups the page into required review, corrected-result confirmation, optional spot checks, and a technical audit. Technical-only signals remain in JSON and expandable audit details, but do not appear as separate default tasks.
+
+Review Bundle v1.2.3.1 keeps the same review evidence and fixes the grouped media controls. In Guided review, `Play together` / `Pause together` and `Restart media` affect only the currently visible task's comparison videos. In View-all mode the grouped controls are disabled so the page does not accidentally start hidden clips.
+
+Random audit samples are initially optional. If a reviewer finds a missed privacy target in one, record it as a reviewer finding and pass it back with `--reviewer-findings`. The bundle promotes the finding to a blocking corrected-result task while preserving the original random-audit evidence in the raw queue. This is separate from frozen Ground Truth: benchmark coverage may pass while a whole-video random audit still discovers a real privacy issue outside the selected benchmark window.
+
+For reliable embedded playback, serve the bundle over localhost:
+
+```bash
+redactor serve-review-bundle artifacts/review/night_case_review --open
+```
+
+The server binds only to `127.0.0.1`, serves only files under the selected bundle directory, and makes no external network calls. Opening `index.html` directly through `file://` remains possible, but browser handling of local MP4 playback can be inconsistent.
+
+Automatic clips are rendered from the automatic privacy-region JSONL. Corrected final clips are rendered from the reviewed/corrected privacy-region JSONL. Both use the same explicit review-render settings so the comparison differs by privacy-region evidence, not by blur or pixelation style.
+
+Review clips are encoded as browser-compatible H.264/yuv420p MP4s and undergo decoded-frame visual-content validation. FFprobe metadata checks are still recorded, but they are not treated as proof that the clip contains visible frames; bundle generation fails if decoded output turns black while the matching source frames contain visible structure.
+
+Task clips also record source-to-local frame mapping. Privacy regions remain keyed by source frame, while local clip frame `0` means the first frame of the short review clip. Bundle generation verifies expected privacy bboxes against decoded Original and rendered clips; a frame is not counted as visually rendered merely because a JSON region exists.
 
 Reviewer choices are stored in browser-local state until explicitly exported. Validate an exported decisions file with:
 
 ```bash
 redactor validate-review-decisions \
-  --queue artifacts/review/night_automatic/review_queue.json \
-  --decisions artifacts/review/night_automatic/decisions/review_decisions.json
+  --queue artifacts/review/night_case_review/review_queue.json \
+  --decisions artifacts/review/night_case_review/decisions/review_decisions.json
 ```
 
 ## Output Layout
 
-A face-pipeline run writes subdirectories under the output directory:
+A full-video `redact-video` run writes a case directory:
 
 | Directory | Contents |
 | --- | --- |
+| `source_manifest.json` | Source video hash, frame count, FPS, and dimensions. |
+| `privacy_policy.json` | Case-level privacy policy and per-track redact/keep/review assignments. |
+| `track_census.json`, `track_gallery/` | Full-video face track census and compact local gallery for policy review. |
 | `detection/` | `detections.jsonl`, `summary.json`, optional `overlay.mp4`. |
 | `tracking/` | `tracks.jsonl`, `summary.json`, track quality, review flags/windows, contact sheets, and overlay. |
-| `privacy_gap_recovery/` | `privacy_regions.jsonl`, `interval_decisions.json`, `metrics.json`, `summary.json`, optional overlay. Written only when target track IDs are provided. |
-| `render/` or chosen render directory | Redacted MP4, `render_manifest.json`, `render_summary.json`, `validation.json`, `processing_log.jsonl`, and optional comparison clip. |
-| review bundle directory | Local `index.html`, queue/summary/config JSON, contact sheets, short clips, decision template, and checklist. |
+| `privacy_regions/` | Full-video compiled privacy regions, interval decisions, and summary. |
+| `automatic_preview/` | Non-final preview MP4, render manifest, summary, validation, and processing log. |
+| `review/` | Local `index.html`, queue/task/summary/config JSON, contact sheets, short clips, decision template, and checklist. |
+| `final/` | Final render artifacts or a blocked final-status JSON. |
+| `audit_manifest.json` | Source, detection, tracking, policy, privacy, rendering, review, and final-status summary. |
 
 Generated artifacts belong under `artifacts/` and are ignored by Git.
 
@@ -175,11 +214,11 @@ redactor contact-sheet data/raw/bodycam_sample.mp4 artifacts/bodycam_sample_cont
 redactor trim data/raw/bodycam_sample.mp4 artifacts/smoke_clip.mp4 --start 0 --duration 5
 redactor detect artifacts/eval_day_face.mp4 --category face --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin --output-dir artifacts/diagnostics/day_face --overwrite
 redactor track artifacts/eval_day_face.mp4 --detections artifacts/diagnostics/day_face/detections.jsonl --output-dir artifacts/diagnostics/day_face_tracking --overwrite
-redactor recover-face-gaps artifacts/eval_night_selective.mp4 --tracks artifacts/diagnostics/night_tracking/tracks.jsonl --target-track-id 8 --keep-track-id 10 --output-dir artifacts/diagnostics/night_gap_recovery --overwrite
-redactor render-faces artifacts/eval_night_selective.mp4 --privacy-regions artifacts/diagnostics/night_gap_recovery/privacy_regions.jsonl --interval-decisions artifacts/diagnostics/night_gap_recovery/interval_decisions.json --output-dir artifacts/diagnostics/night_render_preview --mode preview --overwrite
+redactor recover-face-gaps input.mp4 --tracks artifacts/diagnostics/input_tracking/tracks.jsonl --target-track-id TRACK_ID --keep-track-id KEEP_TRACK_ID --output-dir artifacts/diagnostics/input_gap_recovery --overwrite
+redactor render-faces input.mp4 --privacy-regions artifacts/diagnostics/input_gap_recovery/privacy_regions.jsonl --interval-decisions artifacts/diagnostics/input_gap_recovery/interval_decisions.json --output-dir artifacts/diagnostics/input_render_preview --mode preview --overwrite
 ```
 
-These commands are useful during development, but `face-pipeline` is the supported entry point for the current face workflow.
+These commands are useful during development. `redact-video` is the supported entry point for the current full-video face workflow.
 
 ## Current Evidence And History
 

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import threading
+import urllib.request
 from pathlib import Path
 from typing import Any
 
+import cv2 as cv
+import numpy as np
 import pytest
 
 from redactor import review_bundle
@@ -56,6 +60,36 @@ def source_video(tmp_path: Path) -> Path:
     path = tmp_path / "source.mp4"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"synthetic-source")
+    return path
+
+
+def synthetic_frame(index: int, *, dark: bool = False) -> np.ndarray:
+    if dark:
+        return np.zeros((48, 64, 3), dtype=np.uint8)
+    y, x = np.indices((48, 64))
+    base = ((x * 7 + y * 11 + index * 29) % 256).astype(np.uint8)
+    return np.dstack(
+        [
+            base,
+            np.roll(base, index % 9, axis=1),
+            np.roll(base, index % 7, axis=0),
+        ]
+    )
+
+
+def write_synthetic_video(path: Path, frames: list[np.ndarray], *, fps: float = 30.0) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    height, width = frames[0].shape[:2]
+    writer = cv.VideoWriter(
+        str(path),
+        cv.VideoWriter_fourcc(*"mp4v"),
+        fps,
+        (width, height),
+    )
+    assert writer.isOpened()
+    for frame in frames:
+        writer.write(frame)
+    writer.release()
     return path
 
 
@@ -272,12 +306,906 @@ def reason_codes(queue: dict[str, Any]) -> set[str]:
     return {reason for item in queue["items"] for reason in item["reason_codes"]}
 
 
+def raw_item(
+    item_id: str,
+    start: int,
+    end: int,
+    reasons: list[str],
+    *,
+    blocking: bool = False,
+    severity: str = "medium",
+    media_roles: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    return {
+        "allowed_review_actions": ["accepted_current", "correction_required"],
+        "available_candidate_region_status": "available",
+        "blocking_status": blocking,
+        "case_id": "synthetic",
+        "explanation": "raw",
+        "frame_end": end,
+        "frame_references": [start],
+        "frame_start": start,
+        "item_origin": "pipeline",
+        "media_roles": media_roles or [],
+        "metrics": {},
+        "object_category": "face",
+        "object_id": "face_a",
+        "reason_codes": reasons,
+        "requires_corrected_regions": blocking,
+        "review_item_id": item_id,
+        "review_status": "pending",
+        "schema_version": "1.0",
+        "severity": severity,
+        "source_stage": "multiple_stages",
+        "source_video_hash": "hash",
+        "timestamps": {"end_seconds": end / 30, "start_seconds": start / 30},
+        "track_ids": [],
+        "unresolved_frame_count": 0,
+        "visual_evidence": {},
+    }
+
+
+def media_roles(*roles: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "display": True,
+            "duplicate_of": None,
+            "label": role.replace("_", " ").title(),
+            "path": f"clips/{role}.mp4",
+            "role": role,
+            "sha256": role,
+        }
+        for role in roles
+    ]
+
+
 def test_review_item_schema_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     bundle = build_bundle(tmp_path, monkeypatch)
     queue = load_queue(bundle)
 
     assert review_bundle.validate_review_queue_payload(queue) == []
     assert queue["schema_id"] == review_bundle.REVIEW_QUEUE_SCHEMA_ID
+    assert queue["presentation_schema_version"] == review_bundle.REVIEW_TASK_SCHEMA_VERSION
+
+
+def test_reviewer_task_aggregation_hides_technical_signals() -> None:
+    queue = {
+        "case_id": "synthetic",
+        "corrected_context": {"corrected_intervals": []},
+        "items": [
+            raw_item(
+                "blocker",
+                10,
+                12,
+                ["needs_review_interval", "unresolved_privacy_frames"],
+                blocking=True,
+                severity="blocking",
+                media_roles=media_roles("original", "automatic", "corrected_final"),
+            ),
+            raw_item(
+                "technical",
+                11,
+                11,
+                ["suspicious_provenance_transition"],
+                severity="informational",
+            ),
+            raw_item(
+                "random",
+                60,
+                64,
+                ["random_audit_sample"],
+                severity="random_audit",
+            ),
+        ],
+    }
+
+    payload = review_bundle.reviewer_tasks_payload(
+        queue,
+        config=review_bundle.ReviewBundleConfig(case_id="synthetic"),
+        fps=30.0,
+    )
+
+    tasks = payload["reviewer_tasks"]
+    assert [task["category"] for task in tasks] == [
+        "corrected_result_check",
+        "optional_spot_check",
+    ]
+    assert tasks[0]["raw_signal_count"] == 2
+    assert payload["technical_audit"]["hidden_from_default_task_count"] == 1
+    assert "Additional related evidence" not in tasks[0]["explanation"]
+
+
+def test_detector_miss_becomes_continuity_check_without_corrected_intervals() -> None:
+    queue = {
+        "case_id": "synthetic",
+        "corrected_context": {"corrected_intervals": []},
+        "items": [
+            raw_item(
+                "detector_miss",
+                20,
+                20,
+                ["ground_truth_detector_miss"],
+                severity="high",
+                media_roles=media_roles("original", "corrected_final"),
+            )
+        ],
+    }
+
+    payload = review_bundle.reviewer_tasks_payload(
+        queue,
+        config=review_bundle.ReviewBundleConfig(case_id="synthetic"),
+        fps=30.0,
+    )
+
+    task = payload["reviewer_tasks"][0]
+    assert task["category"] == "automatic_continuity_check"
+    assert task["title"] == "Check automatic continuity"
+
+
+def test_media_role_hash_deduplication(tmp_path: Path) -> None:
+    source = tmp_path / "clips" / "same_source.mp4"
+    final = tmp_path / "clips" / "same_final.mp4"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"same bytes")
+    final.write_bytes(b"same bytes")
+    item = {
+        "visual_evidence": {
+            "reviewed_final_clip": "clips/same_final.mp4",
+            "source_clip": "clips/same_source.mp4",
+        }
+    }
+
+    review_bundle.assign_media_roles([item], tmp_path)
+
+    roles = item["media_roles"]
+    assert roles[0]["role"] == "original"
+    assert roles[1]["role"] == "corrected_final"
+    assert roles[1]["display"] is False
+    assert roles[1]["duplicate_of"] == "original"
+
+
+def role_audit(
+    role: str,
+    *,
+    source_start: int = 10,
+    source_end: int = 20,
+    renderer_hash: str = "render_hash",
+    frame_count: int = 11,
+    duration_seconds: float = 11 / 30,
+    privacy_hash: str | None = "privacy_hash",
+    traceable: bool = True,
+) -> dict[str, Any]:
+    return {
+        "codec": "h264",
+        "decoded_visual_content_validation": {"passed": True},
+        "duration_seconds": duration_seconds,
+        "output_fps": 30.0,
+        "output_frame_count": frame_count,
+        "pixel_format": "yuv420p",
+        "privacy_region_input_hash": privacy_hash,
+        "rendered_region_application_validation": {"passed": True} if role != "original" else None,
+        "rendered_privacy_regions": role != "original",
+        "renderer_configuration_hash": renderer_hash,
+        "role": role,
+        "source_frame_range": {
+            "frame_count": source_end - source_start + 1,
+            "frame_end": source_end,
+            "frame_start": source_start,
+        },
+        "traceable_reviewed_region_source": traceable,
+    }
+
+
+def test_review_render_config_defaults_to_canonical_pixelation() -> None:
+    config = review_bundle.ReviewRenderConfig()
+
+    assert config.payload() == {
+        "blur_kernel": 51,
+        "margin_fraction": 0.15,
+        "margin_pixels": 0,
+        "method": "pixelate",
+        "pixel_size": 16,
+    }
+    assert config.stable_hash() == review_bundle.stable_payload_hash(config.payload())
+
+
+def test_media_audit_accepts_aligned_comparison() -> None:
+    validation = review_bundle.validate_media_comparison_audit(
+        {
+            "automatic": role_audit("automatic"),
+            "corrected_final": role_audit("corrected_final"),
+            "original": role_audit("original", privacy_hash=None),
+        }
+    )
+
+    assert validation["passed"] is True
+    assert validation["errors"] == []
+
+
+def test_media_audit_rejects_mismatched_renderer_config() -> None:
+    validation = review_bundle.validate_media_comparison_audit(
+        {
+            "automatic": role_audit("automatic", renderer_hash="a"),
+            "corrected_final": role_audit("corrected_final", renderer_hash="b"),
+        }
+    )
+
+    assert "renderer configurations differ" in " ".join(validation["errors"])
+
+
+def test_media_audit_rejects_mismatched_source_interval_and_duration() -> None:
+    validation = review_bundle.validate_media_comparison_audit(
+        {
+            "automatic": role_audit("automatic", source_start=10, source_end=20),
+            "corrected_final": role_audit(
+                "corrected_final",
+                source_start=11,
+                source_end=21,
+                duration_seconds=5.0,
+            ),
+        }
+    )
+
+    errors = " ".join(validation["errors"])
+    assert "source-frame ranges differ" in errors
+    assert "durations differ" in errors
+
+
+def test_media_audit_requires_traceable_corrected_region_source() -> None:
+    validation = review_bundle.validate_media_comparison_audit(
+        {
+            "automatic": role_audit("automatic"),
+            "corrected_final": role_audit(
+                "corrected_final",
+                privacy_hash=None,
+                traceable=False,
+            ),
+        }
+    )
+
+    errors = " ".join(validation["errors"])
+    assert "no traceable privacy-region input hash" in errors
+    assert "no reviewed/preserved region provenance" in errors
+
+
+def test_media_audit_rejects_non_browser_compatible_codec() -> None:
+    bad = role_audit("automatic")
+    bad["codec"] = "mpeg4"
+
+    validation = review_bundle.validate_media_comparison_audit({"automatic": bad})
+
+    assert "h264" in " ".join(validation["errors"])
+
+
+def test_render_review_clip_outputs_browser_compatible_visible_mp4(tmp_path: Path) -> None:
+    source = write_synthetic_video(
+        tmp_path / "source.mp4",
+        [synthetic_frame(index) for index in range(6)],
+    )
+    output = tmp_path / "clips" / "review.mp4"
+    audit = review_bundle.render_review_clip_by_frames(
+        source,
+        output,
+        1,
+        3,
+        fps=30.0,
+        width=64,
+        height=48,
+        source_has_audio=False,
+        role="original",
+        regions_by_frame={},
+        settings=None,
+        privacy_regions_path=None,
+        interval_decisions_path=None,
+        renderer_config=review_bundle.ReviewRenderConfig().payload(),
+        renderer_config_hash=review_bundle.ReviewRenderConfig().stable_hash(),
+        overwrite=True,
+        decoded_audit_dir=tmp_path / "decoded_frame_audit",
+        media_slug="review",
+    )
+
+    assert audit["codec"] == "h264"
+    assert audit["pixel_format"] == "yuv420p"
+    assert audit["output_frame_count"] == 3
+    assert audit["decoded_visual_content_validation"]["passed"] is True
+    assert audit["decoded_visual_content_validation"]["decoded_frame_count"] == 3
+    assert (tmp_path / audit["decoded_visual_content_validation"]["contact_sheet_path"]).exists()
+
+
+def test_decoded_visual_validation_rejects_black_output_against_visible_source(
+    tmp_path: Path,
+) -> None:
+    source = write_synthetic_video(
+        tmp_path / "source.mp4",
+        [synthetic_frame(index) for index in range(3)],
+    )
+    output = write_synthetic_video(
+        tmp_path / "black.mp4",
+        [synthetic_frame(index, dark=True) for index in range(3)],
+    )
+    output_h264 = tmp_path / "black_h264.mp4"
+    review_bundle.mux_review_clip_audio(
+        source,
+        output,
+        output_h264,
+        source_has_audio=False,
+        start_seconds=0.0,
+        duration_seconds=3 / 30,
+    )
+
+    validation = review_bundle.validate_review_clip_visual_content(
+        source_video_path=source,
+        output_path=output_h264,
+        start_frame=0,
+        end_frame=2,
+        role="original",
+        expected_fps=30.0,
+        expected_width=64,
+        expected_height=48,
+        expected_frame_count=3,
+        output_info=review_bundle.media.probe_media(output_h264),
+    )
+
+    assert validation["passed"] is False
+    assert "near-black" in " ".join(validation["errors"])
+
+
+def test_decoded_visual_validation_accepts_source_relative_dark_scene(tmp_path: Path) -> None:
+    dark_frames = [synthetic_frame(index, dark=True) for index in range(3)]
+    source = write_synthetic_video(tmp_path / "source.mp4", dark_frames)
+    output = tmp_path / "output.mp4"
+    review_bundle.render_review_clip_by_frames(
+        source,
+        output,
+        0,
+        2,
+        fps=30.0,
+        width=64,
+        height=48,
+        source_has_audio=False,
+        role="original",
+        regions_by_frame={},
+        settings=None,
+        privacy_regions_path=None,
+        interval_decisions_path=None,
+        renderer_config=review_bundle.ReviewRenderConfig().payload(),
+        renderer_config_hash=review_bundle.ReviewRenderConfig().stable_hash(),
+        overwrite=True,
+    )
+
+    audit = review_bundle.validate_review_clip_visual_content(
+        source_video_path=source,
+        output_path=output,
+        start_frame=0,
+        end_frame=2,
+        role="original",
+        expected_fps=30.0,
+        expected_width=64,
+        expected_height=48,
+        expected_frame_count=3,
+        output_info=review_bundle.media.probe_media(output),
+    )
+
+    assert audit["passed"] is True
+
+
+def test_decoded_visual_validation_rejects_unexpected_identical_output(tmp_path: Path) -> None:
+    source = write_synthetic_video(
+        tmp_path / "source.mp4",
+        [synthetic_frame(index) for index in range(4)],
+    )
+    repeated = [synthetic_frame(0) for _ in range(4)]
+    output_video = write_synthetic_video(tmp_path / "repeated.mp4", repeated)
+    output_h264 = tmp_path / "repeated_h264.mp4"
+    review_bundle.mux_review_clip_audio(
+        source,
+        output_video,
+        output_h264,
+        source_has_audio=False,
+        start_seconds=0.0,
+        duration_seconds=4 / 30,
+    )
+
+    validation = review_bundle.validate_review_clip_visual_content(
+        source_video_path=source,
+        output_path=output_h264,
+        start_frame=0,
+        end_frame=3,
+        role="original",
+        expected_fps=30.0,
+        expected_width=64,
+        expected_height=48,
+        expected_frame_count=4,
+        output_info=review_bundle.media.probe_media(output_h264),
+    )
+
+    assert validation["passed"] is False
+    assert "identical" in " ".join(validation["errors"])
+
+
+def test_render_review_clip_fails_before_publication_on_visual_validation_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = write_synthetic_video(
+        tmp_path / "source.mp4",
+        [synthetic_frame(index) for index in range(3)],
+    )
+    monkeypatch.setattr(
+        review_bundle,
+        "validate_review_clip_visual_content",
+        lambda **kwargs: {"errors": ["synthetic validation failure"], "passed": False},
+    )
+
+    with pytest.raises(ValueError, match="visual-content validation failed"):
+        review_bundle.render_review_clip_by_frames(
+            source,
+            tmp_path / "clips" / "review.mp4",
+            0,
+            2,
+            fps=30.0,
+            width=64,
+            height=48,
+            source_has_audio=False,
+            role="original",
+            regions_by_frame={},
+            settings=None,
+            privacy_regions_path=None,
+            interval_decisions_path=None,
+            renderer_config=review_bundle.ReviewRenderConfig().payload(),
+            renderer_config_hash=review_bundle.ReviewRenderConfig().stable_hash(),
+            overwrite=True,
+        )
+
+
+def test_one_frame_miss_clip_context_is_short() -> None:
+    item = raw_item("miss", 481, 481, ["ground_truth_detector_miss"], severity="high")
+
+    assert review_bundle.clip_range_for_item(
+        item,
+        frame_count=1000,
+        config=review_bundle.ReviewBundleConfig(context_frames=18),
+    ) == (469, 493)
+
+
+def test_task_frame_mapping_uses_source_indices_authoritatively() -> None:
+    mapping = review_bundle.TaskFrameMapping(469, 493)
+
+    assert mapping.frame_count == 25
+    assert mapping.local_for_source(469) == 0
+    assert mapping.local_for_source(481) == 12
+    assert mapping.local_for_source(493) == 24
+    assert mapping.source_for_local(0) == 469
+    assert mapping.source_for_local(24) == 493
+    assert mapping.payload()["mapping"][12] == {
+        "source_frame_index": 481,
+        "task_clip_frame_index": 12,
+    }
+
+
+def test_rendered_region_application_validates_nonzero_start_mapping(
+    tmp_path: Path,
+) -> None:
+    source = write_synthetic_video(
+        tmp_path / "source.mp4",
+        [synthetic_frame(index) for index in range(12)],
+    )
+    mapping = review_bundle.TaskFrameMapping(5, 8)
+    settings = review_bundle.ReviewRenderConfig(pixel_size=4).render_settings()
+    region = review_bundle.rendering.RenderRegion(
+        frame_index=6,
+        bbox_xyxy=(10, 10, 30, 30),
+        provenance="ordinary_tracker",
+        state="covered",
+        source_record={},
+    )
+    source_clip = tmp_path / "source_clip.mp4"
+    rendered_clip = tmp_path / "rendered_clip.mp4"
+    config = review_bundle.ReviewRenderConfig(pixel_size=4)
+    review_bundle.render_review_clip_by_frames(
+        source,
+        source_clip,
+        5,
+        8,
+        fps=30.0,
+        width=64,
+        height=48,
+        source_has_audio=False,
+        role="original",
+        regions_by_frame={},
+        settings=None,
+        privacy_regions_path=None,
+        interval_decisions_path=None,
+        renderer_config=config.payload(),
+        renderer_config_hash=config.stable_hash(),
+        overwrite=True,
+    )
+    review_bundle.render_review_clip_by_frames(
+        source,
+        rendered_clip,
+        5,
+        8,
+        fps=30.0,
+        width=64,
+        height=48,
+        source_has_audio=False,
+        role="automatic",
+        regions_by_frame={6: [region]},
+        settings=settings,
+        privacy_regions_path=None,
+        interval_decisions_path=None,
+        renderer_config=config.payload(),
+        renderer_config_hash=config.stable_hash(),
+        overwrite=True,
+    )
+
+    validation = review_bundle.validate_rendered_region_application(
+        original_clip_path=source_clip,
+        rendered_clip_path=rendered_clip,
+        frame_mapping=mapping,
+        regions_by_frame={6: [region]},
+        settings=settings,
+    )
+
+    assert validation["passed"] is True
+    assert validation["expected_region_frames"] == [6]
+    assert validation["successfully_rendered_region_frames"] == [6]
+    assert validation["region_results"][0]["local_task_frame_index"] == 1
+
+
+def test_rendered_region_application_fails_when_expected_bbox_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    source = write_synthetic_video(
+        tmp_path / "source.mp4",
+        [synthetic_frame(index) for index in range(8)],
+    )
+    mapping = review_bundle.TaskFrameMapping(3, 5)
+    settings = review_bundle.ReviewRenderConfig(pixel_size=4).render_settings()
+    region = review_bundle.rendering.RenderRegion(
+        frame_index=4,
+        bbox_xyxy=(10, 10, 30, 30),
+        provenance="ordinary_tracker",
+        state="covered",
+        source_record={},
+    )
+    source_clip = tmp_path / "source_clip.mp4"
+    rendered_clip = tmp_path / "rendered_clip.mp4"
+    config = review_bundle.ReviewRenderConfig(pixel_size=4)
+    for path in (source_clip, rendered_clip):
+        review_bundle.render_review_clip_by_frames(
+            source,
+            path,
+            3,
+            5,
+            fps=30.0,
+            width=64,
+            height=48,
+            source_has_audio=False,
+            role="original",
+            regions_by_frame={},
+            settings=None,
+            privacy_regions_path=None,
+            interval_decisions_path=None,
+            renderer_config=config.payload(),
+            renderer_config_hash=config.stable_hash(),
+            overwrite=True,
+        )
+
+    validation = review_bundle.validate_rendered_region_application(
+        original_clip_path=source_clip,
+        rendered_clip_path=rendered_clip,
+        frame_mapping=mapping,
+        regions_by_frame={4: [region]},
+        settings=settings,
+    )
+
+    assert validation["passed"] is False
+    assert validation["missing_rendered_region_frames"] == [4]
+
+
+def test_rendered_region_application_detects_temporal_shift(tmp_path: Path) -> None:
+    source = write_synthetic_video(
+        tmp_path / "source.mp4",
+        [synthetic_frame(index) for index in range(8)],
+    )
+    mapping = review_bundle.TaskFrameMapping(3, 5)
+    settings = review_bundle.ReviewRenderConfig(pixel_size=4).render_settings()
+    expected_region = review_bundle.rendering.RenderRegion(
+        frame_index=4,
+        bbox_xyxy=(10, 10, 30, 30),
+        provenance="ordinary_tracker",
+        state="covered",
+        source_record={},
+    )
+    shifted_region = review_bundle.rendering.RenderRegion(
+        frame_index=5,
+        bbox_xyxy=(10, 10, 30, 30),
+        provenance="ordinary_tracker",
+        state="covered",
+        source_record={},
+    )
+    source_clip = tmp_path / "source_clip.mp4"
+    shifted_clip = tmp_path / "shifted_clip.mp4"
+    config = review_bundle.ReviewRenderConfig(pixel_size=4)
+    review_bundle.render_review_clip_by_frames(
+        source,
+        source_clip,
+        3,
+        5,
+        fps=30.0,
+        width=64,
+        height=48,
+        source_has_audio=False,
+        role="original",
+        regions_by_frame={},
+        settings=None,
+        privacy_regions_path=None,
+        interval_decisions_path=None,
+        renderer_config=config.payload(),
+        renderer_config_hash=config.stable_hash(),
+        overwrite=True,
+    )
+    review_bundle.render_review_clip_by_frames(
+        source,
+        shifted_clip,
+        3,
+        5,
+        fps=30.0,
+        width=64,
+        height=48,
+        source_has_audio=False,
+        role="automatic",
+        regions_by_frame={5: [shifted_region]},
+        settings=settings,
+        privacy_regions_path=None,
+        interval_decisions_path=None,
+        renderer_config=config.payload(),
+        renderer_config_hash=config.stable_hash(),
+        overwrite=True,
+    )
+
+    validation = review_bundle.validate_rendered_region_application(
+        original_clip_path=source_clip,
+        rendered_clip_path=shifted_clip,
+        frame_mapping=mapping,
+        regions_by_frame={4: [expected_region]},
+        settings=settings,
+    )
+
+    assert validation["passed"] is False
+    assert validation["missing_rendered_region_frames"] == [4]
+    assert validation["unexpected_rendered_region_frames"] == [5]
+
+
+def test_role_subtitles_warnings_and_corrected_action_text(tmp_path: Path) -> None:
+    automatic = tmp_path / "clips" / "automatic.mp4"
+    corrected = tmp_path / "clips" / "corrected.mp4"
+    automatic.parent.mkdir(parents=True)
+    automatic.write_bytes(b"automatic")
+    corrected.write_bytes(b"corrected")
+    item = raw_item(
+        "blocker",
+        10,
+        12,
+        ["needs_review_interval", "unresolved_privacy_frames"],
+        blocking=True,
+        severity="blocking",
+    )
+    item["visual_evidence"] = {
+        "automatic_preview_clip": "clips/automatic.mp4",
+        "reviewed_final_clip": "clips/corrected.mp4",
+    }
+
+    review_bundle.assign_media_roles([item], tmp_path)
+    roles = {role["role"]: role for role in item["media_roles"]}
+    task = review_bundle.reviewer_task_from_group(
+        [item],
+        index=1,
+        case_id="synthetic",
+        fps=30.0,
+        raw_items=[item],
+        raw_categories={},
+        corrected_context={},
+    )
+
+    assert roles["automatic"]["subtitle"] == "Result before reviewed corrections"
+    assert roles["automatic"]["warning"] == "Automatic result is not final."
+    assert roles["corrected_final"]["subtitle"] == (
+        "Same rendering style with reviewed corrections applied"
+    )
+    assert "Corrected final result shown above" in task["user_action_guidance"]
+
+
+def test_duplicate_semantic_corrected_media_is_suppressed(tmp_path: Path) -> None:
+    automatic = tmp_path / "clips" / "automatic.mp4"
+    corrected = tmp_path / "clips" / "corrected.mp4"
+    automatic.parent.mkdir(parents=True)
+    automatic.write_bytes(b"same")
+    corrected.write_bytes(b"same")
+    item = {
+        "visual_evidence": {
+            "automatic_preview_clip": "clips/automatic.mp4",
+            "reviewed_final_clip": "clips/corrected.mp4",
+        }
+    }
+
+    review_bundle.assign_media_roles([item], tmp_path)
+    roles = item["media_roles"]
+
+    assert roles[0]["role"] == "automatic"
+    assert roles[1]["role"] == "corrected_final"
+    assert roles[1]["display"] is False
+    assert roles[1]["duplicate_of"] == "automatic"
+
+
+def test_preserved_region_provenance_count_and_interval_coverage(tmp_path: Path) -> None:
+    path = write_jsonl(
+        tmp_path / "corrected.jsonl",
+        [
+            record(10, [1, 1, 5, 5], "detector"),
+            record(11, [1, 1, 5, 5], "preserved_privacy_region"),
+            record(12, [1, 1, 5, 5], "preserved_privacy_region"),
+        ],
+    )
+    privacy_input = review_bundle.rendering.load_privacy_regions(path)
+
+    coverage = review_bundle.privacy_coverage_for_interval(privacy_input, 10, 12)
+
+    assert coverage["covered_frame_count"] == 3
+    assert coverage["provenance_counts"] == {"detector": 1, "preserved_privacy_region": 2}
+    assert review_bundle.corrected_final_is_traceable(privacy_input, 10, 12) is True
+
+
+def test_review_media_audit_payload_is_deterministic() -> None:
+    queue = {
+        "case_id": "synthetic",
+        "items": [
+            {
+                "media_comparison_audit": {
+                    "roles": {"automatic": role_audit("automatic")},
+                    "validation": {"passed": True},
+                },
+                "review_item_id": "item_a",
+            }
+        ],
+        "reviewer_tasks": [{"media_roles": [], "reviewer_task_id": "task_a"}],
+    }
+
+    assert review_bundle.media_audit_payload(queue) == review_bundle.media_audit_payload(queue)
+
+
+def test_reviewer_actions_match_task_type() -> None:
+    action_required = raw_item(
+        "blocker",
+        1,
+        2,
+        ["needs_review_interval", "unresolved_privacy_frames"],
+        blocking=True,
+        severity="blocking",
+    )
+    corrected = raw_item(
+        "corrected",
+        10,
+        12,
+        ["needs_review_interval", "unresolved_privacy_frames"],
+        blocking=True,
+        severity="blocking",
+        media_roles=media_roles("original", "automatic", "corrected_final"),
+    )
+    optional = raw_item("random", 20, 24, ["random_audit_sample"], severity="random_audit")
+
+    action_task = review_bundle.reviewer_task_from_group(
+        [action_required],
+        index=1,
+        case_id="synthetic",
+        fps=30.0,
+        raw_items=[action_required],
+        raw_categories={},
+        corrected_context={},
+    )
+    corrected_task = review_bundle.reviewer_task_from_group(
+        [corrected],
+        index=2,
+        case_id="synthetic",
+        fps=30.0,
+        raw_items=[corrected],
+        raw_categories={},
+        corrected_context={},
+    )
+    optional_task = review_bundle.reviewer_task_from_group(
+        [optional],
+        index=3,
+        case_id="synthetic",
+        fps=30.0,
+        raw_items=[optional],
+        raw_categories={},
+        corrected_context={},
+    )
+
+    assert "looks_correct" not in {
+        action["action"] for action in action_task["allowed_user_actions"]
+    }
+    assert "looks_correct" in {
+        action["action"] for action in corrected_task["allowed_user_actions"]
+    }
+    assert "no_issue_found" in {
+        action["action"] for action in optional_task["allowed_user_actions"]
+    }
+
+
+def test_task_decision_export_validation(tmp_path: Path) -> None:
+    raw = raw_item("raw_a", 1, 2, ["needs_review_interval"], blocking=True)
+    task = {
+        "allowed_user_actions": [
+            {
+                "action": "looks_correct",
+                "review_status": "accepted_current",
+                "reviewed_media_role": "corrected_final",
+            }
+        ],
+        "category": "corrected_result_check",
+        "frame_end": 2,
+        "frame_start": 1,
+        "raw_review_item_ids": ["raw_a"],
+        "requires_decision": True,
+        "reviewer_task_id": "task_a",
+        "schema_version": "1.1",
+    }
+    queue = write_json(
+        tmp_path / "review_queue.json",
+        {
+            "case_id": "synthetic",
+            "items": [raw],
+            "reviewer_tasks": [task],
+            "schema_version": "1.0",
+        },
+    )
+    decisions = write_json(
+        tmp_path / "decisions.json",
+        {
+            "decisions": [
+                {
+                    "raw_review_item_ids": ["raw_a"],
+                    "review_status": "accepted_current",
+                    "reviewed_media_role": "corrected_final",
+                    "reviewer_task_id": "task_a",
+                    "selected_user_action": "looks_correct",
+                }
+            ],
+            "schema_version": "1.1",
+        },
+    )
+
+    result = review_bundle.validate_review_decisions(queue, decisions)
+
+    assert result["status"] == "valid"
+    assert result["final_export_blocked"] is False
+
+
+def test_v1_1_html_contains_guided_workflow_sections() -> None:
+    html = review_bundle.review_html(
+        {
+            "case_id": "synthetic",
+            "items": [],
+            "reviewer_tasks": [],
+            "source_video": {"hash": "hash"},
+        },
+        {
+            "corrected_result_tasks": 0,
+            "final_export_blocked": False,
+            "optional_spot_checks": 0,
+            "required_review_tasks": 0,
+            "technical_only_items": 0,
+        },
+    )
+
+    assert "Guided review" in html
+    assert "View all tasks" in html
+    assert "Technical audit" in html
+    css = review_bundle.review_css()
+    assert ".media-grid.cols-2" in css
+    assert ".media-grid.cols-3" in css
 
 
 def test_queue_generation_from_needs_review_and_unresolved_frames(
@@ -347,6 +1275,8 @@ def test_merging_and_deduplication_of_nearby_failures(
     ]
 
     assert len(merged) == 1
+    assert all("Additional related evidence" not in item["explanation"] for item in queue["items"])
+    assert queue["reviewer_tasks"][0]["explanation"].count("privacy-required frames") == 1
 
 
 def test_distinct_needs_review_intervals_are_not_merged() -> None:
@@ -454,7 +1384,7 @@ def test_relative_artifact_paths_and_local_html(
     assert review_bundle.assert_relative_bundle_paths(bundle) == []
     html = (bundle / "index.html").read_text(encoding="utf-8")
     assert "https://" not in html
-    assert "REVIEW REQUIRED - NOT FINAL" in html
+    assert "items need your review" in html
 
 
 def test_valid_decision_export_schema_for_nonblocking_item(
@@ -530,7 +1460,7 @@ def test_unresolved_blocker_and_correction_required_preserve_final_block(
     result = review_bundle.validate_review_decisions(bundle / "review_queue.json", decisions)
 
     assert result["final_export_blocked"] is True
-    assert blocker["review_item_id"] in result["unresolved_blocking_items"]
+    assert result["unresolved_blocking_item_count"] > 0
 
 
 def test_empty_clean_run_and_missing_optional_media(
@@ -560,3 +1490,191 @@ def test_deterministic_summary_generation(
     second = json.loads((second_bundle / "review_summary.json").read_text(encoding="utf-8"))
 
     assert first == second
+
+
+def test_reviewer_finding_becomes_corrected_result_task_and_hides_source_random() -> None:
+    random_item = raw_item(
+        "random",
+        290,
+        313,
+        ["random_audit_sample"],
+        severity="random_audit",
+        media_roles=media_roles("original", "automatic", "corrected_final"),
+    )
+    finding = raw_item(
+        "finding",
+        290,
+        299,
+        ["reviewer_found_privacy_miss", "silent_miss_found_by_random_audit"],
+        blocking=True,
+        severity="blocking",
+        media_roles=media_roles("original", "automatic", "corrected_final"),
+    )
+    queue = {
+        "case_id": "synthetic",
+        "corrected_context": {},
+        "items": [random_item, finding],
+        "source_video": {"hash": "hash"},
+    }
+
+    payload = review_bundle.reviewer_tasks_payload(
+        queue,
+        config=review_bundle.ReviewBundleConfig(),
+        fps=30.0,
+    )
+
+    tasks = payload["reviewer_tasks"]
+    assert [task["category"] for task in tasks] == ["corrected_result_check"]
+    assert tasks[0]["primary_raw_review_item_ids"] == ["finding"]
+    assert set(tasks[0]["raw_review_item_ids"]) == {"finding", "random"}
+    assert payload["technical_audit"]["hidden_from_default_task_count"] == 1
+
+
+def test_reviewer_finding_draft_records_random_audit_provenance() -> None:
+    drafts = review_bundle.reviewer_finding_drafts(
+        {
+            "findings": [
+                {
+                    "affected_frames": [10, 11],
+                    "correction_status": "candidate_corrected_regions_available",
+                    "finding_id": "finding_a",
+                    "reason_codes": ["reviewer_found_privacy_miss"],
+                    "reviewer_finding_type": "silent_miss_found_by_random_audit",
+                    "source_frame_end": 11,
+                    "source_frame_start": 10,
+                    "source_review_item_id": "raw_random",
+                    "source_reviewer_task_id": "task_random",
+                    "target_track_id": 6,
+                }
+            ]
+        }
+    )
+
+    assert len(drafts) == 1
+    assert drafts[0].blocking is True
+    assert drafts[0].requires_corrected_regions is True
+    assert drafts[0].candidate_region_status == "available"
+    assert drafts[0].metrics["source_reviewer_task_id"] == "task_random"
+    assert drafts[0].provenance["before"] == "random_audit"
+
+
+def test_optional_random_audit_needs_review_decision_blocks_final(tmp_path: Path) -> None:
+    random_item = raw_item("random", 20, 24, ["random_audit_sample"], severity="random_audit")
+    task = review_bundle.reviewer_task_from_group(
+        [random_item],
+        index=1,
+        case_id="synthetic",
+        fps=30.0,
+        raw_items=[random_item],
+        raw_categories={},
+        corrected_context={},
+    )
+    queue = write_json(
+        tmp_path / "review_queue.json",
+        {
+            "case_id": "synthetic",
+            "items": [random_item],
+            "reviewer_tasks": [task],
+            "schema_version": "1.0",
+        },
+    )
+    decisions = write_json(
+        tmp_path / "decisions.json",
+        {
+            "decisions": [
+                {
+                    "raw_review_item_ids": [random_item["review_item_id"]],
+                    "review_status": "escalated",
+                    "reviewed_media_role": "original_context",
+                    "reviewer_task_id": task["reviewer_task_id"],
+                    "selected_user_action": "needs_review",
+                }
+            ],
+            "schema_version": review_bundle.REVIEW_TASK_SCHEMA_VERSION,
+        },
+    )
+
+    result = review_bundle.validate_review_decisions(queue, decisions)
+
+    assert result["status"] == "valid"
+    assert result["final_export_blocked"] is True
+    assert result["unresolved_blocking_items"] == [task["reviewer_task_id"]]
+
+
+def test_reviewer_discovered_correction_is_traceable(tmp_path: Path) -> None:
+    path = write_jsonl(
+        tmp_path / "privacy_regions.jsonl",
+        [record(10, [1, 2, 9, 10], "reviewer_discovered_correction")],
+    )
+    privacy_input = review_bundle.rendering.load_privacy_regions(path)
+
+    assert review_bundle.corrected_final_is_traceable(privacy_input, 10, 10) is True
+
+
+def test_review_bundle_server_is_loopback_and_serves_mp4_mime(tmp_path: Path) -> None:
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "index.html").write_text("<!doctype html><title>Review</title>", encoding="utf-8")
+    (bundle / "clip.mp4").write_bytes(b"not really a movie")
+
+    resolved = review_bundle.resolve_bundle_request_path(bundle, "/../clip.mp4")
+    assert resolved == (bundle / "clip.mp4").resolve()
+    server, url = review_bundle.create_review_bundle_server(bundle)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        assert server.server_address[0] == "127.0.0.1"
+        clip_url = url.replace("/index.html", "/clip.mp4")
+        with urllib.request.urlopen(clip_url, timeout=5) as response:
+            assert response.headers.get_content_type() == "video/mp4"
+            assert response.read() == b"not really a movie"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def test_review_js_contains_playback_and_auto_advance_hooks() -> None:
+    script = review_bundle.review_js()
+
+    assert "Promise.allSettled" in script
+    assert "window.setTimeout" in script
+    assert "file-protocol-note" in script
+    assert "selected-action" in script
+    assert "Clear local choices for this review bundle" in script
+
+
+def test_review_js_group_media_controls_are_scoped_to_guided_task() -> None:
+    script = review_bundle.review_js()
+
+    assert "function activeTaskCard()" in script
+    assert "document.querySelector('#guided-panel .task-card')" in script
+    assert "[...card.querySelectorAll('video')]" in script
+    assert "mode !== 'guided'" in script
+    assert "Group media controls are available in Guided review." in script
+    assert "document.querySelectorAll('video')" not in script
+
+
+def test_review_js_group_media_controls_handle_play_pause_and_restart() -> None:
+    script = review_bundle.review_js()
+
+    assert "async function syncMedia(event)" in script
+    assert "async function restartMedia(event)" in script
+    assert "waitForMetadata(video)" in script
+    assert "video.muted = true" in script
+    assert "Promise.allSettled(videos.map(video => video.play()))" in script
+    assert "videos.forEach(video => video.pause())" in script
+    assert "video.currentTime = 0" in script
+    assert "syncButton.textContent = anyPlaying ? 'Pause together' : 'Play together'" in script
+    assert "Embedded playback failed" in script
+
+
+def test_review_html_keeps_native_controls_and_stable_group_buttons() -> None:
+    html = review_bundle.review_html(
+        {"case_id": "synthetic", "source_video": {"hash": "hash"}, "reviewer_tasks": []},
+        {"final_export_blocked": False, "technical_only_items": 0},
+    )
+
+    assert '<button id="sync-media" class="secondary">Play together</button>' in html
+    assert '<button id="restart-media" class="secondary">Restart media</button>' in html
+    assert 'video controls playsinline preload="metadata"' in review_bundle.review_js()

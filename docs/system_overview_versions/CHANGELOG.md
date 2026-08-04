@@ -1,5 +1,76 @@
 # System Overview Changelog
 
+## v017 — 2026-08-04
+
+Added Full-Video Automatic Face Privacy Policy v1:
+
+- documented `redactor redact-video` as the supported production-oriented face workflow;
+- added the full-video track census and machine-readable case privacy-policy boundary;
+- recorded `redact_all` as the safest default policy and `redact_all_except_keep` as an explicit case-policy choice;
+- clarified that Ground Truth, benchmark windows, target track IDs, and preserved benchmark corrections are not operational privacy policy inputs;
+- documented that rejected or unsupported candidates remain review blockers rather than automatic privacy regions;
+- preserved lower-level targeted track/frame commands as diagnostic tools.
+
+## v016 — 2026-08-03
+
+Repaired Review Bundle v1.2.3.1 grouped media controls:
+
+- documented that grouped playback controls are scoped to the currently visible Guided-review task;
+- disabled grouped playback in View-all mode so hidden task media cannot start in the background;
+- recorded dynamic `Play together` / `Pause together` labels, restart-to-zero behavior, and on-page playback errors;
+- preserved detector, tracking, privacy recovery, rendering, evaluator, Ground Truth, and privacy-region behavior.
+
+## v015 — 2026-08-03
+
+Resolved Review Bundle v1.2.3 reviewer-discovered daytime privacy-miss workflow:
+
+- documented that deterministic random audits can reveal whole-video misses outside selected benchmark windows;
+- added reviewer-discovered finding handling that promotes optional audit misses into blocking corrected-result tasks while preserving raw audit evidence;
+- recorded that reviewer findings remain distinct from frozen Ground Truth unless a new Ground Truth version is explicitly selected;
+- added loopback `redactor serve-review-bundle` playback guidance and browser-local decision auto-advance/export behavior;
+- clarified that benchmark evaluator range-level success and whole-video review findings are separate claims.
+
+## v014 — 2026-08-03
+
+Added Review Bundle v1.2.2 frame-mapping and rendered-region verification:
+
+- documented that privacy-region JSONL uses source-video frame indices while short review clips use local frame indices beginning at zero;
+- recorded the source-to-local mapping rule used by task-level review media;
+- added bbox-localized decoded-pixel validation so JSON privacy coverage must be confirmed by visible rendered changes in the intended frame;
+- documented declared JSON coverage separately from visibly verified rendered coverage;
+- preserved detector, tracking, privacy recovery, evaluation, rendering thresholds, and reviewed privacy-region coordinates.
+
+## v013 — 2026-08-03
+
+Repaired Review Bundle v1.2 media generation into v1.2.1:
+
+- documented that task-level review clips are encoded as browser-compatible H.264/yuv420p MP4s;
+- recorded that FFprobe metadata validation is not enough to prove a review clip contains visible frames;
+- added decoded-frame visual-content validation for first, middle, and final sampled frames;
+- clarified that bundle generation fails when generated clips turn black or repeat frames while matching source frames contain visible structure;
+- preserved the v1.2 aligned media semantics, privacy-region provenance, and pixelated review comparison style.
+
+## v012 — 2026-08-03
+
+Refined benchmark review media into Review Bundle v1.2:
+
+- documented that Original, Automatic, and Corrected final clips are generated from one shared source-frame interval;
+- recorded the explicit review-render style used for comparison clips: pixelation with 15% margin and block size 16;
+- clarified that Automatic comes from automatic privacy-region JSONL and Corrected final comes from reviewed/corrected privacy-region JSONL;
+- added media audit expectations for source-frame range, output frame count, renderer configuration hash, privacy-region input hash, and corrected-region traceability;
+- clarified that comparison styling is separate from the global renderer defaults and that renderer approval alone is not Ground-Truth acceptance.
+
+## v011 — 2026-08-03
+
+Refined Automated Review Bundle v1 into task-oriented Review Bundle v1.1:
+
+- documented the raw-signal versus reviewer-task presentation model;
+- added guided review semantics with required tasks, corrected-result confirmations, optional spot checks, and Technical audit;
+- clarified that technical-only signals do not inflate the default reviewer task count;
+- documented explicit media roles for Original, Automatic, Corrected final, and Diagnostic evidence;
+- recorded duplicate-media-role validation and local decision export fields for reviewer tasks;
+- reiterated that review decisions do not rewrite privacy regions or override renderer/evaluator acceptance.
+
 ## v010 — 2026-08-03
 
 Added Automated Review Bundle v1 to the documented Face Pipeline:

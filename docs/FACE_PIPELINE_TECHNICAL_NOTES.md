@@ -22,15 +22,51 @@ Weak observations may support temporal tracking, but they must not independently
 
 ## Pipeline Stages
 
-`redactor face-pipeline` runs:
+`redactor redact-video` is the supported full-video workflow. It runs:
 
-1. `detection.run_detection(...)` for ADAS face detections.
+1. ADAS face detection, unless a validated ADAS detections JSONL is supplied for diagnostics.
 2. `tracking.run_tracking(...)` for ordinary temporal grouping and track quality.
-3. `privacy_gap_recovery.run_privacy_gap_recovery(...)` only when target track IDs are supplied.
+3. A full-video track census over auto-confirmed, review-candidate, weak-only, and rejected tracks.
+4. A case privacy policy, defaulting to `redact_all`.
+5. Full-video policy compilation into privacy regions and interval decisions.
+6. Non-final preview rendering.
+7. Local review-bundle generation.
+8. Final render or a blocked final-status record.
+
+`redactor face-pipeline` remains a lower-level diagnostic command for detection, tracking, and optional target-track gap recovery. It is not the primary production-oriented command.
 
 `redactor render-faces` consumes the privacy-region output and writes a redacted MP4 plus render manifests. It is intentionally separate from `face-pipeline` so preview and final approval can be controlled explicitly.
 
 Lower-level commands (`detect`, `track`, `recover-face-gaps`, and `render-faces`) remain diagnostic and advanced entry points.
+
+## Full-Video Case Privacy Policy
+
+`src/redactor/face_policy.py` contains the production-oriented policy layer. It keeps operational privacy policy separate from benchmark Ground Truth.
+
+Machine-readable policy files use schema ID `face_privacy_policy_v1` and record:
+
+- case ID;
+- source video hash and frame count;
+- object category;
+- policy mode;
+- full source frame span;
+- per-track assignments;
+- assignment provenance;
+- unresolved policy assignments;
+- review status.
+
+Supported policy modes:
+
+- `redact_all`: default. Every supported face track is assigned redaction.
+- `redact_all_except_keep`: all supported face tracks are redacted except tracks explicitly marked `keep`.
+- `redact_selected`: only explicitly selected tracks are redacted.
+- `review_only`: all assignments require review.
+
+Assignments can be `redact`, `keep`, `ignore`, or `review`. A rejected track is retained in the census and creates a blocking review assignment, but it is not rendered as a defensible automatic privacy region. This avoids treating one-off weak or rejected proposals as accepted privacy evidence while still surfacing them to the reviewer.
+
+`redact_all_except_keep` is a case-policy choice. The system does not infer keep identity from benchmark labels, broad regions of interest, clothing, or role. The current implementation supports explicit keep track IDs and blocks ambiguous or unsupported fragments for review; it does not implement face recognition.
+
+Ground Truth is not imported by the policy compiler. It remains evaluation-only.
 
 ## Detection Output
 
@@ -212,7 +248,9 @@ Inputs may include:
 - evaluator output directory;
 - machine-readable Ground Truth for benchmark context.
 
-The review queue schema is versioned as `face_review_queue_schema_v1.0`. Each item records a stable item ID, clip/case ID, source video hash, object category, optional object or track IDs, frame/timestamp span, severity, blocking status, source stage, reason codes, explanation, provenance, metrics, unresolved-frame count, candidate-region status, review status, allowed actions, visual-evidence paths, and creation metadata.
+The raw review queue schema is versioned as `face_review_queue_schema_v1.0`. Each raw item records a stable item ID, clip/case ID, source video hash, object category, optional object or track IDs, frame/timestamp span, severity, blocking status, source stage, reason codes, explanation, provenance, metrics, unresolved-frame count, candidate-region status, review status, allowed actions, visual-evidence paths, and creation metadata.
+
+Review Bundle v1.2 keeps the presentation layer introduced in v1.1 and emits reviewer tasks under `face_reviewer_task_schema_v1.2`. This layer does not remove or rewrite raw signals. It groups related raw items into one concise task for the same object, overlapping or adjacent interval, and practical reviewer action. The generated `review_tasks.json` mirrors the task list and records which raw review item IDs each task represents.
 
 Reason-code families are deliberately separated:
 
@@ -220,11 +258,48 @@ Reason-code families are deliberately separated:
 - Ground-Truth-only evaluation evidence, such as `ground_truth_detector_miss` and `ground_truth_privacy_miss`;
 - non-blocking `random_audit_sample` items.
 
-Nearby or overlapping events are merged only when they describe the same practical review interval. Distinct `needs_review`, `rejected`, or preserved reviewed intervals remain separate cards. Raw detector misses remain detector evidence and are not folded into privacy blockers.
+Task categories are:
 
-The generated bundle contains local `index.html`, `INDEX.md`, `REVIEW_CHECKLIST.md`, queue/summary/config JSON, local CSS/JS, contact sheets, short clips, and a decisions template. HTML and JSON paths are relative so the bundle can be moved as a folder. No external JavaScript, CSS, fonts, analytics, or network calls are used.
+- `action_required`: automatic evidence is insufficient and corrected regions are still needed;
+- `corrected_result_check`: a reviewed or preserved final result is available and should be confirmed;
+- `automatic_continuity_check`: a raw detector miss or similar signal appears covered by downstream tracking or rendering;
+- `optional_spot_check`: deterministic random audit samples from apparently normal intervals;
+- `technical_only`: audit evidence that should not inflate the normal task count.
 
-The HTML page stores temporary decisions in browser-local state. Reviewers must explicitly export decisions before closing the page or moving machines. `redactor validate-review-decisions` validates the exported file against the original queue, rejects duplicate or unknown item IDs, checks status/action compatibility, and reports unresolved blocking items. It does not alter privacy regions. A `correction_required` decision preserves the final blocker until valid corrected regions are supplied and normal validation passes.
+Nearby or overlapping events are merged only when they describe the same practical review interval. Distinct `needs_review`, `rejected`, or preserved reviewed intervals remain separate tasks. Handled detector misses and provenance transitions can be kept in the Technical audit when they do not require a correction decision.
+
+Media roles are explicit:
+
+- `original`: unredacted source context;
+- `automatic`: the automatic privacy-region JSONL rendered over the shared source-frame interval;
+- `corrected_final`: the reviewed/corrected privacy-region JSONL rendered over the same source-frame interval;
+- `diagnostic`: overlays or contact sheets used as secondary evidence.
+
+The benchmark comparison clips use an explicit review-render configuration, currently `pixelate` with `margin_fraction=0.15`, `margin_pixels=0`, and `pixel_size=16`. This configuration is recorded in `review_config.json`, each role's media audit, and `review_media_audit.json`. It does not change the global `render-faces` defaults.
+
+Review Bundle v1.2.1 encodes task clips as browser-compatible H.264/yuv420p MP4s. Earlier review clips could carry valid FFprobe duration, frame-count, and resolution metadata while still failing local browser playback because the task-level writer emitted OpenCV `mp4v` video streams. FFprobe metadata remains useful, but bundle generation now also decodes first, middle, and final output frames, compares them against the selected source interval, and records luminance, black-pixel, frame-count, codec, pixel-format, and source-relative alignment checks. If visible source content is replaced by black output or repeated frames, the bundle fails before publication.
+
+Review Bundle v1.2.2 makes frame mapping explicit. Privacy-region JSONL records use source-video frame indices; short review clips use local frame indices starting at zero. For a task clip beginning at source frame `S`, local frame `L` maps to source frame `S + L`, and source frame `F` maps to local frame `F - S`. The bundle records this mapping for every displayed media role.
+
+The bundle also verifies rendered-region application. For every expected privacy region in a task clip, it decodes the unredacted Original clip and the rendered Automatic or Corrected final clip, maps the source frame to the local clip frame, expands the bbox with the configured review margin, and checks for a localized pixel change inside that bbox. This distinguishes JSON privacy coverage from visibly verified rendered coverage. Bundle generation fails when a region exists in JSON but does not visibly alter the intended decoded frame, when a region appears shifted to another local frame, or when declared and verified rendered coverage disagree.
+
+Review Bundle v1.2.3 adds reviewer-discovered findings. A deterministic random-audit sample starts as optional, but if a reviewer identifies a missed privacy target, that finding is recorded as human-review evidence with reason codes such as `reviewer_found_privacy_miss` and `silent_miss_found_by_random_audit`. Supplying the finding through `--reviewer-findings` promotes the interval to a blocking corrected-result task and moves the original random-audit item into the Technical audit so the default workflow does not ask the reviewer to decide the same interval twice.
+
+Reviewer findings are not frozen Ground Truth. They can expose whole-video privacy problems outside a selected dense benchmark window. A correction may therefore add reviewed privacy regions outside the benchmark ranges while the benchmark evaluator still reports its range-level metrics separately.
+
+Review Bundle v1.2.3 also adds `redactor serve-review-bundle`. The command serves a bundle from `127.0.0.1` using the Python standard library, restricts paths to the selected bundle directory, sets MP4 MIME types for embedded playback, and makes no external network calls. The HTML keeps direct file links as a fallback and displays a `file://` hint recommending the localhost server.
+
+The guided page saves a decision immediately, updates progress, marks the selected action, and advances to the next pending required task before optional spot checks. If an optional random-audit task is marked `Needs review`, exported-decision validation treats it as a remaining final blocker until corrected regions are supplied and confirmed.
+
+Review Bundle v1.2.3.1 fixes the grouped media controls. The toolbar resolves comparison videos from the currently visible Guided-review task at click time, so `Play together`, `Pause together`, and `Restart media` do not act on the hidden View-all task list. View-all mode disables grouped playback with an explanatory message; direct native video controls and file links remain available for every clip.
+
+The bundle computes hashes for media-role clips and suppresses duplicate display roles. Validation fails if one identical file would be silently shown as distinct primary evidence, such as both Original and Corrected final. Validation also fails when Automatic and Corrected final use different source-frame ranges, rendered frame counts, renderer configuration hashes, or incompatible durations.
+
+Corrected final media must be traceable to a corrected privacy-region input. A pre-rendered final MP4 alone is not sufficient provenance for a benchmark comparison. The corrected role records the privacy-region input path and hash, interval-decision input hash, source-frame range, source-frame sample hashes, output hash, and provenance counts for the interval.
+
+The generated bundle contains local `index.html`, `INDEX.md`, `REVIEW_CHECKLIST.md`, `review_queue.json`, `review_tasks.json`, `review_media_audit.json`, summary/config JSON, local CSS/JS, contact sheets, short clips, and a decisions template. HTML and JSON paths are relative so the bundle can be moved as a folder. No external JavaScript, CSS, fonts, analytics, or network calls are used.
+
+The HTML page stores temporary decisions in browser-local state. Reviewers must explicitly export decisions before closing the page or moving machines. Exported decisions identify the reviewer task ID, underlying raw review item IDs, selected user-facing action, machine-readable status, reviewed media role, and timestamp. `redactor validate-review-decisions` validates the exported file against the original queue, rejects duplicate or unknown task/item IDs, checks status/action compatibility, and reports unresolved blocking tasks. It does not alter privacy regions. A `correction_required` decision preserves the final blocker until valid corrected regions are supplied and normal validation passes.
 
 ## Processed-Frame Accounting
 

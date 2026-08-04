@@ -1008,14 +1008,14 @@ def evaluate_faces(
     "automatic_preview_video_path",
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Optional automatic preview video for evidence clips.",
+    help="Optional historical automatic preview video for input traceability.",
 )
 @click.option(
     "--reviewed-final-video",
     "reviewed_final_video_path",
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Optional reviewed-final video for evidence clips.",
+    help="Optional historical reviewed-final video for input traceability.",
 )
 @click.option(
     "--evaluation-dir",
@@ -1024,11 +1024,52 @@ def evaluate_faces(
     help="Optional evaluator output directory.",
 )
 @click.option(
+    "--corrected-privacy-regions",
+    "corrected_privacy_regions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional reviewed/corrected privacy_regions.jsonl used to render Corrected final clips.",
+)
+@click.option(
+    "--corrected-interval-decisions",
+    "corrected_interval_decisions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional reviewed/corrected interval_decisions.json for presentation context.",
+)
+@click.option(
+    "--corrected-render-manifest",
+    "corrected_render_manifest_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional reviewed-final render_manifest.json for presentation context.",
+)
+@click.option(
+    "--corrected-render-validation",
+    "corrected_render_validation_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional reviewed-final render validation.json for presentation context.",
+)
+@click.option(
+    "--corrected-evaluation-dir",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=None,
+    help="Optional reviewed-final evaluator output directory for presentation context.",
+)
+@click.option(
     "--ground-truth",
     "ground_truth_path",
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
     default=None,
     help="Optional machine-readable ground truth for manifesting benchmark context.",
+)
+@click.option(
+    "--reviewer-findings",
+    "reviewer_findings_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional reviewer-discovered findings JSON to promote audit misses into tasks.",
 )
 @click.option(
     "--output-dir",
@@ -1046,6 +1087,24 @@ def evaluate_faces(
 @click.option("--random-seed", default=20260803, show_default=True, type=int)
 @click.option("--merge-gap-frames", default=12, show_default=True, type=click.IntRange(min=0))
 @click.option("--context-frames", default=18, show_default=True, type=click.IntRange(min=0))
+@click.option(
+    "--one-frame-miss-context-frames",
+    default=12,
+    show_default=True,
+    type=click.IntRange(min=0),
+    help="Context frames on each side for one-frame detector-miss continuity tasks.",
+)
+@click.option(
+    "--review-render-method",
+    type=click.Choice(["gaussian_blur", "pixelate"], case_sensitive=True),
+    default="pixelate",
+    show_default=True,
+    help="Redaction method for aligned review-comparison clips.",
+)
+@click.option("--review-margin-pixels", default=0, show_default=True, type=click.IntRange(min=0))
+@click.option("--review-margin-fraction", default=0.15, show_default=True, type=float)
+@click.option("--review-blur-kernel", default=51, show_default=True, type=click.IntRange(min=3))
+@click.option("--review-pixel-size", default=16, show_default=True, type=click.IntRange(min=2))
 @click.option("--no-visuals", is_flag=True, help="Skip clip/contact-sheet generation.")
 @click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
 def build_review_bundle(
@@ -1063,13 +1122,25 @@ def build_review_bundle(
     automatic_preview_video_path: Path | None,
     reviewed_final_video_path: Path | None,
     evaluation_dir: Path | None,
+    corrected_privacy_regions_path: Path | None,
+    corrected_interval_decisions_path: Path | None,
+    corrected_render_manifest_path: Path | None,
+    corrected_render_validation_path: Path | None,
+    corrected_evaluation_dir: Path | None,
     ground_truth_path: Path | None,
+    reviewer_findings_path: Path | None,
     output_dir: Path,
     random_sample_count: int,
     random_sample_frames: int,
     random_seed: int,
     merge_gap_frames: int,
     context_frames: int,
+    one_frame_miss_context_frames: int,
+    review_render_method: str,
+    review_margin_pixels: int,
+    review_margin_fraction: float,
+    review_blur_kernel: int,
+    review_pixel_size: int,
     no_visuals: bool,
     overwrite: bool,
 ) -> None:
@@ -1084,6 +1155,14 @@ def build_review_bundle(
         merge_gap_frames=merge_gap_frames,
         context_frames=context_frames,
         generate_visuals=not no_visuals,
+        one_frame_miss_context_frames=one_frame_miss_context_frames,
+        review_render=review_bundle.ReviewRenderConfig(
+            method=review_render_method,
+            margin_pixels=review_margin_pixels,
+            margin_fraction=review_margin_fraction,
+            blur_kernel=review_blur_kernel,
+            pixel_size=review_pixel_size,
+        ),
     )
     try:
         summary = review_bundle.build_review_bundle(
@@ -1102,7 +1181,13 @@ def build_review_bundle(
             automatic_preview_video_path=automatic_preview_video_path,
             reviewed_final_video_path=reviewed_final_video_path,
             evaluation_dir=evaluation_dir,
+            corrected_privacy_regions_path=corrected_privacy_regions_path,
+            corrected_interval_decisions_path=corrected_interval_decisions_path,
+            corrected_render_manifest_path=corrected_render_manifest_path,
+            corrected_render_validation_path=corrected_render_validation_path,
+            corrected_evaluation_dir=corrected_evaluation_dir,
             ground_truth_path=ground_truth_path,
+            reviewer_findings_path=reviewer_findings_path,
             overwrite=overwrite,
         )
     except (
@@ -1118,10 +1203,40 @@ def build_review_bundle(
         raise click.ClickException(str(exc)) from exc
 
     click.echo(
-        f"Built review bundle: {summary['total_items']} items, "
-        f"{summary['blocking_items']} blocking."
+        f"Built review bundle: {summary.get('reviewer_task_count', summary['total_items'])} "
+        f"reviewer tasks, {summary.get('technical_only_items', 0)} technical-only signals."
     )
     click.echo(f"Open: {output_dir / 'index.html'}")
+
+
+@main.command("serve-review-bundle")
+@click.argument(
+    "bundle_dir",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
+@click.option("--port", default=0, show_default=True, type=click.IntRange(min=0, max=65535))
+@click.option(
+    "--open", "open_browser", is_flag=True, help="Open the bundle in the default browser."
+)
+def serve_review_bundle(bundle_dir: Path, port: int, open_browser: bool) -> None:
+    """Serve a local review bundle from 127.0.0.1 for reliable embedded video playback."""
+    from redactor import review_bundle
+
+    try:
+        server, url = review_bundle.create_review_bundle_server(bundle_dir, port=port)
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Serving review bundle on {url}")
+    click.echo("Press Ctrl+C to stop.")
+    if open_browser:
+        review_bundle.webbrowser.open(url)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        click.echo("Stopping review bundle server.")
+    finally:
+        server.server_close()
 
 
 @main.command("validate-review-decisions")
@@ -1169,6 +1284,189 @@ def validate_review_decisions(
         for error in result["errors"]:
             click.echo(f"- {error}")
         raise click.ClickException("review decision validation failed")
+
+
+@main.command("validate-face-policy")
+@click.argument(
+    "policy_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--source-video",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional source video used to validate policy hash and frame count.",
+)
+def validate_face_policy(policy_path: Path, source_video: Path | None) -> None:
+    """Validate a machine-readable face privacy policy."""
+    from redactor import face_policy
+
+    try:
+        result = face_policy.validate_policy_file(policy_path, source_video=source_video)
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Face privacy policy {result['status']}: "
+        f"{result['track_assignment_count']} track assignments; mode={result['mode']}."
+    )
+    for error in result["errors"]:
+        click.echo(f"- {error}")
+    if result["status"] != "valid":
+        raise click.ClickException("face policy validation failed")
+
+
+@main.command("redact-video")
+@click.argument(
+    "input_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+)
+@click.option("--faces/--no-faces", default=True, show_default=True, help="Run face redaction.")
+@click.option(
+    "--policy",
+    "policy_mode",
+    type=click.Choice(
+        ["redact_all", "redact_all_except_keep", "redact_selected", "review_only"],
+        case_sensitive=True,
+    ),
+    default="redact_all",
+    show_default=True,
+    help="Case-level face privacy policy.",
+)
+@click.option(
+    "--privacy-policy",
+    "policy_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional machine-readable face privacy policy JSON.",
+)
+@click.option(
+    "--keep-track-id",
+    "keep_track_ids",
+    multiple=True,
+    type=int,
+    help="Explicit case-policy keep track. Not required for default redact_all.",
+)
+@click.option(
+    "--selected-track-id",
+    "selected_track_ids",
+    multiple=True,
+    type=int,
+    help="Explicit redact track for redact_selected policy.",
+)
+@click.option(
+    "--detections",
+    "detections_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Advanced: reuse an existing ADAS detections JSONL instead of running detection.",
+)
+@click.option(
+    "--model",
+    "model_path",
+    required=False,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Face model path. For ADAS this is the XML path.",
+)
+@click.option(
+    "--adas-xml",
+    "adas_xml_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="OpenVINO face-detection-adas-0001 XML path. REDACTOR_ADAS_XML is also honored.",
+)
+@click.option(
+    "--adas-bin",
+    "adas_bin_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="OpenVINO face-detection-adas-0001 BIN path. REDACTOR_ADAS_BIN is also honored.",
+)
+@click.option("--proposal-threshold", default=0.20, show_default=True, type=click.FloatRange(0, 1))
+@click.option("--primary-threshold", default=0.30, show_default=True, type=click.FloatRange(0, 1))
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Root directory for the full-video face privacy case output.",
+)
+@click.option("--no-detection-overlay", is_flag=True, help="Skip diagnostic detection overlay.")
+@click.option("--overwrite", is_flag=True, help="Replace outputs in non-empty output directories.")
+def redact_video(
+    input_path: Path,
+    faces: bool,
+    policy_mode: str,
+    policy_path: Path | None,
+    keep_track_ids: tuple[int, ...],
+    selected_track_ids: tuple[int, ...],
+    detections_path: Path | None,
+    model_path: Path | None,
+    adas_xml_path: Path | None,
+    adas_bin_path: Path | None,
+    proposal_threshold: float,
+    primary_threshold: float,
+    output_dir: Path,
+    no_detection_overlay: bool,
+    overwrite: bool,
+) -> None:
+    """Run the production-oriented full-video face privacy workflow."""
+    if not faces:
+        raise click.ClickException("redact-video currently supports --faces only")
+    from redactor import detection, face_policy
+
+    resolved_detections_path = detections_path
+    try:
+        if resolved_detections_path is None:
+            detection_dir = output_dir / "detection"
+            resolved_backend = detection.resolve_detector_backend("face", None)
+            resolved_model_path = resolve_detection_model_path(
+                category="face",
+                detector_backend=resolved_backend,
+                model_path=model_path,
+                adas_xml_path=adas_xml_path,
+            )
+            resolved_adas_bin = (
+                adas_bin_path
+                if adas_bin_path is not None
+                else detection.default_adas_bin_path(resolved_model_path)
+            )
+            detection.run_detection(
+                input_path,
+                category="face",
+                model_path=resolved_model_path,
+                threshold=proposal_threshold,
+                output_dir=detection_dir,
+                overwrite=overwrite,
+                detector_backend=resolved_backend,
+                adas_bin_path=resolved_adas_bin,
+                primary_threshold=primary_threshold,
+                write_overlay_video=not no_detection_overlay,
+            )
+            resolved_detections_path = detection_dir / "detections.jsonl"
+        audit = face_policy.run_full_video_policy_flow(
+            input_path,
+            output_dir=output_dir,
+            detections_path=resolved_detections_path,
+            mode=policy_mode,
+            policy_path=policy_path,
+            keep_track_ids=keep_track_ids,
+            selected_track_ids=selected_track_ids,
+            overwrite=overwrite,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        "Full-video face privacy preview complete: "
+        f"{audit['privacy_summary']['redact_track_count']} redact tracks; "
+        f"{audit['privacy_summary']['review_required_interval_count']} review-required intervals."
+    )
+    click.echo(f"Final export status: {audit['final_export_status']}")
+    click.echo(f"Wrote audit manifest: {output_dir / 'audit_manifest.json'}")
 
 
 @main.command("face-pipeline")
@@ -1234,7 +1532,7 @@ def face_pipeline(
     no_recovery_overlay: bool,
     overwrite: bool,
 ) -> None:
-    """Run face detection, ordinary tracking, and optional privacy gap recovery."""
+    """Diagnostic detection/tracking path. For full-video redaction use redact-video."""
     from redactor import detection, privacy_gap_recovery, tracking
 
     resolved_backend = detection.resolve_detector_backend("face", None)
