@@ -1,5 +1,15 @@
 # System Overview Changelog
 
+## v022 — 2026-08-05
+
+Added Shared Post-Detection Privacy Pipeline Foundation v1:
+
+- documented common privacy observation, temporal-region, gap-decision, privacy-region, processing-span, renderer, and review-task contracts;
+- added category profiles for faces and plates while preserving separate detector thresholds and category safety behavior;
+- recorded that plate rendering now delegates its full-preview rendering and rendered-region verification to the shared renderer core through the existing wrapper;
+- clarified that the frozen face tracking/recovery engine remains category-specific with adapters and parity tests rather than a broad rewrite;
+- preserved existing supported CLI commands and postponed final unified face/plate rendering.
+
 ## v021 — 2026-08-05
 
 Added Full-Video Plate Processing and Partial-Span Safety v1:

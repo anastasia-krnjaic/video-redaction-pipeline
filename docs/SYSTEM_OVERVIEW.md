@@ -98,6 +98,10 @@ flowchart LR
   N --> O["Local review bundle"]
 ```
 
+The same shape now applies to license plates after detection. Detectors remain specialized: ADAS finds faces and OIM YOLOv9-S-608 finds plates. Once a detector has produced evidence, the system normalizes that evidence into shared privacy records so frame spans, temporal regions, gap decisions, approved privacy regions, rendering, provenance counts, and review tasks can be handled consistently across categories.
+
+Each category still has its own profile. A face profile and a plate profile can use different geometry checks, association gates, gap limits, render margins, and review language. Sharing the post-detection contract does not mean sharing detector thresholds or pretending faces and plates behave the same way.
+
 The stages are:
 
 - **Face detection:** finds face proposals on individual frames.
@@ -278,6 +282,7 @@ Implemented:
 - automated face evaluation in detector, automatic, and reviewed-final modes;
 - automated local Review Bundle v1.2.3 with raw signal preservation, concise reviewer tasks, guided review and auto-advance, reviewer-discovered random-audit miss promotion, loopback bundle serving, aligned same-style local media comparison, decoded-frame visual-content checks, source-to-local frame mapping, bbox-localized rendered-region validation, deterministic audit samples, media provenance audit, and exported-decision validation;
 - FFprobe validation plus decoded-frame validation of rendered media resolution, frame rate, duration, frame count, audio presence, visible content, browser-compatible encoding, and expected region application;
+- shared post-detection privacy records, category profiles, span accounting, rendering core, and review-task contracts for faces, plates, and future privacy categories;
 - tracked ADAS detector evaluation evidence;
 - selected OIM YOLOv9-S-608 plate detector workflow;
 - prototype plate tracking and bounded short-gap recovery with review intervals;
@@ -316,4 +321,4 @@ Not yet implemented:
 
 ## Detailed Technical Notes
 
-Face implementation details, JSON output conventions, provenance fields, thresholds, safety gates, and diagnostic command notes live in `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`. Plate detector and tracking details live in `docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`.
+Face implementation details, JSON output conventions, provenance fields, thresholds, safety gates, and diagnostic command notes live in `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`. Plate detector and tracking details live in `docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`. The shared post-detection architecture lives in `docs/PRIVACY_PIPELINE_ARCHITECTURE.md`.

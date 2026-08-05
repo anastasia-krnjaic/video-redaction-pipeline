@@ -39,6 +39,20 @@ Weak observations may support temporal tracking, but they must not independently
 
 Lower-level commands (`detect`, `track`, `recover-face-gaps`, and `render-faces`) remain diagnostic and advanced entry points.
 
+## Shared Post-Detection Contracts
+
+Face detection and face tracking behavior remain frozen, but face render regions
+can now be adapted to the shared privacy records in
+`src/redactor/privacy_records.py`. The face profile in
+`src/redactor/privacy_profiles.py` records the active ADAS detector ID, selected
+ADAS threshold policy, existing tracking profile, privacy-gap recovery settings,
+and render profile hash.
+
+The current face tracking and privacy-gap recovery engines are intentionally not
+rewritten in this milestone. Shared contracts are used for parity tests and for
+future unified rendering/review work once exact behavior preservation has been
+demonstrated.
+
 ## Full-Video Case Privacy Policy
 
 `src/redactor/face_policy.py` contains the production-oriented policy layer. It keeps operational privacy policy separate from benchmark Ground Truth.

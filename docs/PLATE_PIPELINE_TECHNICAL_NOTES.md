@@ -114,6 +114,12 @@ records. Each detection has:
 Plate detector records are detector evidence only. They are not plate tracks,
 privacy-region coverage, reviewed corrections, or final rendering proof.
 
+Plate render regions now adapt to the shared post-detection records in
+`src/redactor/privacy_records.py`. `src/redactor/privacy_profiles.py` records the
+selected OIM detector configuration hash, Plate Tracking v1 configuration hash,
+geometry gates, association gates, interpolation limits, review policy, and
+render profile hash.
+
 ## Frame-Span Safety
 
 Plate processing records keep source-video frame indices authoritative. The
@@ -203,6 +209,13 @@ detector or tracker coordinates and without using per-video tuning.
 Rendered-region validation decodes the output video and checks that expected
 plate boxes changed inside the expanded bbox. FFprobe metadata alone is not
 treated as proof that redaction was applied.
+
+The plate preview renderer now calls the shared rendering core in
+`src/redactor/privacy_rendering.py` through the existing `render-plates` wrapper.
+The wrapper keeps plate-specific eligibility, manifests, review intervals, and
+CLI behavior intact while sharing H.264/yuv420p encoding, deterministic region
+ordering, provenance counting, partial-preview labeling, and decoded
+rendered-region verification.
 
 The plate review bundle creates local, relative-path HTML evidence for
 unresolved gaps, uncertain tracks, short accepted tracks that may be false

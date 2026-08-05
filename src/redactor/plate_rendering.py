@@ -12,8 +12,16 @@ from typing import Any
 import cv2 as cv
 import numpy as np
 
-from redactor import frame_spans, media, plate_detection, plate_tracking, rendering
+from redactor import (
+    frame_spans,
+    media,
+    plate_detection,
+    plate_tracking,
+    privacy_rendering,
+    rendering,
+)
 from redactor.detection import rational_to_float
+from redactor.privacy_records import APPROVAL_ACCEPTED, CATEGORY_PLATE, PrivacyRegionRecord
 
 SCHEMA_VERSION = "plate_rendering.v1"
 REVIEW_SCHEMA_VERSION = "plate_review_bundle.v1"
@@ -143,6 +151,23 @@ class PlateRenderRegion:
             provenance=self.provenance,
             state="covered",
             source_record=self.source_record,
+        )
+
+    def to_privacy_region(self) -> PrivacyRegionRecord:
+        return PrivacyRegionRecord(
+            category=CATEGORY_PLATE,
+            source_frame=self.frame_index,
+            bbox_xyxy=self.bbox_xyxy,
+            provenance=self.provenance,
+            approval_state=APPROVAL_ACCEPTED,
+            render_eligible=True,
+            object_id=self.track_uid,
+            source_record={
+                **self.source_record,
+                "category": CATEGORY_PLATE,
+                "track_id": self.track_id,
+                "track_uid": self.track_uid,
+            },
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -472,86 +497,21 @@ def render_plate_video(
     log_path: Path,
     partial_processing_label: bool = False,
 ) -> tuple[int, int, str]:
-    if output_video.exists() and not overwrite:
-        raise FileExistsError(f"{output_video} already exists; pass --overwrite to replace it")
-    output_video.parent.mkdir(parents=True, exist_ok=True)
-    video_only_path = output_video.with_name(f".{output_video.stem}.video_only.mp4")
-    h264_path = output_video.with_name(f".{output_video.stem}.h264.mp4")
-    for path in (video_only_path, h264_path):
-        if path.exists():
-            path.unlink()
-
-    settings = config.render_settings()
-    capture = cv.VideoCapture(str(source_video))
-    if not capture.isOpened():
-        raise ValueError(f"could not open video: {source_video}")
-    writer = cv.VideoWriter(
-        str(video_only_path),
-        cv.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (width, height),
-    )
-    if not writer.isOpened():
-        capture.release()
-        raise ValueError(f"could not create video: {video_only_path}")
-
-    rendered_frames = 0
-    rendered_regions = 0
-    try:
-        while True:
-            ok, frame = capture.read()
-            if not ok:
-                break
-            redacted = rendering.render_frame(frame, rendered_frames, regions_by_frame, settings)
-            if partial_processing_label:
-                draw_partial_processing_label(redacted)
-            rendered_regions += rendering.count_renderable_regions(
-                regions_by_frame.get(rendered_frames, []),
-                frame_width=width,
-                frame_height=height,
-                settings=settings,
-            )
-            writer.write(redacted)
-            rendered_frames += 1
-    finally:
-        capture.release()
-        writer.release()
-
-    audio_handling = encode_browser_mp4(
+    return privacy_rendering.render_privacy_video(
         source_video,
-        video_only_path,
-        h264_path,
+        output_video,
+        regions_by_frame,
+        settings=config.render_settings(),
+        fps=fps,
+        width=width,
+        height=height,
         source_has_audio=source_has_audio,
-        config=config,
-    )
-    h264_path.replace(output_video)
-    if video_only_path.exists():
-        video_only_path.unlink()
-    append_log(
-        log_path,
-        {
-            "audio_handling": audio_handling,
-            "event": "render_finished",
-            "output_video": output_video.name,
-            "rendered_frames": rendered_frames,
-            "rendered_regions": rendered_regions,
-        },
-    )
-    return rendered_frames, rendered_regions, audio_handling
-
-
-def draw_partial_processing_label(frame: np.ndarray) -> None:
-    label = "PARTIAL PROCESSING - NOT FINAL"
-    cv.rectangle(frame, (16, 16), (470, 58), (0, 0, 0), -1)
-    cv.putText(
-        frame,
-        label,
-        (28, 45),
-        cv.FONT_HERSHEY_SIMPLEX,
-        0.8,
-        (0, 0, 255),
-        2,
-        cv.LINE_AA,
+        overwrite=overwrite,
+        log_path=log_path,
+        video_codec=config.video_codec,
+        pixel_format=config.pixel_format,
+        movflags=config.movflags,
+        partial_processing_label=partial_processing_label,
     )
 
 
@@ -611,115 +571,15 @@ def verify_rendered_regions(
     frame_height: int,
     max_failures_reported: int = 50,
 ) -> dict[str, Any]:
-    expected_by_frame: dict[int, list[PlateRenderRegion]] = {}
-    for region in regions:
-        expected_by_frame.setdefault(region.frame_index, []).append(region)
-    expected_frames = set(expected_by_frame)
-    if not expected_frames:
-        return {
-            "expected_region_count": 0,
-            "expected_region_frames": 0,
-            "missing_rendered_region_count": 0,
-            "passed": True,
-            "verified_region_count": 0,
-            "verified_region_frames": 0,
-        }
-
-    source_capture = cv.VideoCapture(str(source_video))
-    output_capture = cv.VideoCapture(str(output_video))
-    if not source_capture.isOpened() or not output_capture.isOpened():
-        source_capture.release()
-        output_capture.release()
-        raise ValueError("could not open source or rendered video for region verification")
-
-    missing: list[dict[str, Any]] = []
-    verified_regions = 0
-    verified_frames: set[int] = set()
-    frame_index = 0
-    try:
-        while True:
-            source_ok, source_frame = source_capture.read()
-            output_ok, output_frame = output_capture.read()
-            if not source_ok or not output_ok:
-                break
-            if frame_index in expected_frames:
-                frame_has_verified_region = False
-                for region in expected_by_frame[frame_index]:
-                    box = rendering.expanded_clipped_box(
-                        region.bbox_xyxy,
-                        frame_width=frame_width,
-                        frame_height=frame_height,
-                        margin_pixels=config.margin_pixels,
-                        margin_fraction=config.margin_fraction,
-                    )
-                    if box is None:
-                        missing.append(
-                            {
-                                "bbox_xyxy": list(region.bbox_xyxy),
-                                "frame_index": frame_index,
-                                "reason": "invalid_expanded_box",
-                                "track_uid": region.track_uid,
-                            }
-                        )
-                        continue
-                    metrics = localized_change_metrics(source_frame, output_frame, box)
-                    if metrics["region_changed"]:
-                        verified_regions += 1
-                        frame_has_verified_region = True
-                    elif len(missing) < max_failures_reported:
-                        missing.append(
-                            {
-                                "bbox_xyxy": list(region.bbox_xyxy),
-                                "expanded_bbox_xyxy": list(box),
-                                "frame_index": frame_index,
-                                "mean_absdiff": metrics["mean_absdiff"],
-                                "changed_pixel_fraction": metrics["changed_pixel_fraction"],
-                                "reason": "expected_region_not_visibly_redacted",
-                                "track_uid": region.track_uid,
-                            }
-                        )
-                if frame_has_verified_region:
-                    verified_frames.add(frame_index)
-            frame_index += 1
-    finally:
-        source_capture.release()
-        output_capture.release()
-
-    expected_region_count = len(regions)
-    return {
-        "expected_region_count": expected_region_count,
-        "expected_region_frames": len(expected_frames),
-        "missing_rendered_region_count": max(0, expected_region_count - verified_regions),
-        "missing_rendered_regions": missing,
-        "passed": verified_regions == expected_region_count,
-        "verified_region_count": verified_regions,
-        "verified_region_frames": len(verified_frames),
-    }
-
-
-def localized_change_metrics(
-    original: np.ndarray,
-    rendered: np.ndarray,
-    box: Box,
-) -> dict[str, Any]:
-    x1, y1, x2, y2 = box
-    original_roi = original[y1:y2, x1:x2]
-    rendered_roi = rendered[y1:y2, x1:x2]
-    if original_roi.size == 0 or rendered_roi.size == 0:
-        return {
-            "changed_pixel_fraction": 0.0,
-            "mean_absdiff": 0.0,
-            "region_changed": False,
-        }
-    diff = cv.absdiff(original_roi, rendered_roi)
-    gray = cv.cvtColor(diff, cv.COLOR_BGR2GRAY)
-    changed_fraction = float(np.count_nonzero(gray > 8) / gray.size)
-    mean_absdiff = float(gray.mean())
-    return {
-        "changed_pixel_fraction": round(changed_fraction, 6),
-        "mean_absdiff": round(mean_absdiff, 6),
-        "region_changed": mean_absdiff >= 1.0 and changed_fraction >= 0.01,
-    }
+    return privacy_rendering.verify_rendered_regions(
+        source_video,
+        output_video,
+        [region.to_render_region() for region in regions],
+        settings=config.render_settings(),
+        frame_width=frame_width,
+        frame_height=frame_height,
+        max_failures_reported=max_failures_reported,
+    )
 
 
 def render_payloads(
