@@ -1,13 +1,13 @@
 # Video Redaction Pipeline - System Overview
 
-- **Document version:** v020
+- **Document version:** v023
 - **Last updated:** 2026-08-05
-- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus minimal temporal tracking, bounded gap recovery, non-final automatic plate previews, and a local plate review bundle.
+- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus shared accumulated-evidence tracking, bounded gap recovery, non-final automatic plate previews, and a local plate review bundle.
 - **Canonical document:** `docs/SYSTEM_OVERVIEW.md`
 
 ## What The System Is For
 
-This repository builds a local video-redaction pipeline. Its most complete path is face privacy: finding faces, keeping those detections connected over time, rendering accepted privacy regions, measuring the result against available truth, and creating a compact review package for intervals that deserve human attention. License-plate work now has a selected detector, an initial continuity stage, non-final automatic previews from accepted tracks, and review bundles for gaps or uncertain plate-like tracks.
+This repository builds a local video-redaction pipeline. Its most complete path is face privacy: finding faces, keeping those detections connected over time, rendering accepted privacy regions, measuring the result against available truth, and creating a compact review package for intervals that deserve human attention. License-plate work now has a selected detector, an accumulated-evidence continuity stage, non-final automatic previews from accepted tracks, and review bundles for gaps or uncertain plate-like tracks.
 
 The system is not a finished automatic redaction product, and it does not make a universal zero-leak claim. It produces structured evidence, diagnostic outputs, non-final previews, and approved face-redacted MP4s when the available privacy-region evidence passes final safety gates.
 
@@ -98,9 +98,9 @@ flowchart LR
   N --> O["Local review bundle"]
 ```
 
-The same shape now applies to license plates after detection. Detectors remain specialized: ADAS finds faces and OIM YOLOv9-S-608 finds plates. Once a detector has produced evidence, the system normalizes that evidence into shared privacy records so frame spans, temporal regions, gap decisions, approved privacy regions, rendering, provenance counts, and review tasks can be handled consistently across categories.
+The same shape now applies to license plates after detection. Detectors remain specialized: ADAS finds faces and OIM YOLOv9-S-608 finds plates. Once a detector has produced evidence, the system normalizes that evidence into shared privacy records so frame spans, temporal regions, gap decisions, approved privacy regions, rendering, provenance counts, review tasks, and accumulated temporal-evidence decisions can be handled consistently across categories.
 
-Each category still has its own profile. A face profile and a plate profile can use different geometry checks, association gates, gap limits, render margins, and review language. Sharing the post-detection contract does not mean sharing detector thresholds or pretending faces and plates behave the same way.
+Each category still has its own profile. A face profile and a plate profile can use different geometry checks, association gates, evidence-confirmation rules, gap limits, render margins, and review language. Sharing the post-detection contract does not mean sharing detector thresholds or pretending faces and plates behave the same way. The shared accumulated-evidence engine is active for plate tracking only; production face tracking remains on its frozen Face Pipeline v1 path.
 
 The stages are:
 
@@ -241,9 +241,9 @@ OIM was selected after finalist metrics and manual full-video visual adjudicatio
 
 The decision is backed by `data/evaluations/license_plate_detector_oim_yolov9_s_608_v1/`. Historical OpenVINO 0106/0123, Intel YOLOv8n, RF-DETR, RT-DETR, and LPD-YuNet experiments are preserved in `docs/archive/license_plate_detector_bakeoff/`.
 
-The plate tracker now connects OIM detections into deterministic temporal tracks, rejects isolated noise, and interpolates only short two-anchor gaps that pass motion, scale, and scene-cut checks. Longer gaps, unstable tracks, and possible static-overlay false positives remain review evidence.
+The plate tracker now connects OIM detections into deterministic temporal tracks, accumulates evidence over time, rejects isolated noise, and interpolates only short two-anchor gaps that pass motion, scale, and scene-cut checks. A track starts tentative and becomes accepted only after enough detector observations, persistence, density, confidence, and motion/scale consistency support the same plate. Hysteresis keeps accepted tracks stable through short misses, but long ambiguous gaps remain review evidence. Interpolation can support continuity, but it does not count as raw detector evidence and cannot by itself confirm a track.
 
-Plate Rendering and Review v1 can create a clean automatic preview from accepted plate tracks only. It uses pixelation with one global 15% margin, preserves detector-versus-tracker provenance, validates that expected regions changed in decoded output frames, and builds a local review bundle for unresolved gaps, uncertain tracks, possible false accepted tracks, and deterministic spot checks. Plate processing now treats full-source span coverage as a safety boundary: normal plate detection and tracking process the complete input video by default, and the renderer refuses to present partial tracking as a normal full-video preview or final candidate. A deliberately partial diagnostic preview must be explicitly requested and marked non-final. The preview is not final plate approval; reviewed correction intake and unified face/plate rendering remain later work.
+Plate Rendering and Review v1 can create a clean automatic preview from accepted plate tracks only. It uses pixelation with one global 15% margin, preserves detector-versus-tracker provenance, validates that expected regions changed in decoded output frames, and builds a local review bundle for unresolved gaps, uncertain tracks, possible false accepted tracks, and deterministic spot checks. Shared evidence increased the full-night automatic plate preview from 36 rendered regions to 1,673 rendered regions while keeping review-required gaps non-final. Plate processing treats full-source span coverage as a safety boundary: normal plate detection and tracking process the complete input video by default, and the renderer refuses to present partial tracking as a normal full-video preview or final candidate. A deliberately partial diagnostic preview must be explicitly requested and marked non-final. The preview is not final plate approval; reviewed correction intake and unified face/plate rendering remain later work.
 
 ## Outputs And Audit Information
 
@@ -282,10 +282,10 @@ Implemented:
 - automated face evaluation in detector, automatic, and reviewed-final modes;
 - automated local Review Bundle v1.2.3 with raw signal preservation, concise reviewer tasks, guided review and auto-advance, reviewer-discovered random-audit miss promotion, loopback bundle serving, aligned same-style local media comparison, decoded-frame visual-content checks, source-to-local frame mapping, bbox-localized rendered-region validation, deterministic audit samples, media provenance audit, and exported-decision validation;
 - FFprobe validation plus decoded-frame validation of rendered media resolution, frame rate, duration, frame count, audio presence, visible content, browser-compatible encoding, and expected region application;
-- shared post-detection privacy records, category profiles, span accounting, rendering core, and review-task contracts for faces, plates, and future privacy categories;
+- shared post-detection privacy records, category profiles, accumulated temporal-evidence engine, span accounting, rendering core, and review-task contracts for faces, plates, and future privacy categories;
 - tracked ADAS detector evaluation evidence;
 - selected OIM YOLOv9-S-608 plate detector workflow;
-- prototype plate tracking and bounded short-gap recovery with review intervals;
+- prototype plate tracking with shared accumulated evidence, bounded short-gap recovery, and review intervals;
 - non-final plate preview rendering from accepted tracks plus a local plate review bundle;
 - historical archives for face and plate detector bake-offs.
 

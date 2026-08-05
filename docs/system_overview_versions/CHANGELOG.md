@@ -1,5 +1,15 @@
 # System Overview Changelog
 
+## v023 — 2026-08-05
+
+Added Shared Temporal Evidence Accumulation and Hysteresis Engine v1 for plates:
+
+- documented the shared accumulated-evidence engine and category-profile boundary;
+- recorded that the engine is active for plate track confirmation but not for production face tracking;
+- added audited evidence components, hysteresis, retrospective promotion, and bounded stitch-decision behavior;
+- clarified that interpolation can support plate continuity but cannot satisfy the detector-observation count required for automatic confirmation;
+- recorded the selected plate evidence configuration hash and before/after plate-rendering result.
+
 ## v022 — 2026-08-05
 
 Added Shared Post-Detection Privacy Pipeline Foundation v1:

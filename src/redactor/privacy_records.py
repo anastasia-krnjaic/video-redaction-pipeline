@@ -90,6 +90,7 @@ class TemporalRegion:
     track_state: str
     render_eligible: bool
     review_status: str
+    confidence: float | None = None
     reasons: tuple[str, ...] = ()
     schema_version: str = SCHEMA_VERSION
 
@@ -106,6 +107,7 @@ class TemporalRegion:
             "render_eligible": self.render_eligible,
             "review_status": self.review_status,
             "schema_version": self.schema_version,
+            "confidence": round(float(self.confidence), 6) if self.confidence is not None else None,
             "source_frame": self.source_frame,
             "source_provenance": self.source_provenance,
             "track_state": self.track_state,

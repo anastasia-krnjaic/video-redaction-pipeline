@@ -53,6 +53,12 @@ rewritten in this milestone. Shared contracts are used for parity tests and for
 future unified rendering/review work once exact behavior preservation has been
 demonstrated.
 
+Shared Temporal Evidence v1 is active for plate track confirmation only. The
+Face Pipeline continues to use the frozen ADAS face tracking, privacy gap
+recovery, reviewed-region preservation, and rendering behavior. Face profile
+metadata records compatibility values for future migration planning, but those
+values are not used to confirm or reject production face tracks.
+
 ## Full-Video Case Privacy Policy
 
 `src/redactor/face_policy.py` contains the production-oriented policy layer. It keeps operational privacy policy separate from benchmark Ground Truth.

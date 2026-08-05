@@ -177,6 +177,53 @@ detector hits. Tracking metrics therefore report detector recall, observed track
 coverage, interpolated coverage, unresolved gaps, false track burden, and review
 intervals separately.
 
+## Shared Temporal Evidence v1
+
+Plate tracking now runs the shared accumulated-evidence and hysteresis engine in
+`src/redactor/privacy_evidence.py` after the existing deterministic association
+and bounded gap-decision pass. The OIM detector threshold, tiling policy, plate
+association gates, and interpolation limits remain unchanged.
+
+Selected plate evidence configuration hash:
+`9938297fdb54d3b3cc0817ec1112fd4ac94689ba93e3d8d55f458a7009535c2f`.
+
+The evidence engine records separate components for:
+
+- persistence;
+- detector-observation count;
+- observation density;
+- mean and lower-tail detector confidence;
+- aspect-ratio, center-motion, and scale consistency;
+- source-provenance support;
+- internal-gap, abrupt-jump, competing-track, scene-cut, and screen-lock risk
+  penalties.
+
+Tracks begin as `tentative`. A track may become `confirmed` only when the plate
+profile has enough accumulated support, including enough real detector
+observations. Accepted interpolation can support continuity after confirmation,
+but it does not count as detector evidence and cannot by itself satisfy the
+detector-observation count. Hysteresis keeps a confirmed track stable through
+short misses, while long ambiguous gaps remain review intervals.
+
+When a track becomes confirmed, earlier valid frames from the same consistent
+tracklet can be retrospectively promoted for rendering. Original provenance is
+preserved: detector observations remain `plate_detector_observation`, and
+interpolated frames remain `plate_track_interpolation`.
+
+The full-night root-cause audit found that many valid OIM target-plate
+detections were previously excluded because their tracklets stayed
+`needs_review`. Shared evidence increased the full-night automatic preview from
+36 rendered regions to 1,673 rendered regions while keeping final approval false
+because review-required gaps remain. Day stayed at 96 rendered regions and the
+close/stress clip stayed at 608 rendered regions. The all-visible adjudication
+audit found no true false accepted regions after visual review reclassified a
+few passing-vehicle plates that were missing from the compact annotation sample.
+
+The selected profile also keeps persistent screen-fixed false overlays from
+becoming confirmed solely because they last for many frames. Sparse sign/light
+tracks with too few detector observations remain review or rejected evidence
+rather than clean-preview regions.
+
 ## Plate Rendering And Review v1
 
 Plate Rendering v1 consumes `tracks.jsonl` and `review_intervals.json`; it does

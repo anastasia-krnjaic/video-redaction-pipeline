@@ -32,7 +32,7 @@ The shared layer exists so future privacy-object categories do not need a separa
 
 Existing face and plate serialized artifacts remain valid. Adapters convert current face render regions and plate render regions into the shared records where needed; accepted artifacts are not rewritten.
 
-`src/redactor/privacy_lifecycle.py` defines lightweight protocol contracts for association, evidence accumulation, hysteresis transitions, gap decisions, retrospective promotion, and tracklet stitching. These contracts are deliberately not enabled as a new production engine yet; they give the next accumulated-evidence milestone one common target instead of duplicating that behavior inside a category module.
+`src/redactor/privacy_lifecycle.py` defines lightweight protocol contracts for association, evidence accumulation, hysteresis transitions, gap decisions, retrospective promotion, and tracklet stitching. `src/redactor/privacy_evidence.py` implements the shared accumulated-evidence and hysteresis engine for post-detection tracklets. It is active for plate track confirmation and eligibility, but it is not enabled for the production Face Pipeline.
 
 ## Category Profiles
 
@@ -44,6 +44,16 @@ Face and plate profiles intentionally keep different thresholds because the obje
 - plates use the selected OIM detector hash, plate geometry constraints, plate association gates, bounded plate interpolation, and the plate render margin.
 
 Sharing the profile interface does not mean sharing literal threshold values.
+
+## Shared Temporal Evidence
+
+The shared evidence engine consumes normalized `TemporalRegion` and `GapDecisionRecord` data. It records component-level evidence instead of hiding decisions inside one opaque score. Components include persistence, detector-observation count, observation density, mean and lower-tail confidence, aspect-ratio consistency, center-motion consistency, scale consistency, source-provenance support, internal-gap penalty, abrupt-jump penalty, competing-track penalty, scene-cut penalty, and screen-lock risk.
+
+Tracks start as `tentative`. A category profile defines when accumulated evidence is enough for `confirmed`, when hysteresis can keep a confirmed track through short misses, and when a track should become `needs_review`, `temporarily_lost`, `terminated`, or `rejected`. When a track becomes confirmed, earlier valid detector observations and accepted short interpolation from the same consistent tracklet may be retrospectively promoted for rendering. This promotion preserves original provenance: a detector observation remains detector evidence, and interpolation remains interpolation.
+
+The plate profile requires enough true detector observations for automatic confirmation. Interpolated frames can support continuity but cannot satisfy that detector-observation count. This prevents a sparse false track from becoming accepted merely because interpolation filled its span. The engine also keeps persistent screen-fixed evidence as a review risk rather than automatically accepting it just because it lasts for many frames.
+
+Face profiles record compatibility metadata only in this milestone. Production face tracking, recovery, rendering, reviewed corrections, and provenance remain on the frozen Face Pipeline v1 path.
 
 ## Shared Renderer
 
@@ -76,9 +86,10 @@ The existing face and plate review pages are not redesigned in this milestone. C
 
 The migration is deliberately incremental:
 
-1. Plate rendering uses the shared rendering core first because plate rendering already has accepted-track eligibility, span validation, and decoded-region checks.
-2. Face artifacts are adapted to shared records and parity-tested, but the current face tracking, privacy gap recovery, and renderer behavior stay frozen.
-3. Future tracking lifecycle work can use the common states and transition records for accumulated evidence, hysteresis, and tracklet stitching without embedding those concepts only in `plate_tracking.py`.
+1. Plate rendering uses the shared rendering core because plate rendering already has accepted-track eligibility, span validation, and decoded-region checks.
+2. Plate tracking now uses the shared temporal evidence engine for confirmation, hysteresis, retrospective promotion, and bounded stitch decisions while preserving the existing association and gap-recovery parameters.
+3. Face artifacts are adapted to shared records and parity-tested, but the current face tracking, privacy gap recovery, and renderer behavior stay frozen.
+4. Future tracking lifecycle work can use the common states and transition records without embedding accumulated-evidence behavior inside a category module.
 4. A later unified face/plate render can consume `PrivacyRegionRecord`s from both categories once reviewed plate corrections exist.
 
 ## Intentionally Not Unified

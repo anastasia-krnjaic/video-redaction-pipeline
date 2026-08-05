@@ -2,7 +2,7 @@
 
 Video Redaction Pipeline is a local Python project for building and auditing video-redaction workflows on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`). The prototype plate work uses one selected detector, Open Image Models YOLOv9-S-608 (`oim_yolov9_s_608`), followed by bounded temporal plate tracking and automatic preview rendering from accepted tracks.
 
-The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support currently covers detection, minimal temporal stabilization, short defensible interpolation, non-final automatic plate previews, and a local review bundle for unresolved or uncertain plate intervals. Reviewed-final plate completion and unified face/plate rendering are later milestones.
+The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support currently covers detection, shared accumulated-evidence track confirmation, short defensible interpolation, non-final automatic plate previews, and a local review bundle for unresolved or uncertain plate intervals. Reviewed-final plate completion and unified face/plate rendering are later milestones.
 
 Faces and plates keep separate detector adapters and thresholds, but the post-detection foundation now shares the record contracts for observations, temporal regions, gap decisions, privacy regions, frame spans, rendering, and review tasks. The architecture decision is documented in `docs/PRIVACY_PIPELINE_ARCHITECTURE.md`.
 
@@ -178,6 +178,15 @@ short interpolations, review intervals, and rejected noise remain separate
 provenance categories. Long or unsafe gaps are not filled speculatively.
 Tracking manifests also record the processed source-frame span and any missing
 ranges.
+
+Plate tracking now uses the shared temporal evidence engine. New tracks start
+tentative, accumulate audited evidence over time, and become accepted only after
+enough detector observations, persistence, density, motion consistency, scale
+consistency, and confidence support the same object. Hysteresis keeps a
+confirmed track stable through short misses, but long ambiguous gaps remain
+review intervals. Interpolation can support continuity after confirmation, but
+it cannot by itself satisfy the detector-observation count required for
+automatic confirmation.
 
 Render a non-final automatic plate preview from accepted tracks only:
 

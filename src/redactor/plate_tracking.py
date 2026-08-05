@@ -14,8 +14,19 @@ from typing import Any
 import cv2 as cv
 import numpy as np
 
-from redactor import frame_spans, media, plate_detection
+from redactor import frame_spans, media, plate_detection, privacy_evidence
 from redactor.detection import clip_xyxy_to_frame, rational_to_float
+from redactor.privacy_records import (
+    CATEGORY_PLATE,
+    GAP_ACCEPTED,
+    GAP_NEEDS_REVIEW,
+    LIFECYCLE_CONFIRMED,
+    LIFECYCLE_NEEDS_REVIEW,
+    LIFECYCLE_REJECTED,
+    LIFECYCLE_TENTATIVE,
+    GapDecisionRecord,
+    TemporalRegion,
+)
 
 SCHEMA_VERSION = "plate_tracking.v1"
 
@@ -275,6 +286,11 @@ class PlateTrack:
     gap_decisions: list[GapDecision] = field(default_factory=list)
     status: str = NEEDS_REVIEW
     review_reasons: list[str] = field(default_factory=list)
+    evidence_snapshot: dict[str, Any] = field(default_factory=dict)
+    evidence_transitions: list[dict[str, Any]] = field(default_factory=list)
+    promoted_frames: list[int] = field(default_factory=list)
+    stitch_parent_id: str | None = None
+    stitch_child_ids: tuple[str, ...] = ()
 
     @property
     def sorted_observations(self) -> list[PlateObservation]:
@@ -324,6 +340,12 @@ class PlateTrack:
                 observed,
                 PlateTrackingConfig(),
             ),
+            "shared_evidence": self.evidence_snapshot,
+            "shared_evidence_transitions": self.evidence_transitions,
+            "stitch_child_ids": list(self.stitch_child_ids),
+            "stitch_parent_id": self.stitch_parent_id,
+            "retrospectively_promoted_frame_count": len(self.promoted_frames),
+            "retrospectively_promoted_frames": self.promoted_frames,
             "provenance_counts": provenance_counts(frames),
             "review_reasons": sorted(set(self.review_reasons)),
             "span_frames": span,
@@ -346,10 +368,59 @@ class PlateTrackingResult:
     frames_processed: int
     max_association_gap_frames: int
     max_safe_interpolation_gap_frames: int
+    evidence_configuration_hash: str
+    stitch_decisions: list[dict[str, Any]] = field(default_factory=list)
 
 
 def default_config() -> PlateTrackingConfig:
     return PlateTrackingConfig()
+
+
+def default_evidence_config() -> privacy_evidence.TemporalEvidenceConfiguration:
+    return privacy_evidence.TemporalEvidenceConfiguration(
+        profile_id="plate_temporal_evidence_v1",
+        category=CATEGORY,
+        component_weights={
+            "abrupt_jump_penalty": -0.10,
+            "aspect_ratio_consistency": 0.08,
+            "center_motion_consistency": 0.10,
+            "competing_track_penalty": -0.12,
+            "internal_gap_penalty": -0.05,
+            "lower_tail_confidence": 0.07,
+            "mean_confidence": 0.13,
+            "observation_density": 0.12,
+            "persistence": 0.16,
+            "scale_consistency": 0.10,
+            "scene_cut_penalty": -0.15,
+            "screen_lock_risk": -0.20,
+            "source_provenance_support": 0.10,
+        },
+        confirmation_threshold=0.40,
+        continuation_threshold=0.32,
+        temporary_loss_threshold=0.28,
+        rejection_threshold=0.20,
+        min_persistence_seconds=0.18,
+        min_observation_count=6,
+        min_review_observation_count=2,
+        min_observation_density=0.10,
+        min_mean_confidence=0.35,
+        min_lower_tail_confidence=0.30,
+        max_safe_gap_seconds=DEFAULT_MAX_SAFE_INTERPOLATION_GAP_SECONDS,
+        max_stitch_gap_seconds=0.50,
+        max_temporary_loss_seconds=0.75,
+        termination_gap_seconds=DEFAULT_MAX_ASSOCIATION_GAP_SECONDS,
+        max_center_jump_norm=4.50,
+        max_scale_jump=3.50,
+        max_aspect_ratio_std=1.25,
+        stitch_max_center_distance_norm=2.25,
+        stitch_max_scale_ratio=2.25,
+        stitch_max_aspect_ratio_delta=1.75,
+        screen_lock_min_seconds=1.0,
+        screen_lock_center_std_norm=0.035,
+        screen_lock_size_std_norm=0.025,
+        screen_lock_review_threshold=0.75,
+        max_competing_frame_fraction=0.10,
+    )
 
 
 def run_plate_tracking(
@@ -499,6 +570,7 @@ def track_plate_observations(
     finalize_plate_tracks(
         tracks,
         max_safe_interpolation_gap_frames=max_safe_interpolation_gap_frames,
+        fps=fps,
         width=width,
         height=height,
         config=resolved_config,
@@ -522,6 +594,8 @@ def track_plate_observations(
         frames_processed=frame_count,
         max_association_gap_frames=max_association_gap_frames,
         max_safe_interpolation_gap_frames=max_safe_interpolation_gap_frames,
+        evidence_configuration_hash=default_evidence_config().configuration_hash(),
+        stitch_decisions=collect_stitch_decisions(tracks),
     )
 
 
@@ -796,12 +870,14 @@ def finalize_plate_tracks(
     tracks: list[PlateTrack],
     *,
     max_safe_interpolation_gap_frames: int,
+    fps: float,
     width: int,
     height: int,
     config: PlateTrackingConfig,
     scene_cut_frames: set[tuple[int, int]] | None = None,
 ) -> None:
     scene_cuts = scene_cut_frames or set()
+    prepared_frames: dict[int, list[PlateTrackFrame]] = {}
     for track in tracks:
         observed_frames = [
             PlateTrackFrame(
@@ -845,15 +921,41 @@ def finalize_plate_tracks(
                     )
                 )
         track.gap_decisions = gap_decisions
-        track.status, track.review_reasons = classify_track(
-            track,
-            observed_frames=observed_frames,
-            interpolated_frames=interpolated,
-            config=config,
-        )
-        all_frames = []
-        for frame in [*observed_frames, *interpolated]:
-            all_frames.append(
+        prepared_frames[track.track_id] = [*observed_frames, *interpolated]
+
+    apply_shared_evidence_engine(
+        tracks,
+        prepared_frames=prepared_frames,
+        fps=fps,
+        config=config,
+    )
+
+
+def apply_shared_evidence_engine(
+    tracks: list[PlateTrack],
+    *,
+    prepared_frames: dict[int, list[PlateTrackFrame]],
+    fps: float,
+    config: PlateTrackingConfig,
+) -> None:
+    del config
+    evidence_config = default_evidence_config()
+    engine = privacy_evidence.TemporalEvidenceEngine(evidence_config, fps=fps)
+    tracklets = tuple(
+        plate_track_to_evidence_tracklet(track, prepared_frames.get(track.track_id, []))
+        for track in tracks
+    )
+    run = engine.evaluate_tracklets(tracklets)
+    for track in tracks:
+        result = run.results[format_track_uid(track.track_id)]
+        track.evidence_snapshot = result.snapshot.to_dict()
+        track.evidence_transitions = [transition.to_dict() for transition in result.transitions]
+        track.promoted_frames = list(result.promotion.promoted_frames)
+        track.stitch_parent_id = result.stitch_parent_id
+        track.stitch_child_ids = result.stitch_child_ids
+        track.status, track.review_reasons = evidence_state_to_plate_status(track, result)
+        track.frames = sorted(
+            [
                 PlateTrackFrame(
                     frame_index=frame.frame_index,
                     track_id=frame.track_id,
@@ -864,8 +966,99 @@ def finalize_plate_tracks(
                     source_candidate_ids=frame.source_candidate_ids,
                     anchor_frames=frame.anchor_frames,
                 )
+                for frame in prepared_frames.get(track.track_id, [])
+            ],
+            key=lambda item: (item.frame_index, item.provenance),
+        )
+
+
+def plate_track_to_evidence_tracklet(
+    track: PlateTrack,
+    frames: list[PlateTrackFrame],
+) -> privacy_evidence.EvidenceTracklet:
+    regions = []
+    for frame in frames:
+        regions.append(
+            TemporalRegion(
+                category=CATEGORY_PLATE,
+                object_id=format_track_uid(track.track_id),
+                source_frame=frame.frame_index,
+                bbox_xyxy=frame.bbox_xyxy,
+                source_provenance=frame.provenance,
+                track_state=LIFECYCLE_TENTATIVE,
+                render_eligible=frame.provenance in {PROVENANCE_DETECTOR, PROVENANCE_INTERPOLATION},
+                review_status=NEEDS_REVIEW,
+                confidence=frame.score,
             )
-        track.frames = sorted(all_frames, key=lambda item: (item.frame_index, item.provenance))
+        )
+    gap_records = tuple(
+        GapDecisionRecord(
+            category=CATEGORY_PLATE,
+            track_id=format_track_uid(track.track_id),
+            frame_start=decision.frame_start,
+            frame_end=decision.frame_end,
+            strategy="bounded_interpolation"
+            if decision.decision == "accepted_interpolation"
+            else "review_required_gap",
+            state=GAP_ACCEPTED
+            if decision.decision == "accepted_interpolation"
+            else GAP_NEEDS_REVIEW,
+            reasons=decision.reasons,
+            recovered_frames=decision.length
+            if decision.decision == "accepted_interpolation"
+            else 0,
+            unresolved_frames=0
+            if decision.decision == "accepted_interpolation"
+            else decision.length,
+            metrics=dict(decision.metrics),
+        )
+        for decision in track.gap_decisions
+    )
+    return privacy_evidence.EvidenceTracklet(
+        category=CATEGORY_PLATE,
+        track_id=format_track_uid(track.track_id),
+        regions=tuple(regions),
+        gap_decisions=gap_records,
+    )
+
+
+def evidence_state_to_plate_status(
+    track: PlateTrack,
+    result: privacy_evidence.TemporalEvidenceResult,
+) -> tuple[str, list[str]]:
+    reasons = list(result.snapshot.reasons)
+    if result.final_state == LIFECYCLE_CONFIRMED:
+        reasons.append("confirmed_by_shared_temporal_evidence")
+        if any(decision.decision == "needs_review" for decision in track.gap_decisions):
+            reasons.append("unresolved_internal_gap")
+        return ACCEPTED_TRACK, sorted(set(reasons))
+    if result.final_state == LIFECYCLE_REJECTED:
+        if result.snapshot.region_count == 1:
+            reasons.append("isolated_plate_proposal")
+        return REJECTED_NOISE, sorted(set(reasons or ["rejected_by_shared_temporal_evidence"]))
+    if result.final_state == LIFECYCLE_NEEDS_REVIEW:
+        return NEEDS_REVIEW, sorted(set(reasons or ["needs_review_by_shared_temporal_evidence"]))
+    return NEEDS_REVIEW, sorted(set([*reasons, result.final_state]))
+
+
+def collect_stitch_decisions(tracks: list[PlateTrack]) -> list[dict[str, Any]]:
+    decisions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for track in tracks:
+        parent_id = track.stitch_parent_id
+        if parent_id is None or not track.stitch_child_ids:
+            continue
+        key = tuple(track.stitch_child_ids)
+        if key in seen:
+            continue
+        seen.add(key)
+        decisions.append(
+            {
+                "parent_track_id": parent_id,
+                "child_track_ids": list(track.stitch_child_ids),
+            }
+        )
+    return decisions
 
 
 def decide_gap(
@@ -1159,6 +1352,8 @@ def build_track_summary(
         "configuration": config.to_dict(),
         "configuration_hash": config.configuration_hash(),
         "elapsed_seconds": round(elapsed_seconds, 6),
+        "evidence_configuration": default_evidence_config().to_dict(),
+        "evidence_configuration_hash": result.evidence_configuration_hash,
         "gap_distribution": gap_distribution(
             [decision.length for decision in result.gap_decisions]
         ),
@@ -1172,6 +1367,8 @@ def build_track_summary(
         "review_interval_count": len(result.review_intervals),
         "schema_version": SCHEMA_VERSION,
         "status_counts": status_counts,
+        "stitched_tracklet_count": len(result.stitch_decisions),
+        "stitch_decisions": result.stitch_decisions,
         "track_count": len(result.tracks),
         "tracks": [track.to_summary_dict() for track in result.tracks],
         "unresolved_gap_count": len(gap_lengths),
@@ -1206,6 +1403,8 @@ def build_tracking_manifest(
         "first_processed_frame": detection_span_report["first_processed_frame"],
         "frames_processed": frames_processed,
         "full_source_processed": detection_span_report["full_source_processed"],
+        "evidence_configuration": default_evidence_config().to_dict(),
+        "evidence_configuration_hash": result.evidence_configuration_hash,
         "input_height": height,
         "input_width": width,
         "last_processed_frame": detection_span_report["last_processed_frame"],

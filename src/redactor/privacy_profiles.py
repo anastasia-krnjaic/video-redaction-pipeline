@@ -22,6 +22,7 @@ class CategoryProfile:
     geometry: dict[str, Any] = field(default_factory=dict)
     association: dict[str, Any] = field(default_factory=dict)
     confirmation: dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, Any] = field(default_factory=dict)
     gap_recovery: dict[str, Any] = field(default_factory=dict)
     rendering: dict[str, Any] = field(default_factory=dict)
     review: dict[str, Any] = field(default_factory=dict)
@@ -34,6 +35,7 @@ class CategoryProfile:
             "confirmation": self.confirmation,
             "detector_configuration_hash": self.detector_configuration_hash,
             "detector_id": self.detector_id,
+            "evidence": self.evidence,
             "gap_recovery": self.gap_recovery,
             "geometry": self.geometry,
             "render_profile_hash": self.render_profile_hash,
@@ -77,6 +79,17 @@ def face_profile() -> CategoryProfile:
         "weak_threshold": 0.20,
     }
     recovery_payload = privacy_gap_recovery.settings_to_dict(recovery)
+    evidence_payload = {
+        "active_in_production": False,
+        "continuation_threshold": 0.55,
+        "confirmation_threshold": 0.70,
+        "max_safe_gap_seconds": 0.30,
+        "min_mean_confidence": 0.30,
+        "min_observation_count": 3,
+        "min_observation_density": 0.25,
+        "profile_id": "face_temporal_evidence_compatibility_v1",
+        "reason": "production face tracking remains on the frozen v1 tracker/recovery path",
+    }
     return CategoryProfile(
         category=CATEGORY_FACE,
         detector_id=detection.DETECTOR_BACKEND_ADAS,
@@ -99,6 +112,7 @@ def face_profile() -> CategoryProfile:
             "min_observed_hits": tracking_payload["min_observed_hits"],
             "min_strong_hits": tracking_payload["min_strong_hits"],
         },
+        evidence=evidence_payload,
         gap_recovery=recovery_payload,
         rendering=render_payload,
         review={
@@ -110,6 +124,7 @@ def face_profile() -> CategoryProfile:
 
 def plate_profile() -> CategoryProfile:
     tracking_config = plate_tracking.PlateTrackingConfig()
+    evidence_config = plate_tracking.default_evidence_config()
     render_payload = {
         "blur_kernel": 51,
         "margin_fraction": 0.15,
@@ -141,6 +156,11 @@ def plate_profile() -> CategoryProfile:
             "min_accepted_observation_density": tracking_config.min_accepted_observation_density,
             "min_accepted_observations": tracking_config.min_accepted_observations,
             "min_review_observations": tracking_config.min_review_observations,
+        },
+        evidence={
+            "active_in_production": True,
+            "configuration": evidence_config.to_dict(),
+            "configuration_hash": evidence_config.configuration_hash(),
         },
         gap_recovery={
             "max_safe_interpolation_gap_seconds": (

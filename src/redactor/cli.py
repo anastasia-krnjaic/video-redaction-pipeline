@@ -459,7 +459,7 @@ def track_plates(
     show_rejected_overlay: bool,
     overwrite: bool,
 ) -> None:
-    """Track selected OIM license-plate detections with bounded gap recovery."""
+    """Track OIM plates with shared accumulated evidence and bounded gap recovery."""
     from redactor import plate_tracking
 
     try:
@@ -485,9 +485,10 @@ def track_plates(
 
     tracking_summary = summary["tracking_summary"]
     status_counts = tracking_summary["status_counts"]
-    click.echo("Plate tracker: OIM YOLOv9-S-608 temporal stabilization v1")
+    click.echo("Plate tracker: OIM YOLOv9-S-608 shared temporal evidence v1")
     click.echo(f"Detector configuration hash: {summary['detector_configuration_hash']}")
     click.echo(f"Tracking configuration hash: {summary['tracking_configuration_hash']}")
+    click.echo(f"Evidence configuration hash: {tracking_summary['evidence_configuration_hash']}")
     click.echo(
         f"Processed {summary['frames_processed']} frames; "
         f"{status_counts['accepted_plate_track']} accepted tracks; "
