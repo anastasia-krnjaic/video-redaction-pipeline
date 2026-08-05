@@ -1,5 +1,15 @@
 # System Overview Changelog
 
+## v018 — 2026-08-05
+
+Selected Open Image Models YOLOv9-S-608 as the active detector-only plate backend:
+
+- documented `oim_yolov9_s_608` with uniform small-object tiles and threshold `0.30`;
+- recorded that manual visual adjudication superseded the earlier metric-only RT-DETR selection;
+- added active detector-only CLI guidance for `redactor detect-plates`;
+- archived prior plate bake-off and stabilization experiments as historical material;
+- clarified that plate tracking, plate gap recovery, review integration, and final plate rendering are not implemented yet.
+
 ## v017 — 2026-08-04
 
 Added Full-Video Automatic Face Privacy Policy v1:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from math import isfinite
 from typing import Any
 
@@ -14,6 +14,7 @@ class Detection:
     label: int | None = None
     source_detection_index: int | None = None
     candidate_id: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.category:
@@ -34,6 +35,7 @@ class Detection:
             **_optional_dict_field("candidate_id", self.candidate_id),
             **_optional_dict_field("detector_id", self.detector_id),
             **_optional_dict_field("label", self.label),
+            **_optional_dict_field("metadata", self.metadata or None),
             **_optional_dict_field("source_detection_index", self.source_detection_index),
         }
 

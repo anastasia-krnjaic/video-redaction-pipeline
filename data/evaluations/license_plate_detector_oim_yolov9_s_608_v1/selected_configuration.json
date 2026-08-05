@@ -1,0 +1,16 @@
+{
+  "configuration_hash": "7d914438255905e2a249e5bbd30fd6e70eace1e91b57e205bd572d004ffb5a55",
+  "detector_id": "oim_yolov9_s_608",
+  "inference_mode": "uniform_small_object_tiles",
+  "input_size": 608,
+  "license_status": "MIT repository license; no separate weight-specific notice was found in the audited local model artifacts.",
+  "model_file": "yolo-v9-s-608-license-plates-end2end.onnx",
+  "model_revision": "f22000e02b30642f317cdba7755c0631638b109e",
+  "model_sha256": "2b878b38d9aa07b6ddc3ea75c4ffcb39869bc5c218e0a14002f60ab2f7b0be9a",
+  "nms_iou_threshold": 0.45,
+  "primary_threshold": 0.3,
+  "proposal_threshold": null,
+  "source_repository": "https://github.com/ankandrew/open-image-models",
+  "tile_overlap": 0.25,
+  "tile_size": 1280
+}

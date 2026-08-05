@@ -157,16 +157,21 @@ def contact_sheet(
     "model_path",
     required=False,
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
-    help="Model path. For face detection this is the ADAS XML path.",
+    help=(
+        "Model path. For face detection this is the ADAS XML path; for plates this is "
+        "the OIM YOLOv9-S-608 ONNX path."
+    ),
 )
 @click.option(
     "--detector-backend",
     type=click.Choice(
-        ["openvino_face_adas_0001", "license_plate_yunet"],
+        ["openvino_face_adas_0001", "oim_yolov9_s_608"],
         case_sensitive=True,
     ),
     default=None,
-    help=("Advanced detector backend. Face detection supports only openvino_face_adas_0001."),
+    help=(
+        "Advanced detector backend. Faces use openvino_face_adas_0001; plates use oim_yolov9_s_608."
+    ),
 )
 @click.option(
     "--adas-xml",
@@ -192,13 +197,13 @@ def contact_sheet(
     "--proposal-threshold",
     type=click.FloatRange(0.0, 1.0),
     default=None,
-    help="Proposal storage threshold. ADAS default: 0.20.",
+    help="Proposal storage threshold. ADAS default: 0.20; OIM plate default: 0.30.",
 )
 @click.option(
     "--primary-threshold",
     type=click.FloatRange(0.0, 1.0),
     default=None,
-    help="Primary observation threshold. ADAS default: 0.30.",
+    help="Primary observation threshold. ADAS default: 0.30; OIM plate default: 0.30.",
 )
 @click.option(
     "--output-dir",
@@ -295,6 +300,111 @@ def detect(
     ) as exc:
         raise click.ClickException(str(exc)) from exc
 
+    click.echo(
+        f"Processed {summary['frames_processed']} frames; "
+        f"{summary['frames_containing_at_least_one_detection']} frames with detections; "
+        f"{summary['total_detections']} total detections."
+    )
+    click.echo(f"Detector inference FPS: {summary['detector_inference_fps']}")
+    click.echo(f"Detection-pass FPS: {summary['processing_fps']}")
+    click.echo(f"Wrote detections: {detections_output_path or output_dir / 'detections.jsonl'}")
+    if not no_summary:
+        click.echo(f"Wrote summary: {output_dir / 'summary.json'}")
+    if not no_overlay:
+        click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
+
+
+@main.command("detect-plates")
+@click.argument(
+    "input_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+)
+@click.option(
+    "--model",
+    "model_path",
+    required=False,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help=("Open Image Models YOLOv9-S-608 ONNX path. REDACTOR_OIM_PLATE_MODEL is also honored."),
+)
+@click.option(
+    "--threshold",
+    type=click.FloatRange(0.0, 1.0),
+    default=0.30,
+    show_default=True,
+    help="Global OIM primary/proposal score threshold.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory for detections.jsonl, summary.json, and overlay.mp4.",
+)
+@click.option(
+    "--detections-output",
+    "detections_output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional detections JSONL output path. Defaults to OUTPUT_DIR/detections.jsonl.",
+)
+@click.option(
+    "--clip-id",
+    type=str,
+    default=None,
+    help="Optional canonical clip id to embed in detection records.",
+)
+@click.option("--no-overlay", is_flag=True, help="Skip diagnostic overlay.mp4 generation.")
+@click.option("--no-summary", is_flag=True, help="Skip writing OUTPUT_DIR/summary.json.")
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+@click.option(
+    "--max-frames",
+    type=click.IntRange(min=1),
+    default=None,
+    help="Maximum number of frames to process for a diagnostic run.",
+)
+def detect_plates(
+    input_path: Path,
+    model_path: Path | None,
+    threshold: float,
+    output_dir: Path,
+    detections_output_path: Path | None,
+    clip_id: str | None,
+    no_overlay: bool,
+    no_summary: bool,
+    overwrite: bool,
+    max_frames: int | None,
+) -> None:
+    """Run the supported OIM YOLOv9-S-608 license-plate detector."""
+    from redactor import detection, plate_detection
+
+    resolved_model_path = model_path or plate_detection.default_model_path()
+    try:
+        summary = detection.run_detection(
+            input_path,
+            category="license_plate",
+            model_path=resolved_model_path,
+            threshold=threshold,
+            output_dir=output_dir,
+            overwrite=overwrite,
+            max_frames=max_frames,
+            detector_backend=detection.DETECTOR_BACKEND_OIM_YOLOV9_S_608,
+            primary_threshold=threshold,
+            clip_id=clip_id,
+            detections_output_path=detections_output_path,
+            write_overlay_video=not no_overlay,
+            write_summary_file=not no_summary,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+    ) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo("Detector: Open Image Models YOLOv9-S-608")
+    click.echo(f"Inference mode: {plate_detection.INFERENCE_MODE}")
+    click.echo(f"Configuration hash: {summary['configuration_hash']}")
     click.echo(
         f"Processed {summary['frames_processed']} frames; "
         f"{summary['frames_containing_at_least_one_detection']} frames with detections; "
@@ -1640,6 +1750,10 @@ def resolve_detection_model_path(
 
     if detector_backend == detection.DETECTOR_BACKEND_ADAS:
         return adas_xml_path or model_path or detection.default_adas_xml_path()
+    if detector_backend == detection.DETECTOR_BACKEND_OIM_YOLOV9_S_608:
+        from redactor import plate_detection
+
+        return model_path or plate_detection.default_model_path()
     if model_path is not None:
         return model_path
     if category == "face":

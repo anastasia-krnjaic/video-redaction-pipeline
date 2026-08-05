@@ -316,3 +316,8 @@ This matters when `--max-frames` is used. Tracking output is bounded by the dete
 The tracked ADAS detector evidence record is `data/evaluations/face_detector_adas_v1.0/`.
 
 Historical detector comparison context lives in `docs/archive/face_detector_bakeoff/`. Generated artifacts, videos, overlays, model binaries, and browser state remain ignored.
+
+The selected plate detector is documented separately in
+`docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`. Plate detector work must remain
+separate from the frozen Face Pipeline behavior until a dedicated plate tracking
+or rendering milestone explicitly integrates it.

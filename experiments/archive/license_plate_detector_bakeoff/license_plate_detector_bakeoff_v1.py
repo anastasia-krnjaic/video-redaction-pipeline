@@ -9,9 +9,10 @@ from typing import Any
 import cv2 as cv
 import numpy as np
 
-from redactor import media, plate_bakeoff
+from experiments.archive.license_plate_detector_bakeoff import plate_bakeoff
+from redactor import media
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 ARTIFACT_ROOT = REPO_ROOT / "artifacts" / "license_plate_detector_bakeoff_v1"
 SCORE_FLOOR = 0.05
 REVIEW_THRESHOLD = 0.20

@@ -16,6 +16,9 @@ Default selected machine-readable redaction ground truth: `data/ground_truth/red
 
 Default selected face detector evidence record: `data/evaluations/face_detector_adas_v1.0/`.
 
+Default selected license-plate detector evidence record:
+`data/evaluations/license_plate_detector_oim_yolov9_s_608_v1/`.
+
 Selected face detector policy:
 
 - Primary detector: `openvino_face_adas_0001`.
@@ -23,6 +26,15 @@ Selected face detector policy:
 - Primary detector threshold: `0.30`.
 - Weak proposals from `0.20` through below `0.30` may support temporal tracking but must not independently confirm a track.
 - ADAS is the only active face detector backend. Historical YuNet and OpenVINO 0205 comparison material must stay in the archive/evidence record and must not be reintroduced into the active runtime path without a new explicit model-selection task.
+
+Selected license-plate detector policy:
+
+- Primary detector: `oim_yolov9_s_608` (Open Image Models YOLOv9-S-608).
+- Inference mode: `uniform_small_object_tiles`.
+- Primary threshold: `0.30`.
+- No separate lower proposal threshold is selected for the detector-only plate milestone.
+- OIM YOLOv9-S-608 is the only active plate detector backend. Historical LPD-YuNet, OpenVINO 0106/0123, Intel YOLOv8n, RF-DETR, and RT-DETR comparison material must stay in the archive/evidence record and must not be reintroduced into the active runtime path without a new explicit model-selection task.
+- Plate tracking, plate gap recovery, plate review integration, and final plate rendering are not implemented yet. Do not claim plate redaction is complete from detector-only evidence.
 
 1. Versioned ground-truth files under `data/ground_truth/` are frozen sources of truth once created.
 2. Never edit a frozen ground-truth version in place.
@@ -54,3 +66,4 @@ Selected face detector policy:
 28. Ground Truth, benchmark object IDs, benchmark frame windows, source-video names, manually selected target tracks, and preserved benchmark corrections must not act as the production privacy policy.
 29. Rejected or unsupported face-track candidates must remain visible in the track census and review queue, but must not be silently rendered as defensible automatic privacy regions.
 30. Explicit keep-person handling is a case-policy decision. Ambiguous keep fragments or unsupported weak sequences must remain review blockers; do not infer keep identity from benchmark labels, broad ROIs, clothing, or role.
+31. Plate detector calibration must use one global threshold policy across clips. Do not introduce per-video plate thresholds, ROIs, coordinates, frame ranges, or source-specific production logic.

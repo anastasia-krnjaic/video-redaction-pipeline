@@ -4,6 +4,7 @@ import json
 import math
 import time
 from dataclasses import dataclass, field
+from itertools import product
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -11,7 +12,7 @@ import cv2 as cv
 import numpy as np
 
 from redactor import media
-from redactor.detection import LicensePlateYuNetDetector, clip_xyxy_to_frame
+from redactor.models import Detection
 
 SCHEMA_VERSION = "license_plate_detector_bakeoff_v1_1"
 PLATE_CATEGORY = "license_plate"
@@ -468,6 +469,130 @@ class OpenVINOYOLOv8PlateDetector:
         }
 
 
+class LicensePlateYuNetDetector:
+    detector_id = "license_plate_yunet"
+
+    def __init__(
+        self,
+        model_path: Path,
+        threshold: float,
+        nms_threshold: float = 0.30,
+        top_k: int = 5000,
+        keep_top_k: int = 750,
+    ):
+        try:
+            self.net = cv.dnn.readNet(str(model_path))
+        except cv.error as exc:
+            raise ValueError(f"failed to load license-plate model {model_path.name}") from exc
+        self.threshold = threshold
+        self.model_path = model_path
+        self.nms_threshold = nms_threshold
+        self.top_k = top_k
+        self.keep_top_k = keep_top_k
+        self.output_names = ["loc", "conf", "iou"]
+        self.min_sizes = [[10, 16, 24], [32, 48], [64, 96], [128, 192, 256]]
+        self.steps = [8, 16, 32, 64]
+        self.variance = [0.1, 0.2]
+        self.input_size: tuple[int, int] | None = None
+        self.priors = np.empty((0, 4), dtype=np.float32)
+
+    def detect(self, frame: np.ndarray) -> list[Detection]:
+        height, width = frame.shape[:2]
+        self.set_input_size(width, height)
+        blob = cv.dnn.blobFromImage(frame)
+        self.net.setInput(blob)
+        output_blob = self.net.forward(self.output_names)
+        dets = self._postprocess(output_blob)
+
+        detections: list[Detection] = []
+        for det in dets:
+            score = float(det[-1])
+            bbox = quadrilateral_to_clipped_xyxy(det[:8], width, height)
+            if bbox is not None:
+                detections.append(
+                    Detection("license_plate", score, bbox, detector_id=self.detector_id)
+                )
+        return sorted(detections, key=lambda item: (-item.score, item.bbox_xyxy))
+
+    def set_input_size(self, width: int, height: int) -> None:
+        input_size = (width, height)
+        if input_size == self.input_size:
+            return
+        self.input_size = input_size
+        self.priors = self._generate_priors(width, height)
+
+    def _postprocess(self, blob: tuple[np.ndarray, ...] | list[np.ndarray]) -> np.ndarray:
+        dets = self._decode(blob)
+        if dets.size == 0:
+            return np.empty((0, 9), dtype=np.float32)
+
+        keep_mask = dets[:, -1] >= self.threshold
+        candidates = dets[keep_mask]
+        if candidates.size == 0:
+            return np.empty((0, 9), dtype=np.float32)
+
+        rects = [_quadrilateral_to_xywh(det[:8]) for det in candidates]
+        scores = candidates[:, -1].tolist()
+        keep_indices = normalize_nms_indices(
+            cv.dnn.NMSBoxes(
+                bboxes=rects,
+                scores=scores,
+                score_threshold=self.threshold,
+                nms_threshold=self.nms_threshold,
+                top_k=self.top_k,
+            )
+        )
+        if not keep_indices:
+            return np.empty((0, 9), dtype=np.float32)
+        return candidates[keep_indices[: self.keep_top_k]]
+
+    def _decode(self, blob: tuple[np.ndarray, ...] | list[np.ndarray]) -> np.ndarray:
+        loc, conf, iou = (_squeeze_output(output) for output in blob)
+        if loc.size == 0:
+            return np.empty((0, 9), dtype=np.float32)
+
+        cls_scores = np.maximum(conf[:, 1], 0.0)
+        iou_scores = np.clip(iou[:, 0], 0.0, 1.0)
+        scores = np.sqrt(cls_scores * iou_scores)[:, np.newaxis]
+
+        scale = np.array(self.input_size, dtype=np.float32)
+        bboxes = np.hstack(
+            (
+                (self.priors[:, 0:2] + loc[:, 4:6] * self.variance[0] * self.priors[:, 2:4])
+                * scale,
+                (self.priors[:, 0:2] + loc[:, 6:8] * self.variance[0] * self.priors[:, 2:4])
+                * scale,
+                (self.priors[:, 0:2] + loc[:, 10:12] * self.variance[0] * self.priors[:, 2:4])
+                * scale,
+                (self.priors[:, 0:2] + loc[:, 12:14] * self.variance[0] * self.priors[:, 2:4])
+                * scale,
+            )
+        )
+        return np.hstack((bboxes, scores)).astype(np.float32)
+
+    def _generate_priors(self, width: int, height: int) -> np.ndarray:
+        feature_map_2th = [int(int((height + 1) / 2) / 2), int(int((width + 1) / 2) / 2)]
+        feature_map_3th = [int(feature_map_2th[0] / 2), int(feature_map_2th[1] / 2)]
+        feature_map_4th = [int(feature_map_3th[0] / 2), int(feature_map_3th[1] / 2)]
+        feature_map_5th = [int(feature_map_4th[0] / 2), int(feature_map_4th[1] / 2)]
+        feature_map_6th = [int(feature_map_5th[0] / 2), int(feature_map_5th[1] / 2)]
+        feature_maps = [feature_map_3th, feature_map_4th, feature_map_5th, feature_map_6th]
+
+        priors = []
+        for k, feature_map in enumerate(feature_maps):
+            for i, j in product(range(feature_map[0]), range(feature_map[1])):
+                for min_size in self.min_sizes[k]:
+                    priors.append(
+                        [
+                            (j + 0.5) * self.steps[k] / width,
+                            (i + 0.5) * self.steps[k] / height,
+                            min_size / width,
+                            min_size / height,
+                        ]
+                    )
+        return np.array(priors, dtype=np.float32)
+
+
 class OpenCVLPDYuNetPlateDetector:
     def __init__(
         self,
@@ -797,6 +922,39 @@ def normalized_xyxy_to_frame(
     return clip_xyxy_to_frame(bbox, frame_width, frame_height)
 
 
+def quadrilateral_to_clipped_xyxy(
+    points: np.ndarray,
+    frame_width: int,
+    frame_height: int,
+) -> tuple[int, int, int, int] | None:
+    xs = points[0::2]
+    ys = points[1::2]
+    bbox = (
+        math.floor(float(np.min(xs))),
+        math.floor(float(np.min(ys))),
+        math.ceil(float(np.max(xs))),
+        math.ceil(float(np.max(ys))),
+    )
+    return clip_xyxy_to_frame(bbox, frame_width, frame_height)
+
+
+def clip_xyxy_to_frame(
+    bbox: tuple[int, int, int, int],
+    frame_width: int,
+    frame_height: int,
+) -> tuple[int, int, int, int] | None:
+    x1, y1, x2, y2 = bbox
+    clipped = (
+        min(max(x1, 0), frame_width),
+        min(max(y1, 0), frame_height),
+        min(max(x2, 0), frame_width),
+        min(max(y2, 0), frame_height),
+    )
+    if clipped[2] <= clipped[0] or clipped[3] <= clipped[1]:
+        return None
+    return clipped
+
+
 def yolo_xywh_to_original_xyxy(
     cx: float,
     cy: float,
@@ -928,6 +1086,23 @@ def normalize_nms_indices(indices: Any) -> list[int]:
     if array.size == 0:
         return []
     return [int(index) for index in array.reshape(-1).tolist()]
+
+
+def _quadrilateral_to_xywh(points: np.ndarray) -> list[float]:
+    xs = points[0::2]
+    ys = points[1::2]
+    x1 = float(np.min(xs))
+    y1 = float(np.min(ys))
+    x2 = float(np.max(xs))
+    y2 = float(np.max(ys))
+    return [x1, y1, x2 - x1, y2 - y1]
+
+
+def _squeeze_output(output: np.ndarray) -> np.ndarray:
+    squeezed = np.squeeze(output)
+    if squeezed.ndim == 1:
+        return squeezed[np.newaxis, :]
+    return squeezed
 
 
 def sort_plate_detections(detections: list[PlateDetection]) -> list[PlateDetection]:

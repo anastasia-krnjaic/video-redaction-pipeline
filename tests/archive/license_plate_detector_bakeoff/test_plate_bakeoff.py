@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from redactor import plate_bakeoff
+from experiments.archive.license_plate_detector_bakeoff import plate_bakeoff
 
 
 def detection(

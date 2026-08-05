@@ -5,7 +5,6 @@ import math
 import os
 import time
 from dataclasses import dataclass
-from itertools import product
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -17,16 +16,16 @@ from redactor.models import Detection
 
 SCHEMA_VERSION = "1.0"
 DETECTOR_BACKEND_ADAS = "openvino_face_adas_0001"
-DETECTOR_BACKEND_LICENSE_PLATE_YUNET = "license_plate_yunet"
+DETECTOR_BACKEND_OIM_YOLOV9_S_608 = "oim_yolov9_s_608"
 DEFAULT_FACE_DETECTOR_BACKEND = DETECTOR_BACKEND_ADAS
+DEFAULT_LICENSE_PLATE_DETECTOR_BACKEND = DETECTOR_BACKEND_OIM_YOLOV9_S_608
 DEFAULT_ADAS_PROPOSAL_THRESHOLD = 0.20
 DEFAULT_ADAS_PRIMARY_THRESHOLD = 0.30
 DEFAULT_ADAS_XML_PATH = Path("models/face-detection-adas-0001/face-detection-adas-0001.xml")
 DEFAULT_THRESHOLDS = {
     "face": DEFAULT_ADAS_PROPOSAL_THRESHOLD,
-    "license_plate": 0.40,
+    "license_plate": 0.30,
 }
-NMS_THRESHOLD = 0.30
 GIT_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/v1"
 
 
@@ -144,130 +143,6 @@ class OpenVINOFaceADASDetector:
             "proposal_threshold": self.proposal_threshold,
             "runtime": f"OpenVINO {self.device}",
         }
-
-
-class LicensePlateYuNetDetector:
-    detector_id = DETECTOR_BACKEND_LICENSE_PLATE_YUNET
-
-    def __init__(
-        self,
-        model_path: Path,
-        threshold: float,
-        nms_threshold: float = NMS_THRESHOLD,
-        top_k: int = 5000,
-        keep_top_k: int = 750,
-    ):
-        try:
-            self.net = cv.dnn.readNet(str(model_path))
-        except cv.error as exc:
-            raise ValueError(f"failed to load license-plate model {model_path.name}") from exc
-        self.threshold = threshold
-        self.model_path = model_path
-        self.nms_threshold = nms_threshold
-        self.top_k = top_k
-        self.keep_top_k = keep_top_k
-        self.output_names = ["loc", "conf", "iou"]
-        self.min_sizes = [[10, 16, 24], [32, 48], [64, 96], [128, 192, 256]]
-        self.steps = [8, 16, 32, 64]
-        self.variance = [0.1, 0.2]
-        self.input_size: tuple[int, int] | None = None
-        self.priors = np.empty((0, 4), dtype=np.float32)
-
-    def detect(self, frame: np.ndarray) -> list[Detection]:
-        height, width = frame.shape[:2]
-        self.set_input_size(width, height)
-        blob = cv.dnn.blobFromImage(frame)
-        self.net.setInput(blob)
-        output_blob = self.net.forward(self.output_names)
-        dets = self._postprocess(output_blob)
-
-        detections: list[Detection] = []
-        for det in dets:
-            score = float(det[-1])
-            bbox = quadrilateral_to_clipped_xyxy(det[:8], width, height)
-            if bbox is not None:
-                detections.append(
-                    Detection("license_plate", score, bbox, detector_id=self.detector_id)
-                )
-        return sorted(detections, key=detection_sort_key)
-
-    def set_input_size(self, width: int, height: int) -> None:
-        input_size = (width, height)
-        if input_size == self.input_size:
-            return
-        self.input_size = input_size
-        self.priors = self._generate_priors(width, height)
-
-    def _postprocess(self, blob: tuple[np.ndarray, ...] | list[np.ndarray]) -> np.ndarray:
-        dets = self._decode(blob)
-        if dets.size == 0:
-            return np.empty((0, 9), dtype=np.float32)
-
-        keep_mask = dets[:, -1] >= self.threshold
-        candidates = dets[keep_mask]
-        if candidates.size == 0:
-            return np.empty((0, 9), dtype=np.float32)
-
-        rects = [_quadrilateral_to_xywh(det[:8]) for det in candidates]
-        scores = candidates[:, -1].tolist()
-        keep_indices = normalize_nms_indices(
-            cv.dnn.NMSBoxes(
-                bboxes=rects,
-                scores=scores,
-                score_threshold=self.threshold,
-                nms_threshold=self.nms_threshold,
-                top_k=self.top_k,
-            )
-        )
-        if not keep_indices:
-            return np.empty((0, 9), dtype=np.float32)
-        return candidates[keep_indices[: self.keep_top_k]]
-
-    def _decode(self, blob: tuple[np.ndarray, ...] | list[np.ndarray]) -> np.ndarray:
-        loc, conf, iou = (_squeeze_output(output) for output in blob)
-        if loc.size == 0:
-            return np.empty((0, 9), dtype=np.float32)
-
-        cls_scores = np.maximum(conf[:, 1], 0.0)
-        iou_scores = np.clip(iou[:, 0], 0.0, 1.0)
-        scores = np.sqrt(cls_scores * iou_scores)[:, np.newaxis]
-
-        scale = np.array(self.input_size, dtype=np.float32)
-        bboxes = np.hstack(
-            (
-                (self.priors[:, 0:2] + loc[:, 4:6] * self.variance[0] * self.priors[:, 2:4])
-                * scale,
-                (self.priors[:, 0:2] + loc[:, 6:8] * self.variance[0] * self.priors[:, 2:4])
-                * scale,
-                (self.priors[:, 0:2] + loc[:, 10:12] * self.variance[0] * self.priors[:, 2:4])
-                * scale,
-                (self.priors[:, 0:2] + loc[:, 12:14] * self.variance[0] * self.priors[:, 2:4])
-                * scale,
-            )
-        )
-        return np.hstack((bboxes, scores)).astype(np.float32)
-
-    def _generate_priors(self, width: int, height: int) -> np.ndarray:
-        feature_map_2th = [int(int((height + 1) / 2) / 2), int(int((width + 1) / 2) / 2)]
-        feature_map_3th = [int(feature_map_2th[0] / 2), int(feature_map_2th[1] / 2)]
-        feature_map_4th = [int(feature_map_3th[0] / 2), int(feature_map_3th[1] / 2)]
-        feature_map_5th = [int(feature_map_4th[0] / 2), int(feature_map_4th[1] / 2)]
-        feature_map_6th = [int(feature_map_5th[0] / 2), int(feature_map_5th[1] / 2)]
-        feature_maps = [feature_map_3th, feature_map_4th, feature_map_5th, feature_map_6th]
-
-        priors = []
-        for k, feature_map in enumerate(feature_maps):
-            for i, j in product(range(feature_map[0]), range(feature_map[1])):
-                for min_size in self.min_sizes[k]:
-                    priors.append(
-                        [
-                            (j + 0.5) * self.steps[k] / width,
-                            (i + 0.5) * self.steps[k] / height,
-                            min_size / width,
-                            min_size / height,
-                        ]
-                    )
-        return np.array(priors, dtype=np.float32)
 
 
 def run_detection(
@@ -418,8 +293,16 @@ def create_detector(
                 primary_threshold=primary_threshold,
             ),
         )
-    if category == "license_plate" and backend == DETECTOR_BACKEND_LICENSE_PLATE_YUNET:
-        return LicensePlateYuNetDetector(model_path, threshold)
+    if category == "license_plate" and backend == DETECTOR_BACKEND_OIM_YOLOV9_S_608:
+        from redactor import plate_detection
+
+        return plate_detection.OpenImageModelsYOLOv9S608PlateDetector(
+            model_path,
+            config=plate_detection.default_config(
+                proposal_threshold=threshold,
+                primary_threshold=threshold if primary_threshold is None else primary_threshold,
+            ),
+        )
     if category == "face":
         raise ValueError(f"unsupported face detector backend: {backend}")
     if category == "license_plate":
@@ -735,9 +618,13 @@ def resolve_detector_backend(category: str, detector_backend: str | None) -> str
             )
         return DEFAULT_FACE_DETECTOR_BACKEND
     if category == "license_plate":
-        if detector_backend not in {None, DETECTOR_BACKEND_LICENSE_PLATE_YUNET}:
-            raise ValueError(f"unsupported license-plate detector backend: {detector_backend}")
-        return DETECTOR_BACKEND_LICENSE_PLATE_YUNET
+        if detector_backend not in {None, DETECTOR_BACKEND_OIM_YOLOV9_S_608}:
+            raise ValueError(
+                "unsupported license-plate detector backend: "
+                f"{detector_backend}; active plate detector is "
+                f"{DETECTOR_BACKEND_OIM_YOLOV9_S_608}"
+            )
+        return DEFAULT_LICENSE_PLATE_DETECTOR_BACKEND
     raise ValueError(f"unsupported category: {category}")
 
 
@@ -760,6 +647,14 @@ def resolve_primary_threshold(
         )
         validate_threshold_pair(proposal_threshold, resolved)
         return resolved
+    if detector_backend == DETECTOR_BACKEND_OIM_YOLOV9_S_608:
+        if primary_threshold is not None and primary_threshold != proposal_threshold:
+            raise ValueError(
+                "active OIM plate detection uses one selected threshold; "
+                "a separate lower proposal threshold is not configured"
+            )
+        validate_threshold_pair(proposal_threshold, proposal_threshold)
+        return proposal_threshold
     if primary_threshold is not None:
         validate_threshold_pair(proposal_threshold, primary_threshold)
     return primary_threshold
@@ -789,12 +684,6 @@ def _optional_dict_field(key: str, value: Any) -> dict[str, Any]:
     return {} if value is None else {key: value}
 
 
-def normalize_nms_indices(indices) -> list[int]:
-    if indices is None or len(indices) == 0:
-        return []
-    return [int(index) for index in np.array(indices).reshape(-1)]
-
-
 def rational_to_float(value: str | None) -> float | None:
     if value is None:
         return None
@@ -805,23 +694,6 @@ def rational_to_float(value: str | None) -> float | None:
     if denominator_float == 0:
         return None
     return float(numerator) / denominator_float
-
-
-def _quadrilateral_to_xywh(points: np.ndarray) -> list[float]:
-    xs = points[0::2]
-    ys = points[1::2]
-    x1 = float(np.min(xs))
-    y1 = float(np.min(ys))
-    x2 = float(np.max(xs))
-    y2 = float(np.max(ys))
-    return [x1, y1, x2 - x1, y2 - y1]
-
-
-def _squeeze_output(output: np.ndarray) -> np.ndarray:
-    squeezed = np.squeeze(output)
-    if squeezed.ndim == 1:
-        return squeezed[np.newaxis, :]
-    return squeezed
 
 
 def _optional_int(value: str | None) -> int | None:

@@ -8,9 +8,10 @@ import cv2 as cv
 import license_plate_detector_bakeoff_v1 as v1
 import numpy as np
 
-from redactor import media, plate_bakeoff
+from experiments.archive.license_plate_detector_bakeoff import plate_bakeoff
+from redactor import media
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 ARTIFACT_ROOT = REPO_ROOT / "artifacts" / "license_plate_detector_bakeoff_v1_1"
 V1_ARTIFACT_ROOT = REPO_ROOT / "artifacts" / "license_plate_detector_bakeoff_v1"
 SCORE_FLOOR = 0.05
