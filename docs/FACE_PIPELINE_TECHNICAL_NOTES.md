@@ -318,6 +318,6 @@ The tracked ADAS detector evidence record is `data/evaluations/face_detector_ada
 Historical detector comparison context lives in `docs/archive/face_detector_bakeoff/`. Generated artifacts, videos, overlays, model binaries, and browser state remain ignored.
 
 The selected plate detector is documented separately in
-`docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`. Plate detector work must remain
-separate from the frozen Face Pipeline behavior until a dedicated plate tracking
-or rendering milestone explicitly integrates it.
+`docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`. Plate detector and prototype tracking
+work remain separate from the frozen Face Pipeline behavior until a dedicated
+unified review or rendering milestone explicitly integrates plate regions.

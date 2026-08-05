@@ -1,6 +1,8 @@
 # Plate Pipeline Technical Notes
 
-The active plate subsystem is currently detector-only.
+The active plate subsystem currently has one selected detector plus a minimal
+temporal stabilization and bounded gap-recovery stage. Plate review integration
+and final plate rendering are not implemented yet.
 
 ## Selected Detector
 
@@ -31,7 +33,7 @@ The same configuration is used for the primary day clip, night clip, close/stres
 clip, and all-visible adjudication sample. Do not introduce per-video plate
 thresholds, frame ranges, ROIs, coordinates, or clip-specific special cases.
 
-## Supported Command
+## Supported Commands
 
 ```bash
 redactor detect-plates INPUT_VIDEO \
@@ -42,6 +44,20 @@ redactor detect-plates INPUT_VIDEO \
 
 The model path may also come from `REDACTOR_OIM_PLATE_MODEL`. Model weights are
 local-only and ignored by Git.
+
+After detection, run the plate tracking prototype:
+
+```bash
+redactor track-plates \
+  --source-video INPUT_VIDEO \
+  --detections artifacts/diagnostics/plate_detection/detections.jsonl \
+  --output-dir artifacts/diagnostics/plate_tracking \
+  --overwrite
+```
+
+The command writes `tracks.jsonl`, `track_summary.json`, `gap_decisions.json`,
+`review_intervals.json`, `tracking_manifest.json`, `processing_log.txt`, a local
+track gallery, contact sheets, and an H.264/yuv420p tracking overlay.
 
 ## Output Records
 
@@ -60,6 +76,45 @@ records. Each detection has:
 
 Plate detector records are detector evidence only. They are not plate tracks,
 privacy-region coverage, reviewed corrections, or final rendering proof.
+
+## Plate Tracking v1
+
+The tracker is a deterministic post-detector stage for OIM plate detections. It
+uses one global configuration across the primary day clip, night clip,
+close/stress clip, and synthetic fixtures.
+
+Selected tracking configuration hash:
+`27fc564737bf7bf3d2bc5389c4394fe991b5b9e90f9e76789ed0d8231e3dff9d`.
+
+Core policy:
+
+- maximum association gap: `1.50` seconds;
+- maximum safe interpolation gap: `0.30` seconds;
+- primary detector threshold remains `0.30`;
+- no one-sided prediction before the first observation or after the last
+  observation;
+- interpolation requires reliable observations on both sides, bounded center
+  motion, bounded scale change, and no scene cut;
+- long or unsafe gaps become review intervals instead of synthetic boxes.
+
+Track statuses are:
+
+- `accepted_plate_track`: stable, persistent plate evidence;
+- `needs_review`: persistent but ambiguous, unstable, sparse, or internally
+  unresolved evidence;
+- `rejected_noise_track`: isolated or invalid plate-like proposals.
+
+Frame-level provenance is preserved as:
+
+- `plate_detector_observation`;
+- `plate_track_interpolation`;
+- `plate_track_prediction` (reserved, not emitted by v1);
+- `reviewed_plate_correction` (reserved for a later review/correction stage).
+
+Interpolation and future reviewed corrections must never be counted as raw
+detector hits. Tracking metrics therefore report detector recall, observed track
+coverage, interpolated coverage, unresolved gaps, false track burden, and review
+intervals separately.
 
 ## Historical Experiments
 
@@ -81,6 +136,8 @@ by active production code.
 ## Current Limitations
 
 OIM was selected for a prototype plate pipeline because visual adjudication found
-it much cleaner than RT-DETR despite lower recall. Known nighttime gaps remain.
-The next milestone is plate tracking with bounded interpolation and review
-classification. Final plate redaction is not implemented yet.
+it much cleaner than RT-DETR despite lower recall. Plate tracking now stabilizes
+short gaps and rejects isolated noise, but known nighttime gaps remain review
+items. The next milestone is experimental plate rendering from accepted tracks
+and explicitly reviewed intervals. Final unified plate redaction is not
+implemented yet.

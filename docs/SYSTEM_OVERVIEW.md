@@ -1,13 +1,13 @@
 # Video Redaction Pipeline - System Overview
 
-- **Document version:** v018
+- **Document version:** v019
 - **Last updated:** 2026-08-05
-- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, but plate tracking and plate rendering are not implemented yet.
+- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus minimal temporal tracking and bounded gap recovery. Plate rendering is not implemented yet.
 - **Canonical document:** `docs/SYSTEM_OVERVIEW.md`
 
 ## What The System Is For
 
-This repository builds a local video-redaction pipeline. Its most complete path is face privacy: finding faces, keeping those detections connected over time, rendering accepted privacy regions, measuring the result against available truth, and creating a compact review package for intervals that deserve human attention. License-plate work now has a selected detector, but the downstream plate continuity and rendering stages remain future work.
+This repository builds a local video-redaction pipeline. Its most complete path is face privacy: finding faces, keeping those detections connected over time, rendering accepted privacy regions, measuring the result against available truth, and creating a compact review package for intervals that deserve human attention. License-plate work now has a selected detector and an initial continuity stage, but plate review integration and final rendering remain future work.
 
 The system is not a finished automatic redaction product, and it does not make a universal zero-leak claim. It produces structured evidence, diagnostic outputs, non-final previews, and approved face-redacted MP4s when the available privacy-region evidence passes final safety gates.
 
@@ -231,13 +231,13 @@ The selected detector policy is:
 
 - inference mode: `uniform_small_object_tiles`;
 - primary threshold: `0.30`;
-- no separate lower proposal threshold selected for this detector-only milestone.
+- no separate lower proposal threshold selected for the active detector.
 
 OIM was selected after finalist metrics and manual full-video visual adjudication. RT-DETR had higher recall, but it produced many more true non-plate detections and duplicates. For redaction, cleaner localization and lower false redaction burden matter because every false plate box can hide unrelated scene content and increase review workload.
 
 The decision is backed by `data/evaluations/license_plate_detector_oim_yolov9_s_608_v1/`. Historical OpenVINO 0106/0123, Intel YOLOv8n, RF-DETR, RT-DETR, and LPD-YuNet experiments are preserved in `docs/archive/license_plate_detector_bakeoff/`.
 
-This detector selection does not complete the plate pipeline. Nighttime gaps remain, and plate tracking, bounded interpolation, review handling, and final plate rendering are still planned.
+The plate tracker now connects OIM detections into deterministic temporal tracks, rejects isolated noise, and interpolates only short two-anchor gaps that pass motion, scale, and scene-cut checks. Longer gaps, unstable tracks, and possible static-overlay false positives remain review evidence. This does not complete the plate pipeline: plate review integration and final plate rendering are still planned.
 
 ## Outputs And Audit Information
 
@@ -277,14 +277,15 @@ Implemented:
 - automated local Review Bundle v1.2.3 with raw signal preservation, concise reviewer tasks, guided review and auto-advance, reviewer-discovered random-audit miss promotion, loopback bundle serving, aligned same-style local media comparison, decoded-frame visual-content checks, source-to-local frame mapping, bbox-localized rendered-region validation, deterministic audit samples, media provenance audit, and exported-decision validation;
 - FFprobe validation plus decoded-frame validation of rendered media resolution, frame rate, duration, frame count, audio presence, visible content, browser-compatible encoding, and expected region application;
 - tracked ADAS detector evaluation evidence;
-- selected OIM YOLOv9-S-608 plate detector-only workflow;
+- selected OIM YOLOv9-S-608 plate detector workflow;
+- prototype plate tracking and bounded short-gap recovery with review intervals;
 - historical archives for face and plate detector bake-offs.
 
 Not yet implemented:
 
 - correction UI for drawing or editing privacy regions;
 - robust automatic identity grouping for all keep-person fragments;
-- plate tracking, plate gap recovery, unified review integration, and final plate rendering.
+- plate review integration and final plate rendering.
 
 ## Known Limitations
 
@@ -301,15 +302,15 @@ Not yet implemented:
 - Automatically recovered privacy regions must still be treated according to their interval decision.
 - Universal or production-wide zero-leak claims have not been established.
 - The evaluated face and plate detector decisions apply to the current operating clips and evidence records; they are not universal model rankings.
-- Plate detection alone is not plate redaction. OIM has known gaps that must be addressed by tracking, review, or future model improvement.
+- Plate tracking is not plate redaction. OIM has known gaps, and the tracker leaves long or unsafe gaps as review-required evidence instead of silently inventing boxes.
 
 ## Next Planned Stages
 
 1. Add a correction workflow that can supply reviewed privacy regions for review-required intervals.
 2. Expand validation of rendered face-only outputs before making broader redaction-quality claims.
-3. Add prototype plate tracking for the selected OIM detector.
-4. Add plate review/rendering only after detector-output continuity is measured.
+3. Add experimental plate rendering from accepted plate tracks and explicitly reviewed intervals.
+4. Add plate review/rendering integration only after plate-tracking evidence is reviewed.
 
 ## Detailed Technical Notes
 
-Face implementation details, JSON output conventions, provenance fields, thresholds, safety gates, and diagnostic command notes live in `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`. Plate detector details live in `docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`.
+Face implementation details, JSON output conventions, provenance fields, thresholds, safety gates, and diagnostic command notes live in `docs/FACE_PIPELINE_TECHNICAL_NOTES.md`. Plate detector and tracking details live in `docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`.

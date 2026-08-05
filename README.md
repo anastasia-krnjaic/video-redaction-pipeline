@@ -1,8 +1,8 @@
 # Video Redaction Pipeline
 
-Video Redaction Pipeline is a local Python project for building and auditing video-redaction workflows on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`). The prototype plate work now has one selected detector: Open Image Models YOLOv9-S-608 (`oim_yolov9_s_608`).
+Video Redaction Pipeline is a local Python project for building and auditing video-redaction workflows on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`). The prototype plate work uses one selected detector, Open Image Models YOLOv9-S-608 (`oim_yolov9_s_608`), followed by bounded temporal plate tracking.
 
-The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support is detector-only at this stage; plate tracking, gap recovery, review integration, and final plate rendering are later milestones.
+The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support currently covers detection plus minimal temporal stabilization and short, defensible interpolation. Plate review integration and final plate rendering are later milestones.
 
 ## Install
 
@@ -136,9 +136,9 @@ Evaluation modes:
 
 The evaluator reports detector recall, tracking coverage, privacy coverage, provenance counts, unresolved frames, interval decisions, render-manifest consistency, and failure-focused visual evidence. It does not claim pixel-level privacy verification unless that measurement is explicitly implemented.
 
-## Supported Plate Detector Workflow
+## Supported Plate Detection And Tracking Workflow
 
-The supported plate command is detector-only and always uses Open Image Models YOLOv9-S-608:
+The supported plate detector command always uses Open Image Models YOLOv9-S-608:
 
 ```bash
 redactor detect-plates artifacts/eval_day_plate_close.mp4 \
@@ -153,7 +153,23 @@ optional diagnostic overlay. The active configuration is global:
 - detector ID: `oim_yolov9_s_608`;
 - inference mode: `uniform_small_object_tiles`;
 - primary threshold: `0.30`;
-- no separate lower proposal threshold selected for this detector-only milestone.
+- no separate lower proposal threshold selected for the active detector.
+
+After detection, run the prototype temporal stabilization pass:
+
+```bash
+redactor track-plates \
+  --source-video artifacts/eval_day_plate_close.mp4 \
+  --detections artifacts/diagnostics/day_plate_oim/detections.jsonl \
+  --output-dir artifacts/diagnostics/day_plate_tracks \
+  --overwrite
+```
+
+The tracker writes `tracks.jsonl`, `track_summary.json`, `gap_decisions.json`,
+`review_intervals.json`, `tracking_manifest.json`, a compact track gallery,
+contact sheets, and an H.264/yuv420p diagnostic overlay. Detector observations,
+short interpolations, review intervals, and rejected noise remain separate
+provenance categories. Long or unsafe gaps are not filled speculatively.
 
 The normal plate workflow does not expose rejected detector candidates. Previous
 OpenVINO 0106/0123, Intel YOLOv8n, RF-DETR, RT-DETR, and LPD-YuNet experiments
@@ -271,4 +287,5 @@ bake-offs are archived under `docs/archive/license_plate_detector_bakeoff/`.
 - Automated evaluation currently uses range-level face truth and reviewed pipeline evidence; it does not invent missing per-frame boxes.
 - Automated review bundles highlight known risks and audit samples, but cannot detect every possible silent miss without Ground Truth.
 - No universal or production-wide zero-leak claim has been established.
-- Plate detection is currently detector-only. Plate tracking, gap recovery, review integration, and final plate rendering are not implemented yet.
+- Plate detection and minimal tracking are implemented, but plate review integration and final plate rendering are not implemented yet.
+- Plate tracking bridges only short, defensible two-anchor gaps. Longer gaps and unstable plate-like tracks remain review-required evidence.

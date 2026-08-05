@@ -419,6 +419,91 @@ def detect_plates(
         click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'overlay.mp4'}")
 
 
+@main.command("track-plates")
+@click.option(
+    "--detections",
+    "detections_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="OIM YOLOv9-S-608 license-plate detections JSONL path.",
+)
+@click.option(
+    "--source-video",
+    "source_video_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Source video used to create the detection JSONL.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help=(
+        "Directory for tracks.jsonl, track_summary.json, gap_decisions.json, "
+        "review_intervals.json, tracking_manifest.json, and diagnostics."
+    ),
+)
+@click.option("--no-overlay", is_flag=True, help="Skip diagnostic tracking_overlay.mp4 generation.")
+@click.option(
+    "--show-rejected-overlay",
+    is_flag=True,
+    help="Also draw rejected proposals on the diagnostic overlay.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+def track_plates(
+    detections_path: Path,
+    source_video_path: Path,
+    output_dir: Path,
+    no_overlay: bool,
+    show_rejected_overlay: bool,
+    overwrite: bool,
+) -> None:
+    """Track selected OIM license-plate detections with bounded gap recovery."""
+    from redactor import plate_tracking
+
+    try:
+        summary = plate_tracking.run_plate_tracking(
+            source_video_path,
+            detections_path=detections_path,
+            output_dir=output_dir,
+            overwrite=overwrite,
+            write_overlay_video=not no_overlay,
+            show_rejected_overlay=show_rejected_overlay,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        raise click.ClickException(
+            _subprocess_message(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        ) from exc
+
+    tracking_summary = summary["tracking_summary"]
+    status_counts = tracking_summary["status_counts"]
+    click.echo("Plate tracker: OIM YOLOv9-S-608 temporal stabilization v1")
+    click.echo(f"Detector configuration hash: {summary['detector_configuration_hash']}")
+    click.echo(f"Tracking configuration hash: {summary['tracking_configuration_hash']}")
+    click.echo(
+        f"Processed {summary['frames_processed']} frames; "
+        f"{status_counts['accepted_plate_track']} accepted tracks; "
+        f"{status_counts['needs_review']} review tracks; "
+        f"{status_counts['rejected_noise_track']} rejected tracks."
+    )
+    click.echo(f"Review intervals: {tracking_summary['review_interval_count']}")
+    click.echo(f"Processing FPS: {summary['processing_fps']}")
+    click.echo(f"Wrote tracks: {output_dir / 'tracks.jsonl'}")
+    click.echo(f"Wrote track summary: {output_dir / 'track_summary.json'}")
+    click.echo(f"Wrote gap decisions: {output_dir / 'gap_decisions.json'}")
+    click.echo(f"Wrote review intervals: {output_dir / 'review_intervals.json'}")
+    click.echo(f"Wrote manifest: {output_dir / 'tracking_manifest.json'}")
+    if not no_overlay:
+        click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'tracking_overlay.mp4'}")
+
+
 @main.command()
 @click.argument(
     "input_path",

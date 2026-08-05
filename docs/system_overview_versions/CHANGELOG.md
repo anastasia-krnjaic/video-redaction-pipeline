@@ -1,5 +1,15 @@
 # System Overview Changelog
 
+## v019 — 2026-08-05
+
+Added Plate Tracking and Gap Recovery v1 after the selected OIM plate detector:
+
+- documented `redactor track-plates` as the supported prototype plate tracking command;
+- recorded deterministic OIM plate association, track classification, bounded two-anchor interpolation, review intervals, and rejected-noise diagnostics;
+- clarified that interpolated plate boxes are temporal support, not detector hits;
+- recorded the global tracking configuration hash `27fc564737bf7bf3d2bc5389c4394fe991b5b9e90f9e76789ed0d8231e3dff9d`;
+- clarified that plate review integration and final plate rendering remain future work.
+
 ## v018 — 2026-08-05
 
 Selected Open Image Models YOLOv9-S-608 as the active detector-only plate backend:
