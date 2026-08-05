@@ -14,7 +14,7 @@ from typing import Any
 import cv2 as cv
 import numpy as np
 
-from redactor import media, plate_detection
+from redactor import frame_spans, media, plate_detection
 from redactor.detection import clip_xyxy_to_frame, rational_to_float
 
 SCHEMA_VERSION = "plate_tracking.v1"
@@ -380,7 +380,12 @@ def run_plate_tracking(
         height=height,
         config=resolved_config,
     )
-    frames_processed = detection_frame_count(detections_path)
+    detection_indices = frame_spans.jsonl_frame_indices(detections_path)
+    detection_span_report = frame_spans.build_frame_span_report(
+        detection_indices,
+        source_frame_count=source_frame_count,
+    )
+    frames_processed = int(detection_span_report["processed_frame_span_count"])
     result = track_plate_observations(
         observations_by_frame,
         frame_count=frames_processed,
@@ -393,7 +398,12 @@ def run_plate_tracking(
     )
     elapsed_seconds = time.perf_counter() - started_at
 
-    write_tracks_jsonl(output_dir / "tracks.jsonl", result.frame_tracks, frames_processed)
+    write_tracks_jsonl(
+        output_dir / "tracks.jsonl",
+        result.frame_tracks,
+        frames_processed,
+        detector_frame_indices=detection_indices,
+    )
     write_json(
         output_dir / "track_summary.json",
         build_track_summary(result, config=resolved_config, elapsed_seconds=elapsed_seconds),
@@ -416,9 +426,11 @@ def run_plate_tracking(
         config=resolved_config,
         result=result,
         elapsed_seconds=elapsed_seconds,
+        detection_span_report=detection_span_report,
     )
     write_json(output_dir / "tracking_manifest.json", manifest)
     write_json(output_dir / "summary.json", manifest)
+    write_json(output_dir / "frame_span_report.json", detection_span_report)
     write_processing_log(output_dir / "processing_log.txt", manifest, result)
     write_track_gallery(source_video, output_dir / "track_gallery.html", result, width, height)
     write_gap_contact_sheet(
@@ -1108,10 +1120,20 @@ def write_tracks_jsonl(
     path: Path,
     frame_tracks: dict[int, list[PlateTrackFrame]],
     frame_count: int,
+    *,
+    detector_frame_indices: list[int] | None = None,
 ) -> None:
+    available_detector_frames = None
+    if detector_frame_indices is not None:
+        available_detector_frames = {int(index) for index in detector_frame_indices}
     with path.open("w", encoding="utf-8") as file:
         for frame_index in range(frame_count):
             record = {
+                "detector_frame_available": (
+                    True
+                    if available_detector_frames is None
+                    else frame_index in available_detector_frames
+                ),
                 "frame_index": frame_index,
                 "tracks": [track.to_dict() for track in frame_tracks.get(frame_index, [])],
             }
@@ -1171,17 +1193,23 @@ def build_tracking_manifest(
     config: PlateTrackingConfig,
     result: PlateTrackingResult,
     elapsed_seconds: float,
+    detection_span_report: dict[str, Any],
 ) -> dict[str, Any]:
     track_summary = build_track_summary(result, config=config, elapsed_seconds=elapsed_seconds)
     return {
         "created_at": media.utc_timestamp(),
         "detections_sha256": detections_sha256,
         "detections_path": media.portable_source_path(detections_path),
+        "detection_frame_span": detection_span_report,
         "detector_configuration_hash": config.detector_configuration_hash,
         "detector_id": config.detector_id,
+        "first_processed_frame": detection_span_report["first_processed_frame"],
         "frames_processed": frames_processed,
+        "full_source_processed": detection_span_report["full_source_processed"],
         "input_height": height,
         "input_width": width,
+        "last_processed_frame": detection_span_report["last_processed_frame"],
+        "missing_processed_ranges": detection_span_report["missing_processed_ranges"],
         "nominal_fps": round(fps, 6),
         "processing_fps": track_summary["processing_fps"],
         "schema_version": SCHEMA_VERSION,

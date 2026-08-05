@@ -35,7 +35,8 @@ Selected license-plate detector policy:
 - No separate lower proposal threshold is selected for the active plate detector.
 - OIM YOLOv9-S-608 is the only active plate detector backend. Historical LPD-YuNet, OpenVINO 0106/0123, Intel YOLOv8n, RF-DETR, and RT-DETR comparison material must stay in the archive/evidence record and must not be reintroduced into the active runtime path without a new explicit model-selection task.
 - Plate tracking and bounded plate gap recovery are implemented as a prototype stage after OIM detection. They use one global configuration, preserve detector observations separately from interpolation, and leave long or unsafe gaps as review intervals.
-- Plate review integration and final plate rendering are not implemented yet. Do not claim plate redaction is complete from detector or tracking evidence.
+- Plate Rendering and Review v1 may render non-final automatic previews from accepted plate tracks only. It must exclude `needs_review` tracks, rejected noise, unresolved gaps, and speculative one-sided prediction from clean previews. Reviewed-final plate output is still blocked until correction regions exist for required review intervals.
+- Plate production processing must cover the complete source video by default. Benchmark windows are evaluation-only. A plate render from partial detector/tracker inputs must be blocked unless it is an explicitly requested, watermarked partial preview.
 
 1. Versioned ground-truth files under `data/ground_truth/` are frozen sources of truth once created.
 2. Never edit a frozen ground-truth version in place.
@@ -69,3 +70,5 @@ Selected license-plate detector policy:
 30. Explicit keep-person handling is a case-policy decision. Ambiguous keep fragments or unsupported weak sequences must remain review blockers; do not infer keep identity from benchmark labels, broad ROIs, clothing, or role.
 31. Plate detector calibration must use one global threshold policy across clips. Do not introduce per-video plate thresholds, ROIs, coordinates, frame ranges, or source-specific production logic.
 32. Plate tracking must use one global time-normalized configuration across clips. Interpolated plate boxes are temporal support only, not raw detector hits. Long gaps, scene cuts, unstable motion, scale jumps, ambiguous tracks, and possible static-overlay false positives must stay auditable instead of being silently accepted.
+33. Plate rendering must preserve detector, track, interpolation, and review provenance. Automatic plate preview is not final approval; it may render accepted detector observations and safe interpolation, but must keep unresolved gaps and uncertain tracks as review tasks. Do not call plate redaction complete until reviewed correction regions and unified rendering are implemented and validated.
+34. Plate frame-span accounting must remain explicit. `detect-plates` processes full input videos by default; `track-plates` records missing detector-frame ranges; `render-plates` must refuse normal full-duration preview/final output from partial tracking unless `--allow-partial-preview` is used for a visibly non-final diagnostic artifact.

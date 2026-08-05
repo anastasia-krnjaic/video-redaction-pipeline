@@ -1,5 +1,26 @@
 # System Overview Changelog
 
+## v021 — 2026-08-05
+
+Added Full-Video Plate Processing and Partial-Span Safety v1:
+
+- documented that `detect-plates` processes complete source videos by default and `--max-frames` is diagnostic only;
+- added plate frame-span reports for detector/tracker inputs and renderer manifests;
+- blocked normal plate preview/final rendering from partial tracking inputs unless an explicitly watermarked `--allow-partial-preview` diagnostic is requested;
+- recorded that benchmark frame windows remain evaluation-only and must not control production plate processing;
+- preserved the selected OIM detector, Plate Tracking v1 configuration, and plate rendering style.
+
+## v020 — 2026-08-05
+
+Added Plate Rendering and Review v1 after OIM plate tracking:
+
+- documented `redactor render-plates` for non-final automatic plate previews from accepted tracks only;
+- documented `redactor build-plate-review-bundle` and `redactor validate-plate-review-decisions`;
+- recorded the global plate render style: pixelation, 15% margin, pixel size 16, H.264/yuv420p;
+- clarified that rejected tracks, `needs_review` tracks, unresolved gaps, and speculative prediction are excluded from clean previews;
+- added decoded rendered-region validation for expected plate boxes;
+- clarified that reviewed-final plate completion and unified face/plate rendering remain future work.
+
 ## v019 — 2026-08-05
 
 Added Plate Tracking and Gap Recovery v1 after the selected OIM plate detector:

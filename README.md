@@ -1,8 +1,8 @@
 # Video Redaction Pipeline
 
-Video Redaction Pipeline is a local Python project for building and auditing video-redaction workflows on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`). The prototype plate work uses one selected detector, Open Image Models YOLOv9-S-608 (`oim_yolov9_s_608`), followed by bounded temporal plate tracking.
+Video Redaction Pipeline is a local Python project for building and auditing video-redaction workflows on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`). The prototype plate work uses one selected detector, Open Image Models YOLOv9-S-608 (`oim_yolov9_s_608`), followed by bounded temporal plate tracking and automatic preview rendering from accepted tracks.
 
-The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support currently covers detection plus minimal temporal stabilization and short, defensible interpolation. Plate review integration and final plate rendering are later milestones.
+The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support currently covers detection, minimal temporal stabilization, short defensible interpolation, non-final automatic plate previews, and a local review bundle for unresolved or uncertain plate intervals. Reviewed-final plate completion and unified face/plate rendering are later milestones.
 
 ## Install
 
@@ -136,7 +136,7 @@ Evaluation modes:
 
 The evaluator reports detector recall, tracking coverage, privacy coverage, provenance counts, unresolved frames, interval decisions, render-manifest consistency, and failure-focused visual evidence. It does not claim pixel-level privacy verification unless that measurement is explicitly implemented.
 
-## Supported Plate Detection And Tracking Workflow
+## Supported Plate Detection, Tracking, And Preview Workflow
 
 The supported plate detector command always uses Open Image Models YOLOv9-S-608:
 
@@ -155,6 +155,10 @@ optional diagnostic overlay. The active configuration is global:
 - primary threshold: `0.30`;
 - no separate lower proposal threshold selected for the active detector.
 
+By default `detect-plates` processes the complete input video. `--max-frames`
+is a diagnostic limiter only; benchmark windows are evaluation inputs and do
+not control production plate processing.
+
 After detection, run the prototype temporal stabilization pass:
 
 ```bash
@@ -170,6 +174,47 @@ The tracker writes `tracks.jsonl`, `track_summary.json`, `gap_decisions.json`,
 contact sheets, and an H.264/yuv420p diagnostic overlay. Detector observations,
 short interpolations, review intervals, and rejected noise remain separate
 provenance categories. Long or unsafe gaps are not filled speculatively.
+Tracking manifests also record the processed source-frame span and any missing
+ranges.
+
+Render a non-final automatic plate preview from accepted tracks only:
+
+```bash
+redactor render-plates \
+  --source-video artifacts/eval_day_plate_close.mp4 \
+  --tracks artifacts/diagnostics/day_plate_tracks/tracks.jsonl \
+  --review-intervals artifacts/diagnostics/day_plate_tracks/review_intervals.json \
+  --output-dir artifacts/diagnostics/day_plate_render \
+  --overwrite
+```
+
+Plate rendering v1 uses one global preview style: pixelation, margin fraction
+`0.15`, margin pixels `0`, and pixel size `16`. The preview may contain
+unresolved intervals and is machine-readably non-final. It renders accepted
+detector observations and accepted short interpolation only; `needs_review`
+tracks, rejected noise, unresolved gaps, and speculative prediction are excluded.
+The renderer refuses a normal full-duration preview or reviewed-final candidate
+when the plate tracks do not cover the complete source span. A diagnostic
+partial preview requires `--allow-partial-preview` and is visibly/machine-readably
+marked `PARTIAL PROCESSING - NOT FINAL`.
+
+Build the local plate review bundle:
+
+```bash
+redactor build-plate-review-bundle \
+  --source-video artifacts/eval_day_plate_close.mp4 \
+  --tracks artifacts/diagnostics/day_plate_tracks/tracks.jsonl \
+  --review-intervals artifacts/diagnostics/day_plate_tracks/review_intervals.json \
+  --automatic-preview artifacts/diagnostics/day_plate_render/automatic_preview.mp4 \
+  --diagnostic-overlay artifacts/diagnostics/day_plate_tracks/tracking_overlay.mp4 \
+  --output-dir artifacts/diagnostics/day_plate_review \
+  --overwrite
+```
+
+The plate review bundle creates concise tasks for unresolved gaps, uncertain
+tracks, possible false accepted tracks, track-boundary audit records, and
+deterministic spot checks. A long unresolved gap cannot be approved with
+`Looks correct` unless a later correction workflow supplies valid plate regions.
 
 The normal plate workflow does not expose rejected detector candidates. Previous
 OpenVINO 0106/0123, Intel YOLOv8n, RF-DETR, RT-DETR, and LPD-YuNet experiments
@@ -287,5 +332,5 @@ bake-offs are archived under `docs/archive/license_plate_detector_bakeoff/`.
 - Automated evaluation currently uses range-level face truth and reviewed pipeline evidence; it does not invent missing per-frame boxes.
 - Automated review bundles highlight known risks and audit samples, but cannot detect every possible silent miss without Ground Truth.
 - No universal or production-wide zero-leak claim has been established.
-- Plate detection and minimal tracking are implemented, but plate review integration and final plate rendering are not implemented yet.
+- Plate detection, minimal tracking, non-final previews, and plate review bundles are implemented. Reviewed-final plate correction intake and unified face/plate rendering are not implemented yet.
 - Plate tracking bridges only short, defensible two-anchor gaps. Longer gaps and unstable plate-like tracks remain review-required evidence.

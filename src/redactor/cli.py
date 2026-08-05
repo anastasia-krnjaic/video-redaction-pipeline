@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -440,7 +441,7 @@ def detect_plates(
     type=click.Path(file_okay=False, path_type=Path),
     help=(
         "Directory for tracks.jsonl, track_summary.json, gap_decisions.json, "
-        "review_intervals.json, tracking_manifest.json, and diagnostics."
+        "review_intervals.json, tracking_manifest.json, frame_span_report.json, and diagnostics."
     ),
 )
 @click.option("--no-overlay", is_flag=True, help="Skip diagnostic tracking_overlay.mp4 generation.")
@@ -493,6 +494,8 @@ def track_plates(
         f"{status_counts['needs_review']} review tracks; "
         f"{status_counts['rejected_noise_track']} rejected tracks."
     )
+    click.echo(f"Full source processed: {summary['full_source_processed']}")
+    click.echo(f"Missing processed ranges: {len(summary['missing_processed_ranges'])}")
     click.echo(f"Review intervals: {tracking_summary['review_interval_count']}")
     click.echo(f"Processing FPS: {summary['processing_fps']}")
     click.echo(f"Wrote tracks: {output_dir / 'tracks.jsonl'}")
@@ -500,8 +503,228 @@ def track_plates(
     click.echo(f"Wrote gap decisions: {output_dir / 'gap_decisions.json'}")
     click.echo(f"Wrote review intervals: {output_dir / 'review_intervals.json'}")
     click.echo(f"Wrote manifest: {output_dir / 'tracking_manifest.json'}")
+    click.echo(f"Wrote frame-span report: {output_dir / 'frame_span_report.json'}")
     if not no_overlay:
         click.echo(f"Wrote diagnostic overlay without audio: {output_dir / 'tracking_overlay.mp4'}")
+
+
+@main.command("render-plates")
+@click.option(
+    "--source-video",
+    "source_video_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Source video used by the selected OIM plate detector and plate tracker.",
+)
+@click.option(
+    "--tracks",
+    "tracks_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Plate tracks JSONL from track-plates.",
+)
+@click.option(
+    "--review-intervals",
+    "review_intervals_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Plate review_intervals.json from track-plates.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory for automatic_preview.mp4, render manifest, validation, and log files.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["preview", "reviewed_final"]),
+    default="preview",
+    show_default=True,
+    help="Preview renders accepted automatic plate regions; reviewed_final refuses blockers.",
+)
+@click.option(
+    "--output-video",
+    "output_video_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Optional output MP4 path. Defaults to automatic_preview.mp4 in output-dir.",
+)
+@click.option(
+    "--allow-partial-preview",
+    is_flag=True,
+    help=(
+        "Allow an explicitly watermarked non-final preview when plate tracks do not cover the "
+        "full source video. Reviewed-final renders remain blocked."
+    ),
+)
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+def render_plates(
+    source_video_path: Path,
+    tracks_path: Path,
+    review_intervals_path: Path,
+    output_dir: Path,
+    mode: str,
+    output_video_path: Path | None,
+    allow_partial_preview: bool,
+    overwrite: bool,
+) -> None:
+    """Render non-final pixelated plate previews from accepted OIM tracks only."""
+    from redactor import plate_rendering
+
+    try:
+        summary = plate_rendering.run_plate_render(
+            source_video_path,
+            tracks_path=tracks_path,
+            review_intervals_path=review_intervals_path,
+            output_dir=output_dir,
+            mode=mode,
+            output_video_path=output_video_path,
+            allow_partial_preview=allow_partial_preview,
+            overwrite=overwrite,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        raise click.ClickException(
+            _subprocess_message(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        ) from exc
+
+    click.echo("Plate renderer: accepted OIM plate tracks only")
+    click.echo(f"Render configuration hash: {summary['render_configuration_hash']}")
+    click.echo(f"Mode: {summary['mode']}")
+    click.echo(f"Full source processed: {summary['full_source_processed']}")
+    click.echo(f"Partial processing: {summary['partial_processing']}")
+    click.echo(f"Rendered frames: {summary['rendered_frame_count']}")
+    click.echo(f"Rendered regions: {summary['rendered_region_count']}")
+    click.echo(f"Final approval: {summary['final_approval_status']}")
+    click.echo(f"Media validation passed: {summary['media_validation_passed']}")
+    click.echo(f"Rendered-region validation passed: {summary['rendered_region_validation_passed']}")
+    click.echo(f"Wrote manifest: {output_dir / 'render_manifest.json'}")
+    click.echo(f"Wrote validation: {output_dir / 'validation.json'}")
+
+
+@main.command("build-plate-review-bundle")
+@click.option(
+    "--source-video",
+    "source_video_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Source video for original review clips.",
+)
+@click.option(
+    "--tracks",
+    "tracks_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Plate tracks JSONL from track-plates.",
+)
+@click.option(
+    "--review-intervals",
+    "review_intervals_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Plate review_intervals.json from track-plates.",
+)
+@click.option(
+    "--automatic-preview",
+    "automatic_preview_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Automatic plate preview MP4 generated by render-plates.",
+)
+@click.option(
+    "--diagnostic-overlay",
+    "diagnostic_overlay_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Optional diagnostic overlay MP4 from track-plates.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Review bundle directory.",
+)
+@click.option("--spot-check-count", default=3, show_default=True, type=click.IntRange(0, 20))
+@click.option("--context-frames", default=15, show_default=True, type=click.IntRange(0, 300))
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+def build_plate_review_bundle(
+    source_video_path: Path,
+    tracks_path: Path,
+    review_intervals_path: Path,
+    automatic_preview_path: Path,
+    diagnostic_overlay_path: Path | None,
+    output_dir: Path,
+    spot_check_count: int,
+    context_frames: int,
+    overwrite: bool,
+) -> None:
+    """Build a local review bundle for plate tracking and preview blockers."""
+    from redactor import plate_rendering
+
+    try:
+        summary = plate_rendering.build_plate_review_bundle(
+            source_video_path,
+            tracks_path=tracks_path,
+            review_intervals_path=review_intervals_path,
+            automatic_preview_path=automatic_preview_path,
+            diagnostic_overlay_path=diagnostic_overlay_path,
+            output_dir=output_dir,
+            spot_check_count=spot_check_count,
+            context_frames=context_frames,
+            overwrite=overwrite,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        NotADirectoryError,
+        RuntimeError,
+        ValueError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        raise click.ClickException(
+            _subprocess_message(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        ) from exc
+
+    click.echo("Built plate review bundle")
+    click.echo(f"Required review items: {summary['required_review_items']}")
+    click.echo(f"Optional spot checks: {summary['optional_spot_checks']}")
+    click.echo(f"Final export blocked: {summary['final_export_blocked']}")
+    click.echo(f"Open: {output_dir / 'index.html'}")
+
+
+@main.command("validate-plate-review-decisions")
+@click.option(
+    "--review-tasks",
+    "tasks_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="review_tasks.json from build-plate-review-bundle.",
+)
+@click.option(
+    "--decisions",
+    "decisions_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Exported plate analyst decisions JSON.",
+)
+def validate_plate_review_decisions(tasks_path: Path, decisions_path: Path) -> None:
+    """Validate exported plate review decisions without altering privacy regions."""
+    from redactor import plate_rendering
+
+    try:
+        result = plate_rendering.validate_plate_review_decisions(tasks_path, decisions_path)
+    except (FileNotFoundError, ValueError, json.JSONDecodeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if not result["passed"]:
+        raise click.ClickException("; ".join(result["errors"]))
+    click.echo("Plate review decisions are valid.")
+    click.echo(f"Unresolved blocking items: {result['unresolved_blocking_count']}")
+    click.echo(f"Correction files required: {result['correction_files_required']}")
 
 
 @main.command()

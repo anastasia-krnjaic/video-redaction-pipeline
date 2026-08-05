@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -307,7 +308,102 @@ def test_synthetic_video_smoke_without_model(tmp_path: Path) -> None:
     )
 
     assert summary["frames_processed"] == 5
+    assert summary["full_source_processed"] is True
     assert (tmp_path / "out" / "tracks.jsonl").exists()
+
+
+def test_tracking_manifest_records_partial_detection_span(tmp_path: Path) -> None:
+    video_path = tmp_path / "synthetic.mp4"
+    writer = None
+    try:
+        writer = cv2_writer(video_path, fps=10.0, size=(120, 80))
+        for frame_index in range(5):
+            frame = np.full((80, 120, 3), 40 + frame_index * 10, dtype=np.uint8)
+            writer.write(frame)
+    finally:
+        if writer is not None:
+            writer.release()
+    detections = tmp_path / "detections.jsonl"
+    with detections.open("w", encoding="utf-8") as file:
+        for frame_index in (0, 1, 2):
+            record = {
+                "detections": [
+                    {
+                        "bbox_xyxy": [20 + frame_index, 20, 60 + frame_index, 35],
+                        "candidate_id": f"plate:f{frame_index}",
+                        "category": "license_plate",
+                        "detector_id": plate_detection.DETECTOR_ID,
+                        "score": 0.8,
+                    }
+                ],
+                "frame_index": frame_index,
+            }
+            file.write(json.dumps(record) + "\n")
+
+    summary = plate_tracking.run_plate_tracking(
+        video_path,
+        detections_path=detections,
+        output_dir=tmp_path / "out",
+        write_overlay_video=False,
+    )
+    frame_span = json.loads((tmp_path / "out" / "frame_span_report.json").read_text())
+
+    assert summary["frames_processed"] == 3
+    assert summary["full_source_processed"] is False
+    assert summary["missing_processed_ranges"] == [{"frame_start": 3, "frame_end": 4, "length": 2}]
+    assert frame_span["full_source_processed"] is False
+    track_rows = [
+        json.loads(line)
+        for line in (tmp_path / "out" / "tracks.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert [row["detector_frame_available"] for row in track_rows] == [True, True, True]
+
+
+def test_tracking_rows_mark_interior_missing_detector_frames(tmp_path: Path) -> None:
+    video_path = tmp_path / "synthetic.mp4"
+    writer = None
+    try:
+        writer = cv2_writer(video_path, fps=10.0, size=(120, 80))
+        for frame_index in range(5):
+            frame = np.full((80, 120, 3), 40 + frame_index * 10, dtype=np.uint8)
+            writer.write(frame)
+    finally:
+        if writer is not None:
+            writer.release()
+    detections = tmp_path / "detections.jsonl"
+    with detections.open("w", encoding="utf-8") as file:
+        for frame_index in (0, 2, 4):
+            record = {
+                "detections": [],
+                "frame_index": frame_index,
+            }
+            file.write(json.dumps(record) + "\n")
+
+    plate_tracking.run_plate_tracking(
+        video_path,
+        detections_path=detections,
+        output_dir=tmp_path / "out",
+        write_overlay_video=False,
+    )
+    frame_span = json.loads((tmp_path / "out" / "frame_span_report.json").read_text())
+    track_rows = [
+        json.loads(line)
+        for line in (tmp_path / "out" / "tracks.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+
+    assert frame_span["missing_processed_ranges"] == [
+        {"frame_start": 1, "frame_end": 1, "length": 1},
+        {"frame_start": 3, "frame_end": 3, "length": 1},
+    ]
+    assert [row["detector_frame_available"] for row in track_rows] == [
+        True,
+        False,
+        True,
+        False,
+        True,
+    ]
 
 
 def cv2_writer(path: Path, *, fps: float, size: tuple[int, int]):
