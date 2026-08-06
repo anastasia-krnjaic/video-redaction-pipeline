@@ -1,5 +1,15 @@
 # System Overview Changelog
 
+## v024 — 2026-08-05
+
+Added Final Pipeline Freeze, Audit Package, Repository Cleanup, and Showcase Draft v1:
+
+- documented the generated `artifacts/final_pipeline_package_v1/` behavior-freeze package;
+- recorded that the package freezes current face and plate reference behavior without detector, tracking, evidence, gap-recovery, or rendering changes;
+- clarified that day face and day plate media are source-incompatible and therefore not combined;
+- documented that night face and plate media are source-compatible and have a non-final combined demo preview;
+- separated machine-derived metrics from pending human-reviewed full-video privacy metrics.
+
 ## v023 — 2026-08-05
 
 Added Shared Temporal Evidence Accumulation and Hysteresis Engine v1 for plates:

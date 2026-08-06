@@ -335,6 +335,13 @@ notes live in `docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`, shared post-detection
 contracts live in `docs/PRIVACY_PIPELINE_ARCHITECTURE.md`, and older detector
 bake-offs are archived under `docs/archive/license_plate_detector_bakeoff/`.
 
+The broad-reader project summary is `docs/PROJECT_OVERVIEW.md`, and the short
+local demo guide is `docs/DEMO_GUIDE.md`. The current behavior-freeze package is
+generated under `artifacts/final_pipeline_package_v1/`; it contains source
+compatibility checks, reference media, machine metrics, pending human metric
+definitions, a local audit bundle, repository audit reports, and local showcase
+figures. These generated package artifacts are ignored by Git.
+
 ## Current Limitations
 
 - Final face rendering is supported only from accepted privacy-region inputs and remains bounded by the quality of the upstream tracking, recovery, and review evidence.

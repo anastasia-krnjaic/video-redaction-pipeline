@@ -1,8 +1,8 @@
 # Video Redaction Pipeline - System Overview
 
-- **Document version:** v023
+- **Document version:** v024
 - **Last updated:** 2026-08-05
-- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus shared accumulated-evidence tracking, bounded gap recovery, non-final automatic plate previews, and a local plate review bundle.
+- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus shared accumulated-evidence tracking, bounded gap recovery, non-final automatic plate previews, and a local plate review bundle. Final Pipeline Package v1 freezes the current behavior, reference media, machine metrics, and pending human-audit workflow without changing detector, tracking, evidence, or render decisions.
 - **Canonical document:** `docs/SYSTEM_OVERVIEW.md`
 
 ## What The System Is For
@@ -10,6 +10,8 @@
 This repository builds a local video-redaction pipeline. Its most complete path is face privacy: finding faces, keeping those detections connected over time, rendering accepted privacy regions, measuring the result against available truth, and creating a compact review package for intervals that deserve human attention. License-plate work now has a selected detector, an accumulated-evidence continuity stage, non-final automatic previews from accepted tracks, and review bundles for gaps or uncertain plate-like tracks.
 
 The system is not a finished automatic redaction product, and it does not make a universal zero-leak claim. It produces structured evidence, diagnostic outputs, non-final previews, and approved face-redacted MP4s when the available privacy-region evidence passes final safety gates.
+
+The current behavior-freeze package is generated under `artifacts/final_pipeline_package_v1/`. It records the active component hashes, checks source compatibility, packages current reference media, separates machine-derived metrics from pending human-reviewed metrics, and provides a local full-video audit page.
 
 ## Current User Workflow
 

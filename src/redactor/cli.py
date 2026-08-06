@@ -1705,6 +1705,101 @@ def validate_review_decisions(
         raise click.ClickException("review decision validation failed")
 
 
+@main.command("validate-final-audit-decisions")
+@click.option(
+    "--tasks",
+    "tasks_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="audit_tasks.json from the final pipeline audit package.",
+)
+@click.option(
+    "--decisions",
+    "decisions_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Exported final audit decisions JSON.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional validation JSON output path.",
+)
+def validate_final_audit_decisions(
+    tasks_path: Path,
+    decisions_path: Path,
+    output_path: Path | None,
+) -> None:
+    """Validate exported final full-video audit decisions."""
+    from redactor import final_package, review_bundle
+
+    try:
+        result = final_package.validate_audit_decisions(
+            final_package.load_json(decisions_path),
+            final_package.load_json(tasks_path),
+        )
+        if output_path is not None:
+            review_bundle.write_json(output_path, result)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Final audit decisions: {result['decision_count']} decisions, "
+        f"{len(result['unresolved_blocking_items'])} unresolved blocking items."
+    )
+    if result["errors"]:
+        for error in result["errors"]:
+            click.echo(f"- {error}")
+        raise click.ClickException("final audit decision validation failed")
+
+
+@main.command("summarize-final-audit")
+@click.option(
+    "--tasks",
+    "tasks_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="audit_tasks.json from the final pipeline audit package.",
+)
+@click.option(
+    "--decisions",
+    "decisions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional exported final audit decisions JSON.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional summary JSON output path.",
+)
+def summarize_final_audit(
+    tasks_path: Path,
+    decisions_path: Path | None,
+    output_path: Path | None,
+) -> None:
+    """Summarize pending/completed final full-video audit work."""
+    from redactor import final_package, review_bundle
+
+    try:
+        decisions = final_package.load_json(decisions_path) if decisions_path else None
+        summary = final_package.summarize_audit(final_package.load_json(tasks_path), decisions)
+        if output_path is not None:
+            review_bundle.write_json(output_path, summary)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"Final audit summary: {summary['total_tasks']} tasks, "
+        f"{summary['pending_review_count']} pending, "
+        f"{summary['unresolved_blocking_count']} unresolved blockers."
+    )
+
+
 @main.command("validate-face-policy")
 @click.argument(
     "policy_path",
