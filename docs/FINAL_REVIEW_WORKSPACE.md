@@ -8,25 +8,31 @@ It is generated under:
 artifacts/final_pipeline_package_v2/
 ```
 
-The current v2.1 package is generated under:
+The current v2.2 package is generated under:
 
 ```text
-artifacts/final_pipeline_package_v2_1/
+artifacts/final_pipeline_package_v2_2/
 ```
 
-It does not change detectors, thresholds, tracking, evidence accumulation, recovery, or rendering configuration. It gives a reviewer one case at a time, clear tasks, local correction records, logical privacy entities, an append-only audit trail, and finalization gates.
+It does not change detectors, thresholds, tracking, evidence accumulation, recovery, or rendering configuration. It gives a reviewer one case at a time, clear tasks, local correction records, stable Person/Plate review objects with representative thumbnails, an append-only audit trail, and finalization gates.
 
 ## Launch
 
 Serve the package locally:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_1 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_2 --open
 ```
 
 The server binds to `127.0.0.1`, serves only files under the package root, supports MP4 range requests for seeking, and writes review sessions only under the package `sessions/` directory.
 
 Opening `index.html` directly may load static files, but the local server is the supported workflow because it enables reliable video seeking and durable local session writes.
+
+The review app serves MP4 files with `video/mp4` MIME type and HTTP range
+requests so Firefox and Chromium can seek reliably. Review videos use inline
+playback with Picture-in-Picture disabled. Fullscreen actions open the custom
+player wrapper, not the raw MP4, so source-frame, case-frame, timestamp, case
+name, role, and frame-step controls remain visible.
 
 ## Case Tabs
 
@@ -48,17 +54,23 @@ Diagnostic face-only, plate-only, provenance, and raw-signal details stay behind
 
 ## Current Day Boundary
 
-The previous day face and day plate outputs came from different extracted clips. Their metadata now maps both clips to a common parent source, `artifacts/day_primary.mp4`, and the v2.1 package extracts one canonical Day original interval from that parent source.
+The previous day face and day plate outputs came from different extracted clips. Their metadata now maps both clips to a common parent source, `artifacts/day_primary.mp4`, and the v2.2 package extracts one canonical Day original interval from that parent source.
 
 The combined Day current result is not fabricated from incompatible encoded clips. It is rendered from lineage-proven frozen evidence mapped into the canonical Day source-frame interval. The build validates the local ADAS XML/BIN and OIM ONNX hashes before packaging.
 
-## Privacy Entities
+## Review Objects
 
-The workspace indexes automatic and reviewed region tracks into simple reviewer-facing entities such as `Human 1` and `Plate 1`. Raw detector track IDs remain in Technical details. Each entity has separate controls for editor overlay visibility, privacy policy, and reviewed lock state.
+The workspace indexes automatic and reviewed region tracks into simple reviewer-facing objects such as `Person 01` and `Plate 01`. Raw detector track IDs remain in Technical details. Each object has a deterministic representative thumbnail, first-seen frame, status badge, and separate controls for editor overlay visibility, privacy action, and geometry lock state.
+
+Overlay visibility only changes what the editor draws. It never changes final rendering. Privacy actions are separate: Redact, Keep, and Needs review. Keep requires a reviewer note, creates an append-only event, and remains blocked until verified.
+
+Entities and review tasks open in drawers instead of a fixed sidebar. Opening a drawer does not resize or restart the active video comparison.
 
 ## Review Sessions
 
-On first use, the reviewer enters a display name and reviewer ID or email. This is locally declared identity, not enterprise authentication.
+Click **Start review** to create an anonymous server-backed local session. The server assigns a session UUID and UTC start time automatically. Reviewer name is required only when exporting or finalizing; the workspace appends a `reviewer_attribution_set` event and does not rewrite earlier events.
+
+The reviewer identity is locally declared, not enterprise authentication. Changing attribution appends another event instead of editing history.
 
 The server creates:
 
@@ -112,7 +124,9 @@ Supported correction records include:
 - mark region not sensitive;
 - mark interval not visible or occluded.
 
-Corrections are tied to a case, task, entity, source-video hash, source-frame interval, reviewer identity, reason, keyframe boxes, checkpoint verification states, interpolation method, application version, and configuration freeze hash. Interpolation is bounded to reviewed keyframes inside the task interval; unbounded extrapolation is rejected and unreviewed checkpoints block finalization.
+Corrections are tied to a case, task, review object, source-video hash, source-frame interval, reviewer identity, reason, keyframe boxes, checkpoint verification states, interpolation method, application version, and configuration freeze hash. Interpolation is bounded to reviewed keyframes inside the task interval; unbounded extrapolation is rejected and unreviewed checkpoints block finalization.
+
+Suggested keyframes are deterministic review aids. Intervals up to 0.5 seconds use start/end, intervals up to 2 seconds add a midpoint, longer intervals use checkpoints no farther than about one second apart, and intervals over 5 seconds are split into 5-second review pages. These suggestions do not alter detector, tracker, or recovery behavior.
 
 ## Finalization
 
@@ -132,7 +146,7 @@ Finalize with:
 
 ```bash
 redactor finalize-reviewed-case \
-  --package-root artifacts/final_pipeline_package_v2_1 \
+  --package-root artifacts/final_pipeline_package_v2_2 \
   --case-id CASE_ID \
   --session-dir SESSION_DIR
 ```

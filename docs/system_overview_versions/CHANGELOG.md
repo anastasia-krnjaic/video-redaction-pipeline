@@ -1,5 +1,22 @@
 # System Overview Changelog
 
+## v028 — 2026-08-06
+
+Implemented Final Review Workspace v2.2 as a local review web application:
+
+- documented `artifacts/final_pipeline_package_v2_2/` as the current generated review package;
+- replaced required up-front reviewer identity with anonymous session start and late reviewer attribution;
+- documented custom inline playback, wrapper fullscreen, frame HUD preservation, and server-backed session state;
+- updated review-object wording to stable `Person 01` / `Plate 01` entities with representative thumbnails and drawer-based review.
+
+## v027 — 2026-08-06
+
+Refined Final Review Workspace v2.1 object controls and temporal corrections:
+
+- documented `artifacts/final_pipeline_package_v2_1_1/` as the current generated review package;
+- clarified stable Human/Plate review objects, separate overlay/privacy/lock controls, and Keep verification;
+- documented deterministic suggested keyframes as review aids rather than detector or tracker tuning.
+
 ## v026 — 2026-08-06
 
 Added Final Review Workspace v2.1:

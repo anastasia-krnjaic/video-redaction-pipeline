@@ -1,8 +1,8 @@
 # Video Redaction Pipeline - System Overview
 
-- **Document version:** v025
-- **Last updated:** 2026-08-05
-- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus shared accumulated-evidence tracking, bounded gap recovery, and non-final automatic plate previews. Final Pipeline Package v2 adds a local case-based review, correction, provenance, and finalization workspace without changing detector, tracking, evidence, recovery, or render decisions.
+- **Document version:** v028
+- **Last updated:** 2026-08-06
+- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus shared accumulated-evidence tracking, bounded gap recovery, and non-final automatic plate previews. Final Review Workspace v2.2 adds a local case-based review web application with server-backed sessions, custom frame-aware playback, review entities, correction provenance, and finalization gates without changing detector, tracking, evidence, recovery, or render decisions.
 - **Canonical document:** `docs/SYSTEM_OVERVIEW.md`
 
 ## What The System Is For
@@ -11,7 +11,7 @@ This repository builds a local video-redaction pipeline. Its most complete path 
 
 The system is not a finished automatic redaction product, and it does not make a universal zero-leak claim. It produces structured evidence, diagnostic outputs, non-final previews, and approved face-redacted MP4s when the available privacy-region evidence passes final safety gates.
 
-The current case-based review package is generated under `artifacts/final_pipeline_package_v2_1/`. It records the active component hashes, case manifests, source lineage, reviewer tasks, logical privacy entities, local session/correction provenance, and finalization gates. The earlier behavior-freeze package under `artifacts/final_pipeline_package_v1/` remains preserved.
+The current case-based review package is generated under `artifacts/final_pipeline_package_v2_2/`. It records the active component hashes, case manifests, source lineage, reviewer tasks, stable Person/Plate review objects with representative thumbnails, local session/correction provenance, and finalization gates. The earlier behavior-freeze package under `artifacts/final_pipeline_package_v1/` remains preserved.
 
 ## Current User Workflow
 
@@ -82,10 +82,10 @@ redactor build-review-bundle \
 The final case review workspace is served locally:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_1 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_2 --open
 ```
 
-It shows separate Day and Night case tabs, no more than two default video panes per case, frame-aware synchronized playback, guided risk review, full-video sweep acknowledgement, logical Human/Plate entities, append-only decisions and corrections, and finalization blockers.
+It shows separate Day and Night case tabs, no more than two default video panes per case, custom frame-aware synchronized playback, guided risk review, full-video sweep acknowledgement, logical Person/Plate entities, append-only decisions and corrections, and finalization blockers. Review sessions can start anonymously; reviewer name is required only when exporting or finalizing.
 
 ## How The Pipeline Works
 

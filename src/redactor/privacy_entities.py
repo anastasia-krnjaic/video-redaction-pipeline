@@ -8,6 +8,7 @@ from redactor import media
 from redactor.privacy_records import CATEGORY_FACE, CATEGORY_PLATE, stable_hash
 
 SCHEMA_VERSION = "privacy_entity.v1"
+OBJECT_UUID_NAMESPACE = uuid.UUID("7a93792c-1ad6-4d45-9b45-9a92bb7814df")
 
 POLICY_REDACT = "redact"
 POLICY_KEEP_VISIBLE = "keep_visible"
@@ -63,6 +64,10 @@ class PrivacyEntity:
     created_provenance: dict[str, Any] = field(default_factory=dict)
     schema_version: str = SCHEMA_VERSION
 
+    @property
+    def object_uuid(self) -> str:
+        return self.entity_id.removeprefix("entity_")
+
     def __post_init__(self) -> None:
         if self.category not in {CATEGORY_FACE, CATEGORY_PLATE}:
             raise ValueError(f"unsupported privacy entity category: {self.category}")
@@ -77,16 +82,28 @@ class PrivacyEntity:
             "case_id": self.case_id,
             "category": self.category,
             "created_provenance": self.created_provenance,
+            "current_policy": self.default_privacy_policy,
             "current_status": self.current_status,
             "default_privacy_policy": self.default_privacy_policy,
+            "display_name": self.label,
             "entity_id": self.entity_id,
+            "entity_uuid": self.object_uuid,
+            "geometry_locked": self.locked,
             "interval_policy_overrides": [
                 override.to_dict() for override in self.interval_policy_overrides
             ],
             "label": self.label,
             "locked": self.locked,
+            "member_detector_tracker_ids": list(self.automatic_source_track_ids),
+            "merge_split_lineage": self.created_provenance.get("merge_split_lineage", []),
+            "object_uuid": self.object_uuid,
+            "privacy_action": self.default_privacy_policy,
+            "review_state": "needs_review"
+            if self.default_privacy_policy == POLICY_REVIEW_REQUIRED
+            else "ready",
             "reviewed_region_track_ids": list(self.reviewed_region_track_ids),
             "schema_version": self.schema_version,
+            "visibility_state": "visible",
         }
 
     def entity_hash(self) -> str:
@@ -94,18 +111,19 @@ class PrivacyEntity:
 
 
 def next_entity_label(category: str, existing: list[PrivacyEntity]) -> str:
-    prefix = "Human" if category == CATEGORY_FACE else "Plate"
+    prefix = "Person" if category == CATEGORY_FACE else "Plate"
+    legacy_prefix = "Human" if category == CATEGORY_FACE else "Plate"
     used: set[int] = set()
     for entity in existing:
         if entity.category != category:
             continue
         parts = entity.label.split()
-        if len(parts) == 2 and parts[0] == prefix and parts[1].isdigit():
+        if len(parts) == 2 and parts[0] in {prefix, legacy_prefix} and parts[1].isdigit():
             used.add(int(parts[1]))
     index = 1
     while index in used:
         index += 1
-    return f"{prefix} {index}"
+    return f"{prefix} {index:02d}"
 
 
 def create_entity(
@@ -116,6 +134,7 @@ def create_entity(
     automatic_source_track_ids: tuple[str, ...] = (),
     reviewed_region_track_ids: tuple[str, ...] = (),
     default_privacy_policy: str = POLICY_REDACT,
+    entity_id: str | None = None,
     provenance: dict[str, Any] | None = None,
 ) -> PrivacyEntity:
     existing = existing or []
@@ -125,14 +144,14 @@ def create_entity(
         category=category,
         created_provenance=provenance or {"source": "review_workspace"},
         default_privacy_policy=default_privacy_policy,
-        entity_id=f"entity_{uuid.uuid4().hex}",
+        entity_id=entity_id or f"entity_{uuid.uuid4()}",
         label=next_entity_label(category, existing),
         reviewed_region_track_ids=tuple(sorted(set(reviewed_region_track_ids))),
     )
 
 
 def entities_from_region_records(case_id: str, records: list[Any]) -> list[PrivacyEntity]:
-    grouped: dict[tuple[str, str], set[str]] = {}
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for record in records:
         category = str(getattr(record, "category", ""))
         if category not in {CATEGORY_FACE, CATEGORY_PLATE}:
@@ -145,16 +164,33 @@ def entities_from_region_records(case_id: str, records: list[Any]) -> list[Priva
             or source.get("region_id")
             or "unassigned"
         )
-        grouped.setdefault((category, str(track_id)), set()).add(str(track_id))
+        key = (category, str(track_id))
+        item = grouped.setdefault(
+            key,
+            {
+                "first_frame": int(getattr(record, "source_frame", 0)),
+                "track_ids": set(),
+            },
+        )
+        item["first_frame"] = min(item["first_frame"], int(getattr(record, "source_frame", 0)))
+        item["track_ids"].add(str(track_id))
     entities: list[PrivacyEntity] = []
-    for category, track_id in sorted(grouped):
+    for (category, track_id), item in sorted(
+        grouped.items(), key=lambda pair: (pair[0][0], pair[1]["first_frame"], pair[0][1])
+    ):
+        object_uuid = uuid.uuid5(OBJECT_UUID_NAMESPACE, f"{case_id}:{category}:{track_id}")
         entities.append(
             create_entity(
                 case_id=case_id,
                 category=category,
                 existing=entities,
-                automatic_source_track_ids=(track_id,),
-                provenance={"source": "automatic_region_index", "track_id": track_id},
+                automatic_source_track_ids=tuple(sorted(item["track_ids"])),
+                entity_id=f"entity_{object_uuid}",
+                provenance={
+                    "first_source_frame": item["first_frame"],
+                    "source": "automatic_region_index",
+                    "track_id": track_id,
+                },
             )
         )
     return entities
@@ -217,6 +253,43 @@ def merge_entities(
     )
     retired = replace(secondary, current_status=STATUS_MERGED, locked=True)
     return merged, retired
+
+
+def entity_frame_range(entity: PrivacyEntity) -> tuple[int | None, int | None]:
+    provenance = entity.created_provenance or {}
+    first = provenance.get("first_source_frame")
+    last = provenance.get("last_source_frame", first)
+    return (
+        int(first) if first is not None else None,
+        int(last) if last is not None else None,
+    )
+
+
+def can_conservatively_merge(
+    primary: PrivacyEntity,
+    secondary: PrivacyEntity,
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    if primary.case_id != secondary.case_id:
+        reasons.append("different_case")
+    if primary.category != secondary.category:
+        reasons.append("different_category")
+    first_a, last_a = entity_frame_range(primary)
+    first_b, last_b = entity_frame_range(secondary)
+    if None not in {first_a, last_a, first_b, last_b}:
+        assert first_a is not None
+        assert last_a is not None
+        assert first_b is not None
+        assert last_b is not None
+        if max(first_a, first_b) <= min(last_a, last_b):
+            reasons.append("simultaneously_visible")
+    return {
+        "allowed": not reasons,
+        "primary_entity_id": primary.entity_id,
+        "reasons": reasons,
+        "schema_version": "privacy_entity_consolidation_check.v1",
+        "secondary_entity_id": secondary.entity_id,
+    }
 
 
 def split_entity(

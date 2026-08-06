@@ -99,7 +99,7 @@ class ReviewCorrection:
     revision_id: str = field(default_factory=lambda: f"corr_rev_{uuid.uuid4().hex}")
     previous_revision_id: str | None = None
     created_at_utc: str = field(default_factory=media.utc_timestamp)
-    application_version: str = "final_review_workspace.v2.1"
+    application_version: str = "final_review_workspace.v2.2"
     schema_version: str = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -154,7 +154,7 @@ class ReviewCorrection:
 def correction_from_dict(payload: dict[str, Any]) -> ReviewCorrection:
     return ReviewCorrection(
         application_version=str(
-            payload.get("application_version") or "final_review_workspace.v2.1"
+            payload.get("application_version") or "final_review_workspace.v2.2"
         ),
         case_id=str(payload["case_id"]),
         category=str(payload["category"]),
@@ -217,6 +217,18 @@ def interpolate_correction_boxes(correction: ReviewCorrection) -> dict[int, Box]
         span = right.source_frame - left.source_frame
         if span <= 0:
             raise ValueError("correction keyframes must use increasing source frames")
+        blocked = [
+            checkpoint
+            for checkpoint in correction.checkpoints
+            if left.source_frame < checkpoint.source_frame < right.source_frame
+            and checkpoint.state in {CHECKPOINT_NOT_VISIBLE, CHECKPOINT_BLOCKED_BY_SCENE_CUT}
+        ]
+        if blocked:
+            blocked_frames = ", ".join(str(checkpoint.source_frame) for checkpoint in blocked)
+            raise ValueError(
+                "linear interpolation cannot cross not-visible spans or scene cuts "
+                f"at frames {blocked_frames}"
+            )
         for frame in range(left.source_frame, right.source_frame + 1):
             t = (frame - left.source_frame) / span
             boxes[frame] = tuple(
@@ -243,9 +255,53 @@ def checkpoint_spacing_seconds(
         return 0.25
     if high_motion:
         return 0.5
-    if interval_seconds <= 1.0:
+    if interval_seconds <= 0.5:
+        return max(interval_seconds, 1 / 30)
+    if interval_seconds <= 2.0:
         return max(interval_seconds / 2.0, 1 / 30)
     return 1.0
+
+
+def suggested_keyframe_frames(
+    *,
+    source_frame_start: int,
+    source_frame_end: int,
+    fps: float,
+    evidence_event_frames: tuple[int, ...] = (),
+    high_motion: bool = False,
+    very_high_motion: bool = False,
+) -> tuple[int, ...]:
+    if source_frame_end < source_frame_start:
+        raise ValueError("suggested keyframe interval end cannot be before start")
+    if fps <= 0:
+        raise ValueError("fps must be positive")
+    duration_seconds = (source_frame_end - source_frame_start) / fps
+    frames = {source_frame_start, source_frame_end}
+    if duration_seconds > 0.5 and duration_seconds <= 2.0 and source_frame_end > source_frame_start:
+        frames.add((source_frame_start + source_frame_end) // 2)
+    elif duration_seconds > 2.0:
+        step = max(
+            1, int(round(checkpoint_spacing_seconds(interval_seconds=duration_seconds) * fps))
+        )
+        frame = source_frame_start + step
+        while frame < source_frame_end:
+            frames.add(frame)
+            frame += step
+    if high_motion or very_high_motion:
+        spacing = checkpoint_spacing_seconds(
+            interval_seconds=duration_seconds,
+            high_motion=high_motion,
+            very_high_motion=very_high_motion,
+        )
+        step = max(1, int(round(spacing * fps)))
+        frame = source_frame_start + step
+        while frame < source_frame_end:
+            frames.add(frame)
+            frame += step
+    for frame in evidence_event_frames:
+        if source_frame_start <= frame <= source_frame_end:
+            frames.add(frame)
+    return tuple(sorted(frames))
 
 
 def required_checkpoint_frames(
@@ -256,25 +312,13 @@ def required_checkpoint_frames(
     high_motion: bool = False,
     very_high_motion: bool = False,
 ) -> tuple[int, ...]:
-    if source_frame_end < source_frame_start:
-        raise ValueError("checkpoint interval end cannot be before start")
-    if fps <= 0:
-        raise ValueError("fps must be positive")
-    duration_seconds = (source_frame_end - source_frame_start) / fps
-    spacing = checkpoint_spacing_seconds(
-        interval_seconds=duration_seconds,
+    return suggested_keyframe_frames(
+        source_frame_start=source_frame_start,
+        source_frame_end=source_frame_end,
+        fps=fps,
         high_motion=high_motion,
         very_high_motion=very_high_motion,
     )
-    step = max(1, int(round(spacing * fps)))
-    frames = {source_frame_start, source_frame_end}
-    frame = source_frame_start + step
-    while frame < source_frame_end:
-        frames.add(frame)
-        frame += step
-    if duration_seconds <= 1.0 and source_frame_end > source_frame_start:
-        frames.add((source_frame_start + source_frame_end) // 2)
-    return tuple(sorted(frames))
 
 
 def review_pages_for_interval(

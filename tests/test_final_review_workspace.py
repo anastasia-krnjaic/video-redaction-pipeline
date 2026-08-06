@@ -411,6 +411,132 @@ def test_workspace_server_serves_mp4_range_and_rejects_traversal(tmp_path: Path)
         server.server_close()
 
 
+def test_workspace_server_creates_anonymous_session_and_late_attribution(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(f"{base_url}/api/sessions", {})
+        session = session_response["session"]
+
+        assert session["reviewer"]["display_name"] is None
+        assert session["reviewer"]["reviewer_id"] is None
+
+        attribution_response = post_json(
+            f"{base_url}/api/reviewer-attribution",
+            {
+                "display_name": "Reviewer One",
+                "session_id": session["session_id"],
+            },
+        )
+        with urllib.request.urlopen(
+            f"{base_url}/api/session-state?session_id={session['session_id']}",
+            timeout=5,
+        ) as response:
+            state_payload = json.loads(response.read().decode("utf-8"))
+        session_dir = package / "sessions" / session["session_id"]
+        chain = review_sessions.validate_event_hash_chain(session_dir)
+
+        assert attribution_response["event"]["event_type"] == "reviewer_attribution_set"
+        assert state_payload["attribution"]["display_name"] == "Reviewer One"
+        assert chain["passed"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_workspace_markup_uses_custom_drawers_and_disables_picture_in_picture() -> None:
+    html = review_workspace.index_html()
+    css = review_workspace.workspace_css()
+    js = review_workspace.workspace_js()
+
+    assert "Start review" in html
+    assert "reviewerId" not in html
+    assert "reviewerRole" not in html
+    assert "disablepictureinpicture" in js.lower()
+    assert "disablePictureInPicture = true" in js
+    assert "requestFullscreen" in js
+    assert ".drawer" in css
+    assert ".layout" not in css
+    assert "Could not start local review session" in js
+    assert "Playback error" in js
+
+
+def test_review_entity_registry_generates_thumbnails(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    source = package / "media" / "day" / "original_reference.mp4"
+    source.parent.mkdir(parents=True)
+    write_synthetic_video(source, frame_count=3)
+    manifest = case_manifests.case_manifest_from_media(
+        case_id="day",
+        display_name="Day",
+        source_frame_start=100,
+        source_path="media/day/original_reference.mp4",
+        source_video=source,
+        video_roles=[
+            case_manifests.VideoRole(
+                label="Original",
+                path="media/day/original_reference.mp4",
+                role="original",
+                source_frame_end=102,
+                source_frame_start=100,
+            )
+        ],
+    )
+    case_manifests.write_case_manifest(package / "cases" / "day.json", manifest)
+    write_base_region(package, "day")
+
+    review_workspace.write_entity_index(package)
+    registry = json.loads((package / "review_entities.json").read_text(encoding="utf-8"))
+    entity = registry["cases"]["day"][0]
+
+    assert entity["label"] == "Plate 01"
+    assert entity["entity_uuid"]
+    assert entity["representative_source_frame"] == 100
+    assert entity["representative_thumbnail_path"]
+    assert (package / entity["representative_thumbnail_path"]).exists()
+
+
+def test_privacy_entity_labels_scale_to_100_without_rendering_forms() -> None:
+    entities: list[privacy_entities.PrivacyEntity] = []
+    for _ in range(100):
+        entities.append(
+            privacy_entities.create_entity(
+                case_id="synthetic",
+                category=CATEGORY_FACE,
+                existing=entities,
+            )
+        )
+
+    assert entities[0].label == "Person 01"
+    assert entities[-1].label == "Person 100"
+    assert entities[-1].to_dict()["entity_uuid"] == entities[-1].object_uuid
+
+
+def test_conservative_entity_consolidation_rejects_simultaneous_visibility() -> None:
+    first = privacy_entities.create_entity(
+        case_id="night",
+        category=CATEGORY_FACE,
+        provenance={"first_source_frame": 10, "last_source_frame": 30},
+    )
+    second = privacy_entities.create_entity(
+        case_id="night",
+        category=CATEGORY_FACE,
+        existing=[first],
+        provenance={"first_source_frame": 20, "last_source_frame": 40},
+    )
+
+    decision = privacy_entities.can_conservatively_merge(first, second)
+
+    assert decision["allowed"] is False
+    assert "simultaneously_visible" in decision["reasons"]
+
+
 def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest = synthetic_case_manifest(package)
@@ -549,9 +675,9 @@ def test_privacy_entity_creation_policy_merge_split_and_reassign() -> None:
         automatic_source_track_ids=("track_b",),
     )
 
-    assert face.label == "Human 1"
-    assert plate_a.label == "Plate 1"
-    assert plate_b.label == "Plate 2"
+    assert face.label == "Person 01"
+    assert plate_a.label == "Plate 01"
+    assert plate_b.label == "Plate 02"
 
     kept = privacy_entities.set_entity_policy(plate_a, privacy_entities.POLICY_KEEP_VISIBLE)
     interval = privacy_entities.set_entity_policy(
@@ -610,8 +736,45 @@ def test_privacy_entities_group_face_regions_by_track_not_region_id() -> None:
     entities = privacy_entities.entities_from_region_records("day", records)
 
     assert len(entities) == 1
-    assert entities[0].label == "Human 1"
+    assert entities[0].label == "Person 01"
     assert entities[0].automatic_source_track_ids == ("6",)
+    assert (
+        entities[0].entity_id
+        == privacy_entities.entities_from_region_records("day", records)[0].entity_id
+    )
+    assert entities[0].object_uuid == entities[0].entity_id.removeprefix("entity_")
+
+
+def test_privacy_entities_use_first_appearance_order_per_category() -> None:
+    records = [
+        PrivacyRegionRecord(
+            approval_state=APPROVAL_ACCEPTED,
+            bbox_xyxy=(1, 1, 10, 10),
+            category=CATEGORY_PLATE,
+            object_id="plate_track_late",
+            provenance="detector",
+            render_eligible=True,
+            source_frame=50,
+            source_record={"track_id": "plate_late"},
+        ),
+        PrivacyRegionRecord(
+            approval_state=APPROVAL_ACCEPTED,
+            bbox_xyxy=(1, 1, 10, 10),
+            category=CATEGORY_PLATE,
+            object_id="plate_track_early",
+            provenance="detector",
+            render_eligible=True,
+            source_frame=5,
+            source_record={"track_id": "plate_early"},
+        ),
+    ]
+
+    entities = privacy_entities.entities_from_region_records("day", records)
+
+    assert [(entity.label, entity.automatic_source_track_ids) for entity in entities] == [
+        ("Plate 01", ("plate_early",)),
+        ("Plate 02", ("plate_late",)),
+    ]
 
 
 def test_checkpoint_policy_and_adjustment_revision() -> None:
@@ -655,6 +818,63 @@ def test_checkpoint_policy_and_adjustment_revision() -> None:
     assert high_motion == (0, 15, 30)
     assert len(adjusted.keyframes) == 3
     assert adjusted.previous_revision_id == correction.revision_id
+
+
+def test_suggested_keyframe_policy_boundaries_midpoints_and_pages() -> None:
+    assert review_corrections.suggested_keyframe_frames(
+        source_frame_start=0,
+        source_frame_end=9,
+        fps=30.0,
+    ) == (0, 9)
+    assert review_corrections.suggested_keyframe_frames(
+        source_frame_start=0,
+        source_frame_end=30,
+        fps=30.0,
+    ) == (0, 15, 30)
+    assert review_corrections.suggested_keyframe_frames(
+        source_frame_start=0,
+        source_frame_end=150,
+        fps=30.0,
+        evidence_event_frames=(44, 91),
+    ) == (0, 30, 44, 60, 90, 91, 120, 150)
+    assert review_corrections.review_pages_for_interval(
+        source_frame_start=0,
+        source_frame_end=359,
+        fps=30.0,
+    ) == ((0, 149), (150, 299), (300, 359))
+
+
+def test_interpolation_rejects_not_visible_span() -> None:
+    correction = review_corrections.ReviewCorrection(
+        case_id="day",
+        category=CATEGORY_FACE,
+        checkpoints=(
+            review_corrections.CorrectionCheckpoint(
+                source_frame=5,
+                state=review_corrections.CHECKPOINT_NOT_VISIBLE,
+            ),
+        ),
+        configuration_freeze_hash="hash",
+        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+        keyframes=(
+            review_corrections.CorrectionKeyframe(0, (0, 0, 10, 10)),
+            review_corrections.CorrectionKeyframe(10, (10, 10, 20, 20)),
+        ),
+        operation=review_corrections.OP_ADD,
+        reason="blocked span",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=10,
+        source_frame_start=0,
+        source_video_hash="source",
+        task_id="task",
+    )
+
+    try:
+        review_corrections.interpolate_correction_boxes(correction)
+    except ValueError as exc:
+        assert "cannot cross not-visible" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("interpolation crossed a not-visible checkpoint")
 
 
 def test_finalization_blocks_unreviewed_correction_checkpoint(tmp_path: Path) -> None:
@@ -705,6 +925,116 @@ def test_finalization_blocks_unreviewed_correction_checkpoint(tmp_path: Path) ->
     assert any("checkpoint is unreviewed" in blocker for blocker in blockers["blockers"])
 
 
+def test_finalization_uses_latest_correction_revision(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_base_region(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    review_sessions.append_sweep_acknowledgement(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        viewed_ranges=[{"start": 0, "end": 4}],
+    )
+    original = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_PLATE,
+        checkpoints=(
+            review_corrections.CorrectionCheckpoint(
+                source_frame=0,
+                state=review_corrections.CHECKPOINT_UNREVIEWED,
+            ),
+        ),
+        configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
+        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (10, 10, 30, 20)),),
+        operation=review_corrections.OP_ADD,
+        reason="draft",
+        reviewer_identity={"reviewer_id": "analyst@example.test"},
+        source_frame_end=0,
+        source_frame_start=0,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id="task",
+    )
+    verified = review_corrections.mark_checkpoint(
+        original,
+        source_frame=0,
+        state=review_corrections.CHECKPOINT_VERIFIED,
+        bbox_xyxy=(10, 10, 30, 20),
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        correction=original,
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        correction=verified,
+    )
+
+    blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+
+    assert blockers["ready"] is True
+
+
+def test_finalization_blocks_keep_policy_until_verified(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_base_region(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    review_sessions.append_sweep_acknowledgement(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        viewed_ranges=[{"start": 0, "end": 4}],
+    )
+    review_sessions.append_event(
+        session_dir,
+        event_type="entity_policy_changed",
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state={"default_privacy_policy": "redact"},
+        after_state={
+            "default_privacy_policy": privacy_entities.POLICY_KEEP_VISIBLE,
+            "entity_id": "entity_keep",
+            "label": "Person 01",
+            "verification_task_id": "object_policy_verify_synthetic_entity_keep",
+        },
+        note="known non-sensitive officer",
+        application_hashes={},
+    )
+
+    blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+    assert any("Keep policy has not been verified" in item for item in blockers["blockers"])
+
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id="object_policy_verify_synthetic_entity_keep",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="verified",
+    )
+    blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+    assert blockers["ready"] is True
+
+
 def test_apply_corrections_maps_parent_source_frames_to_case_local_frames() -> None:
     correction = review_corrections.ReviewCorrection(
         case_id="day",
@@ -744,6 +1074,52 @@ def test_apply_corrections_maps_parent_source_frames_to_case_local_frames() -> N
     assert [region.source_frame for region in final_regions] == [0, 1]
     assert final_regions[0].source_record["source_frame"] == 1828
     assert provenance["final_region_count"] == 2
+
+
+def test_render_correction_interval_preview(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_base_region(package, manifest.case_id)
+    session_dir = create_session(package, manifest)
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_PLATE,
+        checkpoints=(
+            review_corrections.CorrectionCheckpoint(
+                source_frame=1,
+                state=review_corrections.CHECKPOINT_VERIFIED,
+            ),
+        ),
+        configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
+        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+        keyframes=(
+            review_corrections.CorrectionKeyframe(1, (20, 20, 54, 34)),
+            review_corrections.CorrectionKeyframe(2, (22, 20, 56, 34)),
+        ),
+        operation=review_corrections.OP_ADD,
+        reason="preview",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=2,
+        source_frame_start=1,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id="task",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+
+    preview = review_workspace.render_correction_interval_preview(
+        package,
+        session_dir=session_dir,
+        correction=correction,
+    )
+
+    assert preview["ok"] is True
+    assert (package / preview["original_preview"]).exists()
+    assert (package / preview["corrected_preview"]).exists()
+    assert preview["rendered_frames"] >= 1
 
 
 def media_hash(path: Path) -> str:

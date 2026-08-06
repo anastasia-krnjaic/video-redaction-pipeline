@@ -15,7 +15,7 @@ It gives the simplest visual walkthrough: what the system does, what the current
 For review, serve:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_1 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_2 --open
 ```
 
 The workspace shows one case at a time:
@@ -24,9 +24,15 @@ The workspace shows one case at a time:
 - Current combined result where source-compatible
 - Guided risk-review tasks
 - Full-video sweep controls
+- Entity drawer with representative Person/Plate thumbnails
 - Audit trail and local session export
 
 The Day and Night cases each show only Original and Current result by default. The Day case uses a canonical interval from `artifacts/day_primary.mp4`; its Current result is rendered from lineage-proven frozen face and plate evidence rather than concatenated old clips.
+
+Click **Start review** to create a local anonymous session. Reviewer name is
+requested only when exporting or finalizing. Use the app's fullscreen controls,
+not raw MP4 fullscreen, so frame numbers and source-frame mapping remain
+visible.
 
 ## How To Read The Labels
 

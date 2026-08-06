@@ -50,8 +50,8 @@ BLOCKING_ACTIONS = {
 
 @dataclass(frozen=True)
 class ReviewerIdentity:
-    display_name: str
-    reviewer_id: str
+    display_name: str | None = None
+    reviewer_id: str | None = None
     role: str | None = None
     notes: str | None = None
 
@@ -110,7 +110,7 @@ def create_review_session(
     include_hostname: bool = False,
 ) -> ReviewSession:
     session = ReviewSession(
-        application_version="final_review_workspace.v2.1",
+        application_version="final_review_workspace.v2.2",
         case_manifest_hashes=dict(sorted(case_manifest_hashes.items())),
         configuration_freeze_hash=configuration_freeze_hash,
         hostname=socket.gethostname() if include_hostname else None,
@@ -125,6 +125,17 @@ def create_review_session(
     session_dir = session_directory(package_root, session.session_id)
     session_dir.mkdir(parents=True, exist_ok=False)
     write_json(session_dir / "review_session.json", session.to_dict())
+    write_json(
+        session_dir / "reviewer_attribution_current.json",
+        {
+            "attributed_at_utc": None,
+            "display_name": None,
+            "event_hash": None,
+            "event_id": None,
+            "schema_version": "reviewer_attribution_current.v1",
+            "session_id": session.session_id,
+        },
+    )
     write_json(
         session_dir / "decisions_current.json",
         {"decisions": {}, "schema_version": "review_decisions_current.v1"},
@@ -147,10 +158,49 @@ def create_review_session(
         task_id=None,
         before_state=None,
         after_state={"session_status": "active"},
-        note="Reviewer identity is locally declared and not enterprise-authenticated.",
+        note=(
+            "Review session started anonymously. Reviewer attribution is locally declared "
+            "when exporting or finalizing, not enterprise-authenticated."
+        ),
         application_hashes={"configuration_freeze_hash": configuration_freeze_hash},
     )
     return session
+
+
+def append_reviewer_attribution_event(
+    session_dir: Path,
+    *,
+    display_name: str,
+    actor: dict[str, Any] | None = None,
+    note: str | None = None,
+) -> dict[str, Any]:
+    reviewer_name = display_name.strip()
+    if not reviewer_name:
+        raise ValueError("reviewer name is required")
+    before = load_reviewer_attribution(session_dir)
+    after = {
+        "attributed_at_utc": media.utc_timestamp(),
+        "display_name": reviewer_name,
+        "schema_version": "reviewer_attribution_current.v1",
+        "session_id": session_dir.name,
+    }
+    event = append_event(
+        session_dir,
+        event_type="reviewer_attribution_set",
+        actor=actor or before or {"display_name": None, "reviewer_id": None},
+        case_id=None,
+        task_id=None,
+        before_state=before,
+        after_state=after,
+        note=note or "Reviewer attribution set for the local review session.",
+        application_hashes={},
+    )
+    write_json(
+        session_dir / "reviewer_attribution_current.json",
+        after | {"event_hash": event["event_hash"], "event_id": event["event_id"]},
+    )
+    refresh_session_summary(session_dir)
+    return event
 
 
 def append_decision_event(
@@ -341,6 +391,7 @@ def refresh_session_summary(session_dir: Path) -> dict[str, Any]:
         "decision_count": len(decisions),
         "event_count": len(events),
         "last_event_hash": events[-1]["event_hash"] if events else None,
+        "reviewer_attribution": load_reviewer_attribution(session_dir),
         "schema_version": "review_summary.v1",
         "session_id": session_dir.name,
         "status": "active",
@@ -367,14 +418,19 @@ def session_directory(package_root: Path, session_id: str) -> Path:
 def reviewer_identity_from_dict(payload: dict[str, Any]) -> ReviewerIdentity:
     display_name = str(payload.get("display_name") or "").strip()
     reviewer_id = str(payload.get("reviewer_id") or payload.get("email") or "").strip()
-    if not display_name or not reviewer_id:
-        raise ValueError("reviewer display_name and reviewer_id are required")
     return ReviewerIdentity(
-        display_name=display_name,
+        display_name=display_name or None,
         notes=str(payload["notes"]) if payload.get("notes") is not None else None,
-        reviewer_id=reviewer_id,
+        reviewer_id=reviewer_id or None,
         role=str(payload["role"]) if payload.get("role") is not None else None,
     )
+
+
+def load_reviewer_attribution(session_dir: Path) -> dict[str, Any] | None:
+    path = session_dir / "reviewer_attribution_current.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:

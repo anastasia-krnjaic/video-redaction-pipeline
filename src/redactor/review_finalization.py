@@ -56,6 +56,7 @@ def finalization_blockers(
         if task.get("case_id") == case_id and not task.get("technical_only")
     ]
     decisions = load_current_decisions(session_dir)
+    events = load_events(session_dir)
     for task in tasks:
         task_id = str(task["review_task_id"])
         decision = decisions.get(task_id)
@@ -74,6 +75,8 @@ def finalization_blockers(
 
     if not has_sweep_acknowledgement(session_dir, case_id):
         blockers.append(f"{case_id}: full-video sweep has not been acknowledged")
+
+    blockers.extend(object_policy_blockers(events, decisions, case_id=case_id))
 
     chain = validate_event_hash_chain(session_dir)
     if not chain["passed"]:
@@ -108,10 +111,12 @@ def finalization_blockers(
     if not region_path.exists():
         blockers.append(f"{case_id}: current privacy-region provenance is missing")
 
-    corrections = load_corrections_jsonl(session_dir / "corrections.jsonl")
+    corrections = latest_corrections(
+        load_corrections_jsonl(session_dir / "corrections.jsonl"),
+        case_id=case_id,
+    )
     for correction in corrections:
-        if correction.case_id == case_id:
-            blockers.extend(correction_verification_blockers(correction))
+        blockers.extend(correction_verification_blockers(correction))
 
     return {
         "blocker_count": len(blockers),
@@ -120,6 +125,51 @@ def finalization_blockers(
         "ready": not blockers,
         "schema_version": "review_finalization_blockers.v1",
     }
+
+
+def object_policy_blockers(
+    events: list[dict[str, Any]],
+    decisions: dict[str, dict[str, Any]],
+    *,
+    case_id: str,
+) -> list[str]:
+    latest_policy: dict[str, dict[str, Any]] = {}
+    for event in events:
+        if event.get("case_id") != case_id:
+            continue
+        if event.get("event_type") != "entity_policy_changed":
+            continue
+        entity_id = str((event.get("after_state") or {}).get("entity_id") or "")
+        if not entity_id:
+            entity_id = str((event.get("after_state") or {}).get("object_uuid") or "")
+        if not entity_id:
+            continue
+        latest_policy[entity_id] = event
+
+    blockers: list[str] = []
+    for entity_id, event in sorted(latest_policy.items()):
+        after = dict(event.get("after_state") or {})
+        policy = str(
+            after.get("default_privacy_policy")
+            or after.get("privacy_action")
+            or after.get("policy")
+            or ""
+        )
+        label = str(after.get("label") or entity_id)
+        if policy == "review_required":
+            blockers.append(f"{label}: object policy remains Needs review")
+            continue
+        if policy == "keep_visible":
+            task_id = str(
+                after.get("verification_task_id") or f"object_policy_verify_{case_id}_{entity_id}"
+            )
+            decision = decisions.get(task_id)
+            if decision is None:
+                blockers.append(f"{label}: Keep policy has not been verified")
+                continue
+            if str(decision.get("action")) not in GREEN_ACTIONS:
+                blockers.append(f"{label}: Keep policy verification is not green")
+    return blockers
 
 
 def finalize_reviewed_case(
@@ -151,7 +201,10 @@ def finalize_reviewed_case(
 
     base_regions_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
     base_regions = load_privacy_region_records(base_regions_path)
-    corrections = load_corrections_jsonl(session_dir / "corrections.jsonl")
+    corrections = latest_corrections(
+        load_corrections_jsonl(session_dir / "corrections.jsonl"),
+        case_id=case_id,
+    )
     final_regions, provenance = apply_corrections(
         base_regions,
         corrections,
@@ -263,6 +316,22 @@ def finalize_reviewed_case(
         "rendered_region_validation_passed": region_validation["passed"],
         "schema_version": SCHEMA_VERSION,
     }
+
+
+def latest_corrections(
+    corrections: list[ReviewCorrection],
+    *,
+    case_id: str | None = None,
+) -> list[ReviewCorrection]:
+    latest: dict[str, ReviewCorrection] = {}
+    order: list[str] = []
+    for correction in corrections:
+        if case_id is not None and correction.case_id != case_id:
+            continue
+        if correction.correction_id not in latest:
+            order.append(correction.correction_id)
+        latest[correction.correction_id] = correction
+    return [latest[correction_id] for correction_id in order]
 
 
 def apply_corrections(
