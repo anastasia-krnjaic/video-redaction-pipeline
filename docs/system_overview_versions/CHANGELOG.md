@@ -1,5 +1,15 @@
 # System Overview Changelog
 
+## v025 — 2026-08-05
+
+Added Case-Based Human Review, Correction, Provenance, and Finalization Workspace v1:
+
+- documented `artifacts/final_pipeline_package_v2/` as the current local case-based review workspace;
+- recorded separate Day, Night, Final results, and Audit trail tabs with at most two default media panes per case;
+- documented that Day source lineage is proven through a common parent, while combined Day current-result generation remains blocked without the frozen local model files;
+- added append-only review-session, decision, correction, hash-chain, and finalization-gate semantics;
+- clarified that reviewed corrections are a provenance layer and do not change detector, tracking, evidence, recovery, or rendering configuration.
+
 ## v024 — 2026-08-05
 
 Added Final Pipeline Freeze, Audit Package, Repository Cleanup, and Showcase Draft v1:

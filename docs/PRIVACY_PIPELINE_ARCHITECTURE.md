@@ -82,6 +82,23 @@ Review tasks now have a common category-aware shape: category, object or track I
 
 The existing face and plate review pages are not redesigned in this milestone. Category-specific labels and wording remain in their current builders while the common task concepts are available for future shared review logic.
 
+## Case-Based Final Review Workspace
+
+`src/redactor/case_manifests.py`, `src/redactor/review_workspace.py`,
+`src/redactor/review_sessions.py`, `src/redactor/review_corrections.py`, and
+`src/redactor/review_finalization.py` add the local case-based final review
+workspace on top of the frozen behavior.
+
+The workspace uses case manifests to keep source hashes, frame mapping, media
+roles, and lineage explicit. It aggregates raw audit signals into reviewer tasks
+without deleting raw provenance. Decisions and corrections are append-only local
+events, and finalization uses the same validation library as the CLI.
+
+Corrections are reviewed provenance records, not threshold changes. Finalization
+is blocked until required tasks are green, corrections are verified, full-video
+sweep acknowledgement exists, source/config hashes match, and rendered media
+validation passes.
+
 ## Migration Strategy
 
 The migration is deliberately incremental:

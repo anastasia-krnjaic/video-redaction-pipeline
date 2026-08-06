@@ -27,6 +27,7 @@ redactor = "redactor.cli:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.ruff]

@@ -1,0 +1,382 @@
+from __future__ import annotations
+
+import json
+import socket
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from redactor import media
+from redactor.privacy_records import stable_hash
+from redactor.review_corrections import ReviewCorrection, write_correction_jsonl
+
+SCHEMA_VERSION = "review_session.v1"
+EVENT_SCHEMA_VERSION = "review_session_event.v1"
+
+ACTION_LOOKS_CORRECT = "looks_correct"
+ACTION_PRIVACY_LEAK = "privacy_leak"
+ACTION_PARTIAL_COVERAGE = "partial_coverage"
+ACTION_FALSE_REDACTION = "false_redaction"
+ACTION_WRONG_TARGET = "wrong_target"
+ACTION_NOT_SENSITIVE = "not_sensitive"
+ACTION_COSMETIC_ONLY = "cosmetic_only"
+ACTION_ESCALATE = "uncertain_escalate"
+
+DECISION_ACTIONS = {
+    ACTION_LOOKS_CORRECT,
+    ACTION_PRIVACY_LEAK,
+    ACTION_PARTIAL_COVERAGE,
+    ACTION_FALSE_REDACTION,
+    ACTION_WRONG_TARGET,
+    ACTION_NOT_SENSITIVE,
+    ACTION_COSMETIC_ONLY,
+    ACTION_ESCALATE,
+}
+
+GREEN_ACTIONS = {
+    ACTION_LOOKS_CORRECT,
+    ACTION_NOT_SENSITIVE,
+    ACTION_COSMETIC_ONLY,
+}
+BLOCKING_ACTIONS = {
+    ACTION_PRIVACY_LEAK,
+    ACTION_PARTIAL_COVERAGE,
+    ACTION_FALSE_REDACTION,
+    ACTION_WRONG_TARGET,
+    ACTION_ESCALATE,
+}
+
+
+@dataclass(frozen=True)
+class ReviewerIdentity:
+    display_name: str
+    reviewer_id: str
+    role: str | None = None
+    notes: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "display_name": self.display_name,
+            "notes": self.notes,
+            "reviewer_id": self.reviewer_id,
+            "role": self.role,
+        }
+
+
+@dataclass(frozen=True)
+class ReviewSession:
+    session_id: str
+    reviewer: ReviewerIdentity
+    package_root: str
+    started_at_utc: str
+    source_revision: str | None
+    application_version: str
+    configuration_freeze_hash: str
+    case_manifest_hashes: dict[str, str]
+    source_hashes: dict[str, str]
+    user_agent: str | None = None
+    hostname: str | None = None
+    session_status: str = "active"
+    schema_version: str = SCHEMA_VERSION
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "application_version": self.application_version,
+            "case_manifest_hashes": self.case_manifest_hashes,
+            "configuration_freeze_hash": self.configuration_freeze_hash,
+            "hostname": self.hostname,
+            "package_root": self.package_root,
+            "reviewer": self.reviewer.to_dict(),
+            "schema_version": self.schema_version,
+            "session_id": self.session_id,
+            "session_status": self.session_status,
+            "source_hashes": self.source_hashes,
+            "source_revision": self.source_revision,
+            "started_at_utc": self.started_at_utc,
+            "user_agent": self.user_agent,
+        }
+
+
+def create_review_session(
+    *,
+    package_root: Path,
+    reviewer: ReviewerIdentity,
+    source_revision: str | None,
+    configuration_freeze_hash: str,
+    case_manifest_hashes: dict[str, str],
+    source_hashes: dict[str, str],
+    user_agent: str | None = None,
+    include_hostname: bool = False,
+) -> ReviewSession:
+    session = ReviewSession(
+        application_version="final_review_workspace.v1",
+        case_manifest_hashes=dict(sorted(case_manifest_hashes.items())),
+        configuration_freeze_hash=configuration_freeze_hash,
+        hostname=socket.gethostname() if include_hostname else None,
+        package_root=".",
+        reviewer=reviewer,
+        session_id=f"session_{uuid.uuid4().hex}",
+        source_hashes=dict(sorted(source_hashes.items())),
+        source_revision=source_revision,
+        started_at_utc=media.utc_timestamp(),
+        user_agent=user_agent,
+    )
+    session_dir = session_directory(package_root, session.session_id)
+    session_dir.mkdir(parents=True, exist_ok=False)
+    write_json(session_dir / "review_session.json", session.to_dict())
+    write_json(
+        session_dir / "decisions_current.json",
+        {"decisions": {}, "schema_version": "review_decisions_current.v1"},
+    )
+    write_json(
+        session_dir / "review_summary.json",
+        {
+            "correction_count": 0,
+            "decision_count": 0,
+            "schema_version": "review_summary.v1",
+            "session_id": session.session_id,
+            "status": "active",
+        },
+    )
+    append_event(
+        session_dir,
+        event_type="session_started",
+        actor=reviewer.to_dict(),
+        case_id=None,
+        task_id=None,
+        before_state=None,
+        after_state={"session_status": "active"},
+        note="Reviewer identity is locally declared and not enterprise-authenticated.",
+        application_hashes={"configuration_freeze_hash": configuration_freeze_hash},
+    )
+    return session
+
+
+def append_decision_event(
+    session_dir: Path,
+    *,
+    actor: dict[str, Any],
+    case_id: str,
+    task_id: str,
+    action: str,
+    note: str,
+    task_before_state: dict[str, Any] | None = None,
+    application_hashes: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    if action not in DECISION_ACTIONS:
+        raise ValueError(f"unsupported decision action: {action}")
+    current = load_current_decisions(session_dir)
+    before = current.get(task_id)
+    status = decision_status_for_action(action)
+    after = {
+        "action": action,
+        "case_id": case_id,
+        "decision_status": status,
+        "note": note,
+        "reviewed_at_utc": media.utc_timestamp(),
+        "task_id": task_id,
+    }
+    event = append_event(
+        session_dir,
+        event_type="decision_recorded",
+        actor=actor,
+        case_id=case_id,
+        task_id=task_id,
+        before_state=before or task_before_state,
+        after_state=after,
+        note=note,
+        application_hashes=application_hashes or {},
+    )
+    current[task_id] = after | {"event_id": event["event_id"], "event_hash": event["event_hash"]}
+    write_json(
+        session_dir / "decisions_current.json",
+        {"decisions": current, "schema_version": "review_decisions_current.v1"},
+    )
+    refresh_session_summary(session_dir)
+    return event
+
+
+def append_correction_event(
+    session_dir: Path,
+    *,
+    actor: dict[str, Any],
+    correction: ReviewCorrection,
+    before_state: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event = append_event(
+        session_dir,
+        event_type="correction_saved",
+        actor=actor,
+        case_id=correction.case_id,
+        task_id=correction.task_id,
+        before_state=before_state,
+        after_state=correction.to_dict() | {"correction_hash": correction.correction_hash()},
+        note=correction.reason,
+        application_hashes={"configuration_freeze_hash": correction.configuration_freeze_hash},
+    )
+    write_correction_jsonl(session_dir / "corrections.jsonl", correction)
+    refresh_session_summary(session_dir)
+    return event
+
+
+def append_sweep_acknowledgement(
+    session_dir: Path,
+    *,
+    actor: dict[str, Any],
+    case_id: str,
+    viewed_ranges: list[dict[str, Any]],
+    override_reason: str | None = None,
+) -> dict[str, Any]:
+    return append_event(
+        session_dir,
+        event_type="full_video_sweep_acknowledged",
+        actor=actor,
+        case_id=case_id,
+        task_id=None,
+        before_state=None,
+        after_state={
+            "override_reason": override_reason,
+            "viewed_ranges": viewed_ranges,
+        },
+        note=override_reason or "Reviewer acknowledged full-video sweep.",
+        application_hashes={},
+    )
+
+
+def append_event(
+    session_dir: Path,
+    *,
+    event_type: str,
+    actor: dict[str, Any],
+    case_id: str | None,
+    task_id: str | None,
+    before_state: dict[str, Any] | None,
+    after_state: dict[str, Any] | None,
+    note: str | None,
+    application_hashes: dict[str, str],
+) -> dict[str, Any]:
+    previous_hash = last_event_hash(session_dir)
+    payload = {
+        "actor": actor,
+        "after_state": after_state,
+        "application_hashes": dict(sorted(application_hashes.items())),
+        "before_state": before_state,
+        "case_id": case_id,
+        "event_id": f"event_{uuid.uuid4().hex}",
+        "event_type": event_type,
+        "note": note,
+        "previous_event_hash": previous_hash,
+        "schema_version": EVENT_SCHEMA_VERSION,
+        "task_id": task_id,
+        "timestamp_utc": media.utc_timestamp(),
+    }
+    payload["event_hash"] = stable_hash(payload)
+    events_path = session_dir / "events.jsonl"
+    with events_path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+    return payload
+
+
+def validate_event_hash_chain(session_dir: Path) -> dict[str, Any]:
+    previous: str | None = None
+    errors: list[str] = []
+    count = 0
+    for index, event in enumerate(load_events(session_dir)):
+        count += 1
+        if event.get("previous_event_hash") != previous:
+            errors.append(f"events[{index}] previous hash mismatch")
+        expected_hash = event.get("event_hash")
+        without_hash = dict(event)
+        without_hash.pop("event_hash", None)
+        actual_hash = stable_hash(without_hash)
+        if expected_hash != actual_hash:
+            errors.append(f"events[{index}] event hash mismatch")
+        previous = str(expected_hash)
+    return {
+        "error_count": len(errors),
+        "errors": errors,
+        "event_count": count,
+        "passed": not errors,
+        "schema_version": "review_event_chain_validation.v1",
+    }
+
+
+def load_events(session_dir: Path) -> list[dict[str, Any]]:
+    path = session_dir / "events.jsonl"
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    with path.open(encoding="utf-8") as file:
+        for line in file:
+            if line.strip():
+                rows.append(json.loads(line))
+    return rows
+
+
+def last_event_hash(session_dir: Path) -> str | None:
+    events = load_events(session_dir)
+    return str(events[-1]["event_hash"]) if events else None
+
+
+def load_current_decisions(session_dir: Path) -> dict[str, Any]:
+    path = session_dir / "decisions_current.json"
+    if not path.exists():
+        return {}
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    return dict(payload.get("decisions") or {})
+
+
+def refresh_session_summary(session_dir: Path) -> dict[str, Any]:
+    events = load_events(session_dir)
+    decisions = load_current_decisions(session_dir)
+    corrections_path = session_dir / "corrections.jsonl"
+    correction_count = 0
+    if corrections_path.exists():
+        correction_count = sum(
+            1 for line in corrections_path.read_text(encoding="utf-8").splitlines() if line
+        )
+    summary = {
+        "correction_count": correction_count,
+        "decision_count": len(decisions),
+        "event_count": len(events),
+        "last_event_hash": events[-1]["event_hash"] if events else None,
+        "schema_version": "review_summary.v1",
+        "session_id": session_dir.name,
+        "status": "active",
+    }
+    write_json(session_dir / "review_summary.json", summary)
+    return summary
+
+
+def decision_status_for_action(action: str) -> str:
+    if action in GREEN_ACTIONS:
+        return "green"
+    if action in BLOCKING_ACTIONS:
+        return "blocking"
+    raise ValueError(f"unsupported decision action: {action}")
+
+
+def session_directory(package_root: Path, session_id: str) -> Path:
+    safe_id = "".join(ch for ch in session_id if ch.isalnum() or ch in {"_", "-"})
+    if safe_id != session_id or not safe_id:
+        raise ValueError("invalid session id")
+    return package_root / "sessions" / safe_id
+
+
+def reviewer_identity_from_dict(payload: dict[str, Any]) -> ReviewerIdentity:
+    display_name = str(payload.get("display_name") or "").strip()
+    reviewer_id = str(payload.get("reviewer_id") or payload.get("email") or "").strip()
+    if not display_name or not reviewer_id:
+        raise ValueError("reviewer display_name and reviewer_id are required")
+    return ReviewerIdentity(
+        display_name=display_name,
+        notes=str(payload["notes"]) if payload.get("notes") is not None else None,
+        reviewer_id=reviewer_id,
+        role=str(payload["role"]) if payload.get("role") is not None else None,
+    )
+
+
+def write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")

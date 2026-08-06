@@ -2,8 +2,10 @@
 
 The active plate subsystem currently has one selected detector, a minimal
 temporal stabilization and bounded gap-recovery stage, and a non-final automatic
-plate preview renderer with a local review bundle. Reviewed-final plate
-completion and unified face/plate rendering are not implemented yet.
+plate preview renderer with local review support. The final case review
+workspace can record reviewed corrections and finalize a case only after every
+blocking task is resolved. Fully reviewed plate completion still requires human
+review decisions and verified reviewed corrections for the current blockers.
 
 ## Selected Detector
 
@@ -271,6 +273,21 @@ unresolved gap does not offer a `Looks correct` action unless a later correction
 workflow supplies a valid privacy region. Review decisions do not rewrite plate
 tracks or override renderer validation.
 
+## Final Case Review Workspace
+
+`redactor build-final-review-workspace` packages plate outputs into the same
+case-based local review workspace used for face review. The workspace keeps OIM
+detections, Plate Tracking v1 output, shared temporal evidence decisions, and
+plate rendering configuration frozen. Reviewer additions, replacements,
+suppressions, and not-sensitive decisions are stored as append-only
+reviewed-correction events that sit above the automatic plate evidence.
+
+`redactor finalize-reviewed-case` can render a reviewed-final case only when all
+blocking tasks are green, every correction has been verified, full-video sweep
+acknowledgement exists, source/configuration hashes match, event-log provenance
+validates, and media/rendered-region validation passes. If plate blockers remain,
+the current result remains a review-required preview rather than a final output.
+
 ## Historical Experiments
 
 Previous experiments are archived under
@@ -294,5 +311,6 @@ OIM was selected for a prototype plate pipeline because visual adjudication foun
 it much cleaner than RT-DETR despite lower recall. Plate tracking now stabilizes
 short gaps and rejects isolated noise, and Plate Rendering v1 creates clean
 automatic previews from accepted evidence. Known nighttime gaps remain review
-items. Reviewed correction intake and final unified face/plate redaction are not
-implemented yet.
+items. Reviewed correction intake now exists in the local final-review
+workspace, but complete reviewed-final plate media still requires human decisions
+and verified corrections for every blocking interval.

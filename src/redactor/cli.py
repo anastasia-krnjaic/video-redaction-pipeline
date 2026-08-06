@@ -1800,6 +1800,201 @@ def summarize_final_audit(
     )
 
 
+@main.command("build-final-review-workspace")
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Final review workspace package directory.",
+)
+@click.option(
+    "--v1-package",
+    "v1_package_root",
+    default=Path("artifacts/final_pipeline_package_v1"),
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Existing final_pipeline_package_v1 root used as frozen input evidence.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace an existing v2 package directory.")
+def build_final_review_workspace(
+    output_dir: Path,
+    v1_package_root: Path,
+    overwrite: bool,
+) -> None:
+    """Build the local case-based final review workspace package."""
+    from redactor import review_workspace
+
+    try:
+        summary = review_workspace.build_workspace_package(
+            package_root=output_dir,
+            v1_package_root=v1_package_root,
+            overwrite=overwrite,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        RuntimeError,
+        ValueError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        raise click.ClickException(
+            _subprocess_message(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        ) from exc
+    click.echo(f"Built final review workspace: {output_dir}")
+    click.echo(f"Raw audit signals: {summary['raw_signal_count']}")
+    click.echo(f"Reviewer tasks: {summary['reviewer_task_count']}")
+    click.echo(f"Day lineage proven: {summary['day']['lineage_proven']}")
+    if summary["day"]["blockers"]:
+        click.echo("Day case blockers:")
+        for blocker in summary["day"]["blockers"]:
+            click.echo(f"- {blocker}")
+    click.echo(f"Open with: redactor serve-final-review-workspace {output_dir} --open")
+
+
+@main.command("serve-final-review-workspace")
+@click.argument(
+    "package_root",
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+)
+@click.option("--port", default=0, show_default=True, type=click.IntRange(min=0, max=65535))
+@click.option("--open", "open_browser", is_flag=True, help="Open the workspace in a browser.")
+def serve_final_review_workspace(package_root: Path, port: int, open_browser: bool) -> None:
+    """Serve a final review workspace on 127.0.0.1 with local write endpoints."""
+    import time
+
+    from redactor import review_workspace
+
+    server = review_workspace.serve_workspace(
+        package_root,
+        port=port,
+        open_browser=open_browser,
+    )
+    host, resolved_port = server.server_address
+    click.echo(f"Serving {package_root} at http://{host}:{resolved_port}/index.html")
+    click.echo("Press Ctrl+C to stop.")
+    try:
+        while True:
+            time.sleep(3600)
+    except KeyboardInterrupt:
+        server.shutdown()
+        server.server_close()
+        click.echo("Stopped final review workspace server.")
+
+
+@main.command("validate-review-session")
+@click.option(
+    "--session-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Review session directory containing events.jsonl.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional validation JSON output path.",
+)
+def validate_review_session(session_dir: Path, output_path: Path | None) -> None:
+    """Validate a final review workspace session event hash chain."""
+    from redactor import review_sessions
+
+    try:
+        result = review_sessions.validate_event_hash_chain(session_dir)
+        if output_path is not None:
+            review_sessions.write_json(output_path, result)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Review session event chain: {result['event_count']} events, "
+        f"{result['error_count']} errors."
+    )
+    if not result["passed"]:
+        raise click.ClickException("review session validation failed")
+
+
+@main.command("summarize-review-session")
+@click.option(
+    "--session-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Review session directory.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional summary JSON output path.",
+)
+def summarize_review_session(session_dir: Path, output_path: Path | None) -> None:
+    """Summarize a final review workspace session."""
+    from redactor import review_sessions
+
+    try:
+        summary = review_sessions.refresh_session_summary(session_dir)
+        if output_path is not None:
+            review_sessions.write_json(output_path, summary)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(
+        f"Review session summary: {summary['event_count']} events, "
+        f"{summary['decision_count']} current decisions, "
+        f"{summary['correction_count']} corrections."
+    )
+
+
+@main.command("finalize-reviewed-case")
+@click.option(
+    "--package-root",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Final review workspace package root.",
+)
+@click.option("--case-id", required=True, type=str, help="Case id to finalize.")
+@click.option(
+    "--session-dir",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Validated review session directory.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace an existing final reviewed MP4.")
+def finalize_reviewed_case(
+    package_root: Path,
+    case_id: str,
+    session_dir: Path,
+    overwrite: bool,
+) -> None:
+    """Finalize one case after all review blockers have been resolved."""
+    from redactor import review_finalization
+
+    try:
+        result = review_finalization.finalize_reviewed_case(
+            package_root=package_root,
+            case_id=case_id,
+            session_dir=session_dir,
+            overwrite=overwrite,
+        )
+    except (
+        FileExistsError,
+        FileNotFoundError,
+        RuntimeError,
+        ValueError,
+        subprocess.CalledProcessError,
+    ) as exc:
+        raise click.ClickException(
+            _subprocess_message(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        ) from exc
+    if result["finalized"]:
+        click.echo(f"Finalized {case_id}: {result['final_video']}")
+        click.echo(f"Final SHA-256: {result['final_video_sha256']}")
+    else:
+        click.echo(f"Finalization blocked for {case_id}:")
+        for blocker in result["blockers"]:
+            click.echo(f"- {blocker}")
+        raise click.ClickException("finalization blockers remain")
+
+
 @main.command("validate-face-policy")
 @click.argument(
     "policy_path",

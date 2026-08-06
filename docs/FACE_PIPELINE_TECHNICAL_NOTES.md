@@ -59,6 +59,21 @@ recovery, reviewed-region preservation, and rendering behavior. Face profile
 metadata records compatibility values for future migration planning, but those
 values are not used to confirm or reject production face tracks.
 
+## Final Case Review Workspace
+
+`redactor build-final-review-workspace` packages the frozen face evidence into a
+case-based local review workspace. The workspace can display face review tasks,
+record reviewer decisions, and add reviewed correction records as a separate
+provenance layer. It does not rerun or retune ADAS detection, ordinary tracking,
+privacy-gap recovery, or the accepted reviewed face corrections.
+
+When finalization is requested, face regions come from frozen automatic face
+privacy regions plus existing accepted reviewed face corrections and any newly
+saved reviewed-correction events. The event log and final provenance identify
+which reviewer supplied each change. The clean final media does not burn frame
+numbers or diagnostics into the deliverable video; frame numbers are part of the
+local review player only.
+
 ## Full-Video Case Privacy Policy
 
 `src/redactor/face_policy.py` contains the production-oriented policy layer. It keeps operational privacy policy separate from benchmark Ground Truth.

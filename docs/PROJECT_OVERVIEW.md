@@ -63,13 +63,17 @@ The current frozen package separates machine-derived results from human-reviewed
 
 The latest plate evidence engine kept day and close/stress behavior stable and increased full-night rendered plate regions substantially. It also preserved review blockers for long ambiguous gaps. This is useful progress, but it is not a final privacy guarantee.
 
-Day face and day plate reference media currently come from different source clips, so the final package does not fabricate a unified day result. Night face and night plate references share the same source video, so a combined night demo preview is included.
+Day face and day plate reference media originally came from different extracted clips. The current review workspace traces both back to a common parent source and extracts one canonical Day original interval, but it does not fabricate a combined result from the old encoded clips. The frozen pipelines must be rerun on that canonical parent interval before a combined Day current result can be reviewed.
+
+Night face and night plate references share the same source video, so the workspace includes a combined Night current result for review.
 
 ## Human Review And Safety Behavior
 
 The system does not claim that a clean automatic pass proves every privacy target was found. Some misses are silent: if a face or plate produces no detector, tracker, or review evidence, software alone may not know it was present.
 
-The final package therefore includes a local full-video audit bundle. It shows original media, available face-only output, available plate-only output, and compatible combined output. It also prepopulates review tasks from unresolved intervals, track starts and ends, provenance changes, and deterministic spot checks.
+The final package therefore includes a local case-based review workspace. It shows Original and Current result side by side where available, keeps raw machine signals in a technical audit, and presents concise reviewer tasks for unresolved intervals, uncertain tracks, provenance changes, and deterministic spot checks.
+
+Reviewer decisions and corrections are stored as local append-only events with hash-chain validation. Reviewer identity is declared locally; it is not enterprise authentication.
 
 Human-reviewed leak metrics remain pending until a reviewer exports valid decisions. Pending metrics are represented as `null`, not zero.
 
@@ -80,7 +84,7 @@ The prototype is not production-ready and does not claim zero leaks. Known limit
 - Plate previews are still review-required.
 - Some nighttime plate gaps remain unresolved.
 - Some false plate redactions are visible and must be adjudicated.
-- Day face and day plate references are not source-compatible for a unified day video.
+- The canonical Day source interval is identified, but the combined Day result still needs a frozen-pipeline rerun with local model files.
 - Human full-video audit has not yet been completed.
 - Face production tracking is intentionally frozen and has not migrated to the shared evidence engine.
 

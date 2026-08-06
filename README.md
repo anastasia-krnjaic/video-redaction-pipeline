@@ -2,7 +2,7 @@
 
 Video Redaction Pipeline is a local Python project for building and auditing video-redaction workflows on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`). The prototype plate work uses one selected detector, Open Image Models YOLOv9-S-608 (`oim_yolov9_s_608`), followed by bounded temporal plate tracking and automatic preview rendering from accepted tracks.
 
-The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support currently covers detection, shared accumulated-evidence track confirmation, short defensible interpolation, non-final automatic plate previews, and a local review bundle for unresolved or uncertain plate intervals. Reviewed-final plate completion and unified face/plate rendering are later milestones.
+The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support currently covers detection, shared accumulated-evidence track confirmation, short defensible interpolation, non-final automatic plate previews, and review tasks for unresolved or uncertain plate intervals. The Final Review Workspace v1 provides local case review, correction records, provenance, and finalization gates without changing frozen detector or tracking behavior.
 
 Faces and plates keep separate detector adapters and thresholds, but the post-detection foundation now shares the record contracts for observations, temporal regions, gap decisions, privacy regions, frame spans, rendering, and review tasks. The architecture decision is documented in `docs/PRIVACY_PIPELINE_ARCHITECTURE.md`.
 
@@ -336,11 +336,25 @@ contracts live in `docs/PRIVACY_PIPELINE_ARCHITECTURE.md`, and older detector
 bake-offs are archived under `docs/archive/license_plate_detector_bakeoff/`.
 
 The broad-reader project summary is `docs/PROJECT_OVERVIEW.md`, and the short
-local demo guide is `docs/DEMO_GUIDE.md`. The current behavior-freeze package is
-generated under `artifacts/final_pipeline_package_v1/`; it contains source
-compatibility checks, reference media, machine metrics, pending human metric
-definitions, a local audit bundle, repository audit reports, and local showcase
-figures. These generated package artifacts are ignored by Git.
+local demo guide is `docs/DEMO_GUIDE.md`. The behavior-freeze package is
+preserved under `artifacts/final_pipeline_package_v1/`. The current case-based
+review package is generated under `artifacts/final_pipeline_package_v2/`; it
+contains case manifests, reviewer tasks, local session/correction provenance,
+frame-aware playback, and finalization gates. These generated package artifacts
+are ignored by Git.
+
+Serve the current review workspace with:
+
+```bash
+redactor serve-final-review-workspace artifacts/final_pipeline_package_v2 --open
+```
+
+Validate or summarize an exported/local session with:
+
+```bash
+redactor validate-review-session --session-dir SESSION_DIR
+redactor summarize-review-session --session-dir SESSION_DIR
+```
 
 ## Current Limitations
 
@@ -351,5 +365,6 @@ figures. These generated package artifacts are ignored by Git.
 - Automated evaluation currently uses range-level face truth and reviewed pipeline evidence; it does not invent missing per-frame boxes.
 - Automated review bundles highlight known risks and audit samples, but cannot detect every possible silent miss without Ground Truth.
 - No universal or production-wide zero-leak claim has been established.
-- Plate detection, minimal tracking, non-final previews, and plate review bundles are implemented. Reviewed-final plate correction intake and unified face/plate rendering are not implemented yet.
+- Plate detection, minimal tracking, non-final previews, and case-based review/correction records are implemented. Reviewed-final plate output still requires human decisions and verified reviewed corrections for blockers.
 - Plate tracking bridges only short, defensible two-anchor gaps. Longer gaps and unstable plate-like tracks remain review-required evidence.
+- The canonical Day case has proven parent-source lineage, but a combined Day current result requires rerunning the frozen face and plate pipelines on the canonical parent interval with local model files.
