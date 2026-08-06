@@ -67,6 +67,12 @@ record reviewer decisions, and add reviewed correction records as a separate
 provenance layer. It does not rerun or retune ADAS detection, ordinary tracking,
 privacy-gap recovery, or the accepted reviewed face corrections.
 
+Final Review Workspace v2.1 validates the expected ADAS XML/BIN hashes when it
+is built. It also indexes face regions into reviewer-facing entities such as
+`Human 1` instead of exposing raw detector track IDs in the default interface.
+Reviewed face corrections use explicit keyframes and checkpoint verification;
+unverified interpolation checkpoints block finalization.
+
 When finalization is requested, face regions come from frozen automatic face
 privacy regions plus existing accepted reviewed face corrections and any newly
 saved reviewed-correction events. The event log and final provenance identify

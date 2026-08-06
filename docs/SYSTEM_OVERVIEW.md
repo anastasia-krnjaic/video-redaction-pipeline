@@ -11,7 +11,7 @@ This repository builds a local video-redaction pipeline. Its most complete path 
 
 The system is not a finished automatic redaction product, and it does not make a universal zero-leak claim. It produces structured evidence, diagnostic outputs, non-final previews, and approved face-redacted MP4s when the available privacy-region evidence passes final safety gates.
 
-The current case-based review package is generated under `artifacts/final_pipeline_package_v2/`. It records the active component hashes, case manifests, source lineage, reviewer tasks, local session/correction provenance, and finalization gates. The earlier behavior-freeze package under `artifacts/final_pipeline_package_v1/` remains preserved.
+The current case-based review package is generated under `artifacts/final_pipeline_package_v2_1/`. It records the active component hashes, case manifests, source lineage, reviewer tasks, logical privacy entities, local session/correction provenance, and finalization gates. The earlier behavior-freeze package under `artifacts/final_pipeline_package_v1/` remains preserved.
 
 ## Current User Workflow
 
@@ -82,10 +82,10 @@ redactor build-review-bundle \
 The final case review workspace is served locally:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_1 --open
 ```
 
-It shows separate Day and Night case tabs, no more than two default video panes per case, frame-aware synchronized playback, guided risk review, full-video sweep acknowledgement, append-only decisions and corrections, and finalization blockers.
+It shows separate Day and Night case tabs, no more than two default video panes per case, frame-aware synchronized playback, guided risk review, full-video sweep acknowledgement, logical Human/Plate entities, append-only decisions and corrections, and finalization blockers.
 
 ## How The Pipeline Works
 

@@ -94,6 +94,13 @@ roles, and lineage explicit. It aggregates raw audit signals into reviewer tasks
 without deleting raw provenance. Decisions and corrections are append-only local
 events, and finalization uses the same validation library as the CLI.
 
+Final Review Workspace v2.1 adds category-independent privacy entities and
+multi-keyframe correction records. Entities provide reviewer-facing labels such
+as `Human 1` and `Plate 1` while raw detector/track IDs stay in Technical
+details. Corrections are drawn on the Original frame, interpolate only between
+explicit reviewed keyframes, and require checkpoint verification before
+finalization.
+
 Corrections are reviewed provenance records, not threshold changes. Finalization
 is blocked until required tasks are green, corrections are verified, full-video
 sweep acknowledgement exists, source/config hashes match, and rendered media

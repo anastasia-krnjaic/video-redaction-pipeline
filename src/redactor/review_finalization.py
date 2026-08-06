@@ -17,9 +17,12 @@ from redactor.privacy_records import (
 from redactor.review_corrections import (
     OP_ADD,
     OP_NOT_SENSITIVE,
+    OP_NOT_VISIBLE,
     OP_REPLACE,
     OP_SUPPRESS,
+    OP_SUPPRESS_TRACK_SEGMENT,
     ReviewCorrection,
+    correction_verification_blockers,
     interpolate_correction_boxes,
     load_corrections_jsonl,
 )
@@ -105,6 +108,11 @@ def finalization_blockers(
     if not region_path.exists():
         blockers.append(f"{case_id}: current privacy-region provenance is missing")
 
+    corrections = load_corrections_jsonl(session_dir / "corrections.jsonl")
+    for correction in corrections:
+        if correction.case_id == case_id:
+            blockers.extend(correction_verification_blockers(correction))
+
     return {
         "blocker_count": len(blockers),
         "blockers": blockers,
@@ -144,7 +152,12 @@ def finalize_reviewed_case(
     base_regions_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
     base_regions = load_privacy_region_records(base_regions_path)
     corrections = load_corrections_jsonl(session_dir / "corrections.jsonl")
-    final_regions, provenance = apply_corrections(base_regions, corrections, case_id=case_id)
+    final_regions, provenance = apply_corrections(
+        base_regions,
+        corrections,
+        case_id=case_id,
+        source_frame_offset=manifest.source_frame_start,
+    )
     regions_by_frame = privacy_rendering.regions_by_frame(final_regions)
 
     case_media_dir = package_root / "media" / case_id
@@ -257,6 +270,7 @@ def apply_corrections(
     corrections: list[ReviewCorrection],
     *,
     case_id: str,
+    source_frame_offset: int = 0,
 ) -> tuple[list[PrivacyRegionRecord], dict[str, Any]]:
     active = list(base_regions)
     suppressed_region_hashes: set[str] = set()
@@ -265,12 +279,21 @@ def apply_corrections(
     for correction in corrections:
         if correction.case_id != case_id:
             continue
-        if correction.operation in {OP_SUPPRESS, OP_NOT_SENSITIVE, OP_REPLACE}:
-            if not correction.input_region_ids:
+        if correction.operation in {
+            OP_SUPPRESS,
+            OP_SUPPRESS_TRACK_SEGMENT,
+            OP_NOT_SENSITIVE,
+            OP_NOT_VISIBLE,
+            OP_REPLACE,
+        }:
+            if not correction.input_region_ids and correction.operation != OP_NOT_VISIBLE:
                 raise ValueError("suppression/replacement corrections require input_region_ids")
             suppressed_region_hashes.update(correction.input_region_ids)
         if correction.operation in {OP_ADD, OP_REPLACE}:
             for frame, box in interpolate_correction_boxes(correction).items():
+                render_frame = frame - source_frame_offset
+                if render_frame < 0:
+                    raise ValueError("correction frame is before the case source interval")
                 added.append(
                     PrivacyRegionRecord(
                         approval_state=APPROVAL_ACCEPTED,
@@ -279,11 +302,12 @@ def apply_corrections(
                         object_id=correction.correction_id,
                         provenance="reviewed_correction",
                         render_eligible=True,
-                        source_frame=frame,
+                        source_frame=render_frame,
                         source_record={
                             "correction_hash": correction.correction_hash(),
                             "correction_id": correction.correction_id,
                             "operation": correction.operation,
+                            "source_frame": frame,
                             "task_id": correction.task_id,
                         },
                     )
@@ -402,7 +426,7 @@ def region_identifier(record: PrivacyRegionRecord) -> str:
     for key in ("region_id", "track_uid", "correction_id"):
         if source.get(key):
             return str(source[key])
-    return record.record_hash()
+    return stable_hash(record.to_dict())
 
 
 def has_sweep_acknowledgement(session_dir: Path, case_id: str) -> bool:

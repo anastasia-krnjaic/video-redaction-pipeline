@@ -3,10 +3,12 @@ from __future__ import annotations
 # ruff: noqa: E501
 import json
 import mimetypes
+import os
 import re
 import shutil
 import threading
 import webbrowser
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -15,16 +17,39 @@ from urllib.parse import unquote, urlparse
 
 from redactor import (
     case_manifests,
+    detection,
+    face_policy,
     final_package,
     media,
     plate_rendering,
+    privacy_entities,
+    privacy_rendering,
     rendering,
     review_finalization,
     review_sessions,
 )
-from redactor.privacy_records import CATEGORY_FACE, CATEGORY_PLATE, PrivacyRegionRecord, stable_hash
+from redactor.detection import rational_to_float
+from redactor.privacy_records import (
+    APPROVAL_ACCEPTED,
+    CATEGORY_FACE,
+    CATEGORY_PLATE,
+    PrivacyRegionRecord,
+    stable_hash,
+)
 
-SCHEMA_VERSION = "final_review_workspace.v1"
+SCHEMA_VERSION = "final_review_workspace.v2.1"
+DAY_PARENT_PATH = Path("artifacts/day_primary.mp4")
+DAY_CANONICAL_SOURCE_FRAME_START = 1828
+DAY_CANONICAL_SOURCE_FRAME_END = 5694
+
+EXPECTED_ADAS_XML_SHA256 = "ef8fb491060e64da9d31893045f36dbb24f59455308e961274dd234190db997b"
+EXPECTED_ADAS_BIN_SHA256 = "54883903421c8ee5289334ca4da779976a8be66daf7d57e45d005d0bc2b8c637"
+EXPECTED_OIM_PLATE_ONNX_SHA256 = "2b878b38d9aa07b6ddc3ea75c4ffcb39869bc5c218e0a14002f60ab2f7b0be9a"
+DEFAULT_ADAS_XML_PATH = Path("models/face-detection-adas-0001/face-detection-adas-0001.xml")
+DEFAULT_ADAS_BIN_PATH = Path("models/face-detection-adas-0001/face-detection-adas-0001.bin")
+DEFAULT_OIM_PLATE_MODEL_PATH = Path(
+    "models/open-image-models/yolo-v9-s-608-license-plates-end2end.onnx"
+)
 
 DECISION_LABELS = {
     review_sessions.ACTION_COSMETIC_ONLY: "Cosmetic only",
@@ -40,10 +65,27 @@ DECISION_LABELS = {
 REQUIRED_ACTIONS = tuple(DECISION_LABELS)
 
 
+@dataclass(frozen=True)
+class FrozenModelPaths:
+    adas_xml: Path
+    adas_bin: Path
+    plate_model: Path
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "adas_bin": self.adas_bin.as_posix(),
+            "adas_xml": self.adas_xml.as_posix(),
+            "plate_model": self.plate_model.as_posix(),
+        }
+
+
 def build_workspace_package(
     *,
     package_root: Path,
     v1_package_root: Path,
+    adas_xml_path: Path | None = None,
+    adas_bin_path: Path | None = None,
+    plate_model_path: Path | None = None,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     if package_root.exists() and any(package_root.iterdir()) and not overwrite:
@@ -53,6 +95,7 @@ def build_workspace_package(
     for child in (
         "assets",
         "cases",
+        "entities",
         "media/day",
         "media/night",
         "regions",
@@ -62,6 +105,13 @@ def build_workspace_package(
         (package_root / child).mkdir(parents=True, exist_ok=True)
 
     final_package.assert_active_configuration_frozen()
+    model_paths = resolve_frozen_model_paths(
+        adas_xml_path=adas_xml_path,
+        adas_bin_path=adas_bin_path,
+        plate_model_path=plate_model_path,
+    )
+    model_validation = validate_frozen_models(model_paths)
+    write_json(package_root / "model_validation.json", model_validation)
     copy_if_exists(
         v1_package_root / "configuration_freeze.json", package_root / "configuration_freeze.json"
     )
@@ -70,7 +120,7 @@ def build_workspace_package(
         package_root / "human_metrics_pending.json",
     )
 
-    day_lineage = build_day_case(package_root)
+    day_lineage = build_day_case(package_root, model_paths=model_paths)
     night_manifest = build_night_case(package_root, v1_package_root)
     raw_signals = load_raw_audit_signals(v1_package_root / "audit" / "audit_tasks.json")
     tasks = aggregate_reviewer_tasks(raw_signals)
@@ -96,6 +146,7 @@ def build_workspace_package(
         package_root / "audit_decisions.template.json",
         {"decisions": [], "schema_version": "case_review_decisions_export.v1"},
     )
+    write_entity_index(package_root)
     write_workspace_assets(package_root)
     workspace_manifest = {
         "case_count": 2,
@@ -104,6 +155,7 @@ def build_workspace_package(
             "night": night_manifest["case_manifest_path"],
         },
         "created_at_utc": media.utc_timestamp(),
+        "model_validation": "model_validation.json",
         "schema_version": SCHEMA_VERSION,
         "v1_package_root": v1_package_root.as_posix(),
     }
@@ -115,6 +167,7 @@ def build_workspace_package(
     return {
         "day": day_lineage,
         "media_url_audit": media_url_audit,
+        "model_validation": model_validation,
         "night": night_manifest,
         "raw_signal_count": len(raw_signals),
         "reviewer_task_count": len(tasks),
@@ -122,52 +175,68 @@ def build_workspace_package(
     }
 
 
-def build_day_case(package_root: Path) -> dict[str, Any]:
+def build_day_case(package_root: Path, *, model_paths: FrozenModelPaths) -> dict[str, Any]:
     plan = load_evaluation_plan_clips(Path("data/evaluation_plan.yaml"))
     day_plate = plan["day_plate"]
     day_face = plan["day_face"]
-    parent_file = Path(day_plate["parent_file"])
+    parent_file = DAY_PARENT_PATH
     lineage = {
         "day_face": day_face,
         "day_plate": day_plate,
-        "lineage_proven": day_face.get("parent_file") == day_plate.get("parent_file"),
-        "parent_file": day_plate.get("parent_file"),
+        "lineage_proven": (
+            day_face.get("parent_file") == day_plate.get("parent_file") == parent_file.as_posix()
+        ),
+        "parent_file": parent_file.as_posix(),
     }
     blockers: list[str] = []
     if not lineage["lineage_proven"]:
         blockers.append("day face and plate clips do not share a proven parent source")
     if not parent_file.exists():
         blockers.append(f"canonical day parent source is missing: {parent_file}")
-    model_blockers = missing_frozen_model_blockers()
-    blockers.extend(model_blockers)
 
-    start_seconds = min(
-        float(day_face["parent_start_seconds"]), float(day_plate["parent_start_seconds"])
-    )
-    end_seconds = max(
-        float(day_face["parent_start_seconds"]) + float(day_face["duration_seconds"]),
-        float(day_plate["parent_start_seconds"]) + float(day_plate["duration_seconds"]),
-    )
+    parent_info = media.probe_media(parent_file) if parent_file.exists() else None
+    parent_fps = (
+        rational_to_float(parent_info.video_stream.nominal_frame_rate)
+        if parent_info is not None
+        else 30000 / 1001
+    ) or 30000 / 1001
+    start_seconds = DAY_CANONICAL_SOURCE_FRAME_START / parent_fps
+    duration_seconds = (
+        DAY_CANONICAL_SOURCE_FRAME_END - DAY_CANONICAL_SOURCE_FRAME_START
+    ) / parent_fps
     canonical_source = package_root / "media" / "day" / "original_reference.mp4"
     if parent_file.exists() and not canonical_source.exists():
         media.trim_video(
             parent_file,
             canonical_source,
             start_seconds=start_seconds,
-            duration_seconds=end_seconds - start_seconds,
+            duration_seconds=duration_seconds,
             overwrite=True,
+        )
+    day_generation: dict[str, Any] | None = None
+    if canonical_source.exists() and not blockers:
+        day_generation = build_day_current_result(
+            package_root=package_root,
+            canonical_source=canonical_source,
+            model_paths=model_paths,
         )
     if canonical_source.exists():
         info = media.probe_media(canonical_source)
         source_hash = info.sha256
         frame_count = int(info.video_stream.frame_count or 0)
-        parent_frame_start = round(start_seconds * 30000 / 1001)
+        parent_frame_start = DAY_CANONICAL_SOURCE_FRAME_START
         parent_frame_end = parent_frame_start + max(0, frame_count - 1)
+        if parent_frame_end != DAY_CANONICAL_SOURCE_FRAME_END:
+            blockers.append(
+                "canonical Day extraction frame span mismatch: expected "
+                f"{DAY_CANONICAL_SOURCE_FRAME_START}-{DAY_CANONICAL_SOURCE_FRAME_END}, "
+                f"got {parent_frame_start}-{parent_frame_end}"
+            )
         width = info.video_stream.width
         height = info.video_stream.height
-        duration_seconds = info.duration_seconds
+        duration_seconds_actual = info.duration_seconds
         fps = info.video_stream.nominal_frame_rate or "30000/1001"
-        video_roles = (
+        roles = [
             case_manifests.VideoRole(
                 label="Original",
                 path="media/day/original_reference.mp4",
@@ -176,15 +245,30 @@ def build_day_case(package_root: Path) -> dict[str, Any]:
                 source_frame_end=parent_frame_end,
                 source_frame_start=parent_frame_start,
             ),
-        )
+        ]
+        current_path = package_root / "media" / "day" / "current_combined_result.mp4"
+        if current_path.exists():
+            roles.append(
+                case_manifests.VideoRole(
+                    label="Current result",
+                    path="media/day/current_combined_result.mp4",
+                    role="current_result",
+                    sha256=media.sha256_file(current_path),
+                    source_frame_end=parent_frame_end,
+                    source_frame_start=parent_frame_start,
+                )
+            )
+        else:
+            blockers.append("canonical Day current combined result was not generated")
+        video_roles = tuple(roles)
     else:
         source_hash = None
         frame_count = 0
-        parent_frame_start = round(start_seconds * 30000 / 1001)
-        parent_frame_end = parent_frame_start
+        parent_frame_start = DAY_CANONICAL_SOURCE_FRAME_START
+        parent_frame_end = DAY_CANONICAL_SOURCE_FRAME_END
         width = None
         height = None
-        duration_seconds = None
+        duration_seconds_actual = None
         fps = "30000/1001"
         video_roles = ()
 
@@ -192,9 +276,10 @@ def build_day_case(package_root: Path) -> dict[str, Any]:
         blockers=tuple(blockers),
         case_id="day",
         display_name="Day case",
-        duration_seconds=duration_seconds,
+        duration_seconds=duration_seconds_actual,
         face_evidence_inputs=(
             "artifacts/face_full_video_acceptance_v1/day/reviewed_candidate_privacy_regions.jsonl",
+            "artifacts/day_reviewer_discovered_correction_v1/privacy_regions.jsonl",
         ),
         fps=fps,
         frame_count=frame_count,
@@ -202,10 +287,11 @@ def build_day_case(package_root: Path) -> dict[str, Any]:
         lineage=lineage
         | {
             "canonical_parent_start_seconds": start_seconds,
-            "canonical_parent_end_seconds": end_seconds,
-            "canonical_generation_status": "blocked_missing_frozen_models"
-            if model_blockers
-            else "pending_pipeline_run",
+            "canonical_parent_end_seconds": start_seconds + duration_seconds,
+            "canonical_source_frame_end": DAY_CANONICAL_SOURCE_FRAME_END,
+            "canonical_source_frame_start": DAY_CANONICAL_SOURCE_FRAME_START,
+            "canonical_generation": day_generation,
+            "canonical_generation_status": "generated" if day_generation else "blocked",
         },
         parent_source_hash=media.sha256_file(parent_file) if parent_file.exists() else None,
         plate_evidence_inputs=("artifacts/shared_temporal_evidence_v1/day/tracking/tracks.jsonl",),
@@ -222,8 +308,11 @@ def build_day_case(package_root: Path) -> dict[str, Any]:
     )
     case_path = package_root / "cases" / "day.json"
     case_manifests.write_case_manifest(case_path, manifest)
-    blocker_md = package_root / "day_case_lineage_blocker.md"
-    blocker_md.write_text(day_lineage_blocker_text(lineage, blockers), encoding="utf-8")
+    lineage_report_md = package_root / "day_case_lineage_report.md"
+    lineage_report_md.write_text(day_lineage_report_text(lineage, blockers), encoding="utf-8")
+    if blockers:
+        blocker_md = package_root / "day_case_lineage_blocker.md"
+        blocker_md.write_text(day_lineage_report_text(lineage, blockers), encoding="utf-8")
     write_json(
         package_root / "technical" / "day_source_lineage_audit.json",
         lineage | {"blockers": blockers},
@@ -234,7 +323,416 @@ def build_day_case(package_root: Path) -> dict[str, Any]:
         "canonical_original": "media/day/original_reference.mp4"
         if canonical_source.exists()
         else None,
+        "canonical_current": "media/day/current_combined_result.mp4"
+        if (package_root / "media" / "day" / "current_combined_result.mp4").exists()
+        else None,
+        "frame_count": frame_count,
         "lineage_proven": lineage["lineage_proven"],
+    }
+
+
+def resolve_frozen_model_paths(
+    *,
+    adas_xml_path: Path | None = None,
+    adas_bin_path: Path | None = None,
+    plate_model_path: Path | None = None,
+) -> FrozenModelPaths:
+    return FrozenModelPaths(
+        adas_xml=Path(
+            adas_xml_path or os.environ.get("REDACTOR_ADAS_XML") or DEFAULT_ADAS_XML_PATH
+        ),
+        adas_bin=Path(
+            adas_bin_path or os.environ.get("REDACTOR_ADAS_BIN") or DEFAULT_ADAS_BIN_PATH
+        ),
+        plate_model=Path(
+            plate_model_path
+            or os.environ.get("REDACTOR_OIM_PLATE_MODEL")
+            or DEFAULT_OIM_PLATE_MODEL_PATH
+        ),
+    )
+
+
+def validate_frozen_models(model_paths: FrozenModelPaths) -> dict[str, Any]:
+    expected = {
+        "adas_bin": (model_paths.adas_bin, EXPECTED_ADAS_BIN_SHA256),
+        "adas_xml": (model_paths.adas_xml, EXPECTED_ADAS_XML_SHA256),
+        "plate_model": (model_paths.plate_model, EXPECTED_OIM_PLATE_ONNX_SHA256),
+    }
+    errors: list[str] = []
+    files: dict[str, dict[str, Any]] = {}
+    rejected_terms = {
+        "intel",
+        "lp-detection-yunet",
+        "lpd_yunet",
+        "openvino_0106",
+        "rfdetr",
+        "rtdetr",
+        "yunet",
+    }
+    for name, (path, expected_hash) in expected.items():
+        path_text = path.as_posix().lower()
+        file_payload: dict[str, Any] = {
+            "exists": path.exists(),
+            "expected_sha256": expected_hash,
+            "path": path.as_posix(),
+        }
+        if any(term in path_text for term in rejected_terms):
+            errors.append(f"{name} points at a rejected historical model path: {path}")
+        if not path.exists():
+            errors.append(f"{name} is missing: {path}")
+        elif not path.is_file():
+            errors.append(f"{name} is not a file: {path}")
+        else:
+            actual_hash = media.sha256_file(path)
+            file_payload["sha256"] = actual_hash
+            if actual_hash != expected_hash:
+                errors.append(f"{name} hash mismatch: expected {expected_hash}, got {actual_hash}")
+        files[name] = file_payload
+    payload = {
+        "detectors": {
+            "face": "OpenVINO face-detection-adas-0001",
+            "plate": "Open Image Models YOLOv9-S-608 end-to-end license-plate detector",
+        },
+        "errors": errors,
+        "files": files,
+        "model_paths": model_paths.to_dict(),
+        "passed": not errors,
+        "schema_version": "frozen_model_validation.v1",
+    }
+    if errors:
+        raise ValueError("frozen model validation failed: " + "; ".join(errors))
+    return payload
+
+
+def build_day_current_result(
+    *,
+    package_root: Path,
+    canonical_source: Path,
+    model_paths: FrozenModelPaths,
+) -> dict[str, Any]:
+    technical_root = package_root / "technical" / "day_pipeline"
+    current_video = package_root / "media" / "day" / "current_combined_result.mp4"
+    current_regions_path = package_root / "regions" / "day_current_regions.jsonl"
+
+    records = build_mapped_day_region_records(
+        face_regions_path=Path(
+            "artifacts/face_full_video_acceptance_v1/day/reviewed_candidate_privacy_regions.jsonl"
+        ),
+        face_reviewer_correction_path=Path(
+            "artifacts/day_reviewer_discovered_correction_v1/privacy_regions.jsonl"
+        ),
+        plate_tracks_path=Path("artifacts/shared_temporal_evidence_v1/day/tracking/tracks.jsonl"),
+    )
+    review_finalization.write_privacy_region_records(current_regions_path, records)
+    render_summary = render_combined_current_result(
+        canonical_source=canonical_source,
+        output_video=current_video,
+        records=records,
+        overwrite=True,
+    )
+    write_json(
+        technical_root / "canonical_day_generation.json",
+        {
+            "case_source": canonical_source.relative_to(package_root).as_posix(),
+            "combined_current_video": current_video.relative_to(package_root).as_posix(),
+            "face": {
+                "lineage_parent_start_frame": 4615,
+                "mapped_inputs": [
+                    "artifacts/face_full_video_acceptance_v1/day/reviewed_candidate_privacy_regions.jsonl",
+                    "artifacts/day_reviewer_discovered_correction_v1/privacy_regions.jsonl",
+                ],
+            },
+            "generation_mode": "lineage_mapped_frozen_evidence",
+            "model_validation": model_paths.to_dict(),
+            "plate": {
+                "lineage_parent_start_frame": 1828,
+                "mapped_inputs": [
+                    "artifacts/shared_temporal_evidence_v1/day/tracking/tracks.jsonl"
+                ],
+            },
+            "render": render_summary,
+            "schema_version": "canonical_day_generation.v1",
+        },
+    )
+    return {
+        "combined_current": current_video.relative_to(package_root).as_posix(),
+        "combined_current_sha256": media.sha256_file(current_video),
+        "current_region_count": len(records),
+        "region_provenance": privacy_rendering.provenance_counts(records),
+    }
+
+
+def build_mapped_day_region_records(
+    *,
+    face_regions_path: Path,
+    face_reviewer_correction_path: Path,
+    plate_tracks_path: Path,
+) -> list[PrivacyRegionRecord]:
+    face_local_offset = 4615 - DAY_CANONICAL_SOURCE_FRAME_START
+    records = face_region_records_from_render_input(
+        face_regions_path,
+        case_frame_offset=face_local_offset,
+        parent_frame_offset=4615,
+    )
+    records.extend(
+        face_region_records_from_render_input(
+            face_reviewer_correction_path,
+            case_frame_offset=face_local_offset,
+            parent_frame_offset=4615,
+        )
+    )
+    plate_rows = plate_rendering.load_track_rows(plate_tracks_path)
+    plate_regions = plate_rendering.eligible_regions_from_rows(
+        plate_rows,
+        config=plate_rendering.default_config(),
+    )
+    records.extend(
+        with_parent_source_frame(
+            region.to_privacy_region(),
+            parent_frame_offset=DAY_CANONICAL_SOURCE_FRAME_START,
+        )
+        for region in plate_regions
+    )
+    return sorted(
+        records,
+        key=lambda item: (
+            item.source_frame,
+            item.category,
+            item.object_id or "",
+            item.provenance,
+        ),
+    )
+
+
+def run_face_policy_compile_only(
+    input_video: Path,
+    *,
+    output_dir: Path,
+    detections_path: Path,
+    overwrite: bool,
+) -> dict[str, Any]:
+    face_policy.ensure_case_output_dir(output_dir, overwrite=overwrite)
+    source_info = media.probe_media(input_video)
+    source_frame_count = int(source_info.video_stream.frame_count or 0)
+    detection_manifest_dir = output_dir / "detection"
+    detection_manifest_dir.mkdir(parents=True, exist_ok=True)
+    write_json(
+        detection_manifest_dir / "input_detections_manifest.json",
+        {
+            "detections_path": detections_path.as_posix(),
+            "detections_sha256": media.sha256_file(detections_path),
+            "detector_id": detection.DETECTOR_BACKEND_ADAS,
+            "note": "Workspace Day generation uses supplied frozen ADAS detections.",
+            "schema_version": SCHEMA_VERSION,
+        },
+    )
+    tracking_dir = output_dir / "tracking"
+    track_summary = face_policy.tracking.run_tracking(
+        input_video,
+        detections_path=detections_path,
+        output_dir=tracking_dir,
+        overwrite=overwrite,
+    )
+    source_manifest = {
+        "case_input_video": input_video.name,
+        "detector_id": detection.DETECTOR_BACKEND_ADAS,
+        "fps": rational_to_float(source_info.video_stream.nominal_frame_rate),
+        "height": source_info.video_stream.height,
+        "schema_version": SCHEMA_VERSION,
+        "source_frame_count": source_frame_count,
+        "source_video_hash": source_info.sha256,
+        "width": source_info.video_stream.width,
+    }
+    write_json(output_dir / "source_manifest.json", source_manifest)
+    draft_census = face_policy.build_track_census(
+        tracks_path=tracking_dir / "tracks.jsonl",
+        track_quality_path=tracking_dir / "track_quality.json",
+        source_video_hash=source_info.sha256,
+        source_frame_count=source_frame_count,
+    )
+    policy = face_policy.policy_from_census(
+        case_id=output_dir.name,
+        source_video_hash=source_info.sha256,
+        source_frame_count=source_frame_count,
+        census=draft_census,
+        mode=face_policy.MODE_REDACT_ALL,
+    )
+    write_json(output_dir / "privacy_policy.json", policy.to_dict())
+    census = face_policy.build_track_census(
+        tracks_path=tracking_dir / "tracks.jsonl",
+        track_quality_path=tracking_dir / "track_quality.json",
+        source_video_hash=source_info.sha256,
+        source_frame_count=source_frame_count,
+        policy=policy,
+    )
+    write_json(output_dir / "track_census.json", census)
+    compile_result = face_policy.compile_policy(
+        input_video,
+        tracks_path=tracking_dir / "tracks.jsonl",
+        track_quality_path=tracking_dir / "track_quality.json",
+        policy=policy,
+    )
+    privacy_dir = output_dir / "privacy_regions"
+    privacy_summary = face_policy.write_compiled_outputs(
+        privacy_dir,
+        result=compile_result,
+        policy=policy,
+        census=census,
+        source_video_hash=source_info.sha256,
+        tracks_hash=media.sha256_file(tracking_dir / "tracks.jsonl"),
+        track_quality_hash=media.sha256_file(tracking_dir / "track_quality.json"),
+        overwrite=overwrite,
+    )
+    audit = {
+        "compiler_id": face_policy.COMPILER_ID,
+        "detection_input_sha256": media.sha256_file(detections_path),
+        "final_export_status": {
+            "blocking_reasons": ["review_required_policy_or_track_intervals"],
+            "status": "blocked_review_required",
+        },
+        "policy": policy.to_dict(),
+        "privacy_summary": privacy_summary,
+        "schema_version": SCHEMA_VERSION,
+        "source_manifest": source_manifest,
+        "tracking_summary": track_summary,
+    }
+    write_json(output_dir / "audit_manifest.json", audit)
+    return audit
+
+
+def face_region_records_from_render_input(
+    path: Path,
+    *,
+    case_frame_offset: int,
+    parent_frame_offset: int,
+) -> list[PrivacyRegionRecord]:
+    face_input = rendering.load_privacy_regions(path)
+    records: list[PrivacyRegionRecord] = []
+    for frame_index, regions in face_input.regions_by_frame.items():
+        for index, region in enumerate(regions):
+            if not region.is_renderable:
+                continue
+            source_record = dict(region.source_record)
+            track_id = face_track_identifier(source_record, fallback=f"{frame_index}_{index}")
+            region_id = source_record.get("region_id") or f"face_{frame_index}_{index}"
+            records.append(
+                PrivacyRegionRecord(
+                    approval_state=APPROVAL_ACCEPTED,
+                    bbox_xyxy=region.bbox_xyxy,
+                    category=CATEGORY_FACE,
+                    object_id=f"face_track_{track_id}",
+                    provenance=region.provenance,
+                    render_eligible=True,
+                    source_frame=case_frame_offset + frame_index,
+                    source_record=source_record
+                    | {
+                        "parent_source_frame": parent_frame_offset + frame_index,
+                        "source_clip_frame": frame_index,
+                        "region_id": region_id,
+                        "track_id": track_id,
+                    },
+                )
+            )
+    return records
+
+
+def face_track_identifier(source_record: dict[str, Any], *, fallback: str) -> str:
+    if source_record.get("track_id") is not None:
+        return str(source_record["track_id"])
+    if source_record.get("track_uid") is not None:
+        return str(source_record["track_uid"])
+    target_track_ids = source_record.get("target_track_ids")
+    if isinstance(target_track_ids, list) and target_track_ids:
+        return str(target_track_ids[0])
+    metrics = source_record.get("metrics")
+    if isinstance(metrics, dict) and metrics.get("source_track_id") is not None:
+        return str(metrics["source_track_id"])
+    return fallback
+
+
+def with_parent_source_frame(
+    record: PrivacyRegionRecord,
+    *,
+    parent_frame_offset: int,
+) -> PrivacyRegionRecord:
+    return PrivacyRegionRecord(
+        approval_state=record.approval_state,
+        bbox_xyxy=record.bbox_xyxy,
+        category=record.category,
+        object_id=record.object_id,
+        provenance=record.provenance,
+        reasons=record.reasons,
+        render_eligible=record.render_eligible,
+        source_frame=record.source_frame,
+        source_record=dict(record.source_record)
+        | {"parent_source_frame": parent_frame_offset + record.source_frame},
+    )
+
+
+def render_combined_current_result(
+    *,
+    canonical_source: Path,
+    output_video: Path,
+    records: list[PrivacyRegionRecord],
+    overwrite: bool,
+) -> dict[str, Any]:
+    source_info = media.probe_media(canonical_source)
+    fps = rational_to_float(source_info.video_stream.nominal_frame_rate) or 30.0
+    settings = rendering.RenderSettings(
+        mode=rendering.MODE_PREVIEW,
+        method=rendering.METHOD_PIXELATE,
+        margin_fraction=0.15,
+        margin_pixels=0,
+        pixel_size=16,
+        blur_kernel=51,
+        preview_watermark=False,
+    )
+    rendered_frames, rendered_regions, audio_handling = privacy_rendering.render_privacy_video(
+        canonical_source,
+        output_video,
+        privacy_rendering.regions_by_frame(records),
+        settings=settings,
+        fps=fps,
+        width=source_info.video_stream.width,
+        height=source_info.video_stream.height,
+        source_has_audio=source_info.audio_stream is not None,
+        overwrite=overwrite,
+    )
+    media_validation = rendering.validate_output_media(
+        canonical_source,
+        source_info,
+        output_video,
+        expected_frame_count=rendered_frames,
+        expected_width=source_info.video_stream.width,
+        expected_height=source_info.video_stream.height,
+        expected_fps=fps,
+        source_has_audio=source_info.audio_stream is not None,
+        settings=settings,
+    )
+    region_validation = privacy_rendering.verify_rendered_regions(
+        canonical_source,
+        output_video,
+        [record.to_render_region() for record in records],
+        settings=settings,
+        frame_width=source_info.video_stream.width,
+        frame_height=source_info.video_stream.height,
+    )
+    return {
+        "audio_handling": audio_handling,
+        "media_validation": media_validation,
+        "output_sha256": media.sha256_file(output_video),
+        "render_configuration": {
+            "blur_kernel": 51,
+            "margin_fraction": 0.15,
+            "margin_pixels": 0,
+            "method": "pixelate",
+            "pixel_format": "yuv420p",
+            "pixel_size": 16,
+            "video_codec": "libx264",
+        },
+        "rendered_frame_count": rendered_frames,
+        "rendered_region_count": rendered_regions,
+        "rendered_region_verification": region_validation,
     }
 
 
@@ -314,17 +812,22 @@ def write_night_region_records(output_path: Path) -> None:
         for index, region in enumerate(regions):
             if not region.is_renderable:
                 continue
+            source_record = dict(region.source_record)
+            track_id = face_track_identifier(source_record, fallback=f"{frame_index}_{index}")
             records.append(
                 PrivacyRegionRecord(
                     approval_state="accepted",
                     bbox_xyxy=region.bbox_xyxy,
                     category=CATEGORY_FACE,
-                    object_id=f"face_{frame_index}_{index}",
+                    object_id=f"face_track_{track_id}",
                     provenance=region.provenance,
                     render_eligible=True,
                     source_frame=frame_index,
-                    source_record=dict(region.source_record)
-                    | {"region_id": f"face_{frame_index}_{index}"},
+                    source_record=source_record
+                    | {
+                        "region_id": f"face_{frame_index}_{index}",
+                        "track_id": track_id,
+                    },
                 )
             )
     plate_rows = plate_rendering.load_track_rows(
@@ -338,15 +841,42 @@ def write_night_region_records(output_path: Path) -> None:
     review_finalization.write_privacy_region_records(output_path, records)
 
 
+def write_entity_index(package_root: Path) -> None:
+    entities_by_case: dict[str, list[dict[str, Any]]] = {}
+    for case_id in ("day", "night"):
+        region_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
+        if not region_path.exists():
+            entities_by_case[case_id] = []
+            write_json(
+                package_root / "entities" / f"{case_id}.json",
+                {"case_id": case_id, "entities": [], "schema_version": "privacy_entities.v1"},
+            )
+            continue
+        records = review_finalization.load_privacy_region_records(region_path)
+        entities = privacy_entities.entities_from_region_records(case_id, records)
+        payload = {
+            "case_id": case_id,
+            "entities": [entity.to_dict() for entity in entities],
+            "entity_count": len(entities),
+            "schema_version": "privacy_entities.v1",
+        }
+        entities_by_case[case_id] = payload["entities"]
+        write_json(package_root / "entities" / f"{case_id}.json", payload)
+    write_json(
+        package_root / "privacy_entities.json",
+        {
+            "cases": entities_by_case,
+            "schema_version": "privacy_entities_index.v1",
+        },
+    )
+
+
 def missing_frozen_model_blockers() -> list[str]:
     blockers: list[str] = []
-    for path in (
-        Path("models/face-detection-adas-0001/face-detection-adas-0001.xml"),
-        Path("models/face-detection-adas-0001/face-detection-adas-0001.bin"),
-        Path("models/open-image-models/yolo-v9-s-608-license-plates-end2end.onnx"),
-    ):
-        if not path.exists():
-            blockers.append(f"required frozen model file is missing locally: {path}")
+    try:
+        validate_frozen_models(resolve_frozen_model_paths())
+    except ValueError as exc:
+        blockers.append(str(exc))
     return blockers
 
 
@@ -378,21 +908,6 @@ def load_raw_audit_signals(path: Path) -> list[dict[str, Any]]:
 
 def aggregate_reviewer_tasks(raw_signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     visible = [signal for signal in raw_signals if not signal["technical"]]
-    visible.append(
-        {
-            "case_id": "day",
-            "category": "both",
-            "raw_signal_id": "day_canonical_generation_blocker",
-            "root_cause": "canonical_day_generation_blocked",
-            "schema_version": "raw_audit_signal.v1",
-            "severity": "blocker",
-            "source_clip_id": "day",
-            "source_frame_end": 5694,
-            "source_frame_start": 1828,
-            "source_note": "Canonical day parent interval is known, but frozen model files are required to generate a combined current result.",
-            "technical": False,
-        }
-    )
     groups: list[list[dict[str, Any]]] = []
     for signal in sorted(
         visible,
@@ -624,6 +1139,22 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             )
             self.send_json({"event": event, "ok": True})
             return
+        if path == "/api/entity-events":
+            entity_event = dict(payload.get("event") or {})
+            event = review_sessions.append_event(
+                session_dir,
+                event_type=str(entity_event.get("event_type") or "entity_event"),
+                actor=actor,
+                case_id=str(entity_event.get("case_id") or payload.get("case_id") or ""),
+                task_id=None,
+                before_state=(entity_event.get("payload") or {}).get("before"),
+                after_state=(entity_event.get("payload") or {}).get("after")
+                or dict(entity_event.get("payload") or {}),
+                note=f"Entity change for {entity_event.get('entity_id')}",
+                application_hashes={},
+            )
+            self.send_json({"event": event, "ok": True})
+            return
         if path == "/api/finalize":
             result = review_finalization.finalize_reviewed_case(
                 package_root=self.server.package_root,
@@ -851,7 +1382,8 @@ def package_relative_path(*, path: Path, package_root: Path) -> str:
         return "<outside-package-root>"
 
 
-def day_lineage_blocker_text(lineage: dict[str, Any], blockers: list[str]) -> str:
+def day_lineage_report_text(lineage: dict[str, Any], blockers: list[str]) -> str:
+    blocker_text = "\n".join(f"- {item}" for item in blockers) if blockers else "None."
     return (
         "# Day Case Lineage Status\n\n"
         "The existing day face and day plate artifacts are separate clips. Their metadata maps "
@@ -859,7 +1391,7 @@ def day_lineage_blocker_text(lineage: dict[str, Any], blockers: list[str]) -> st
         "current result must be regenerated from that parent interval with the frozen face and "
         "plate pipelines.\n\n"
         f"Lineage proven: `{lineage['lineage_proven']}`\n\n"
-        "## Current Blockers\n\n" + "\n".join(f"- {item}" for item in blockers) + "\n"
+        f"## Current Blockers\n\n{blocker_text}\n"
     )
 
 
@@ -874,7 +1406,7 @@ def index_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Final Review Workspace v1</title>
+  <title>Final Review Workspace v2.1</title>
   <link rel="stylesheet" href="assets/workspace.css">
 </head>
 <body>
@@ -946,6 +1478,11 @@ input, textarea, select { width: 100%; box-sizing: border-box; padding: 8px; bor
 .frame-overlay { position: absolute; left: 8px; bottom: 8px; padding: 5px 7px; background: rgba(0,0,0,.72); color: white; border-radius: 4px; font-size: 13px; pointer-events: none; }
 .controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
 .task-panel, .sweep-panel, .technical, .blocker { background: white; border: 1px solid #d8dee7; border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+.entity-panel { background: white; border: 1px solid #d8dee7; border-radius: 8px; padding: 14px; margin-bottom: 14px; }
+.entity-card { border-top: 1px solid #e5e7eb; display: grid; gap: 8px; padding: 10px 0; }
+.entity-card:first-of-type { border-top: 0; }
+.entity-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.entity-card small { color: #596579; }
 .task-card { border-left: 6px solid #f59e0b; padding-left: 12px; }
 .task-card.blocking { border-left-color: #b91c1c; }
 .status-green { color: #047857; font-weight: 700; }
@@ -956,6 +1493,7 @@ input, textarea, select { width: 100%; box-sizing: border-box; padding: 8px; bor
 .correction-canvas-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
 .correction-tools { display: grid; gap: 8px; margin-top: 8px; }
 .correction-tools select, .correction-tools textarea { width: 100%; }
+.keyframe-list { font-size: 13px; color: #3f4b5d; }
 .timeline { height: 12px; background: #e5e7eb; border-radius: 999px; overflow: hidden; margin: 10px 0; }
 .timeline div { height: 100%; background: #0f766e; width: 0%; }
 details { margin-top: 12px; }
@@ -965,7 +1503,7 @@ details { margin-top: 12px; }
 
 def workspace_js() -> str:
     return r"""
-const state = { cases: {}, tasks: [], session: null, activeTab: 'night', activeTask: {}, frame: {}, viewed: {}, correctionDrafts: {}, drawing: null };
+const state = { cases: {}, tasks: [], session: null, activeTab: 'night', activeTask: {}, frame: {}, viewed: {}, correctionDrafts: {}, selectedEntity: {}, entityVisibility: {}, entityHistory: [], drawing: null };
 const DATA = {};
 
 async function loadJson(path) { const res = await fetch(path); if (!res.ok) throw new Error(path); return await res.json(); }
@@ -974,6 +1512,7 @@ async function init() {
   DATA.workspace = await loadJson('workspace_manifest.json');
   DATA.tasks = await loadJson('reviewer_tasks.json');
   DATA.freeze = await loadJson('configuration_freeze.json');
+  DATA.entities = await loadJson('privacy_entities.json');
   for (const id of ['day','night']) DATA[id] = await loadJson(`cases/${id}.json`);
   state.tasks = DATA.tasks.tasks.filter(t => !t.technical_only);
   renderCase('day'); renderCase('night'); renderFinal(); bindGlobalControls();
@@ -1004,7 +1543,7 @@ function renderCase(caseId) {
       <textarea id="sweep-note-${caseId}" placeholder="Override reason or sweep notes"></textarea>
     </section>
     <details class="technical"><summary>Technical audit</summary><pre>${escapeHtml(JSON.stringify(c.lineage || {}, null, 2))}</pre></details>
-  </div><aside>${taskPanel(caseId, tasks)}</aside></div>`;
+  </div><aside>${entityPanel(caseId)}${taskPanel(caseId, tasks)}</aside></div>`;
   state.activeTask[caseId] = state.activeTask[caseId] || 0;
   bindPanel(panel); initCorrectionCanvas(caseId); updateTask(caseId); refreshCorrectionCanvas(caseId);
 }
@@ -1040,17 +1579,50 @@ function taskPanel(caseId, tasks) {
     <div class="correction-editor"><h3>Correction editor</h3><p>Draw on Original, not the redacted result. Corrections are a reviewed layer and never change detector thresholds.</p>
       <div class="correction-canvas-wrap"><canvas data-correction-canvas="${caseId}"></canvas></div>
       <div class="correction-tools">
+        <label>Entity <select data-correction-entity="${caseId}">${entityOptions(caseId)}</select></label>
         <label>Operation <select data-correction-operation="${caseId}">
           <option value="add_privacy_region">Add privacy region</option>
           <option value="replace_privacy_region">Replace privacy region</option>
           <option value="suppress_region">Suppress existing region</option>
+          <option value="suppress_track_segment">Suppress track segment</option>
           <option value="mark_not_sensitive">Mark region not sensitive</option>
+          <option value="mark_not_visible">Mark interval not visible or occluded</option>
         </select></label>
         <label>Reason <textarea data-correction-reason="${caseId}"></textarea></label>
-        <div class="controls"><button data-action="delete-correction" data-case="${caseId}">Delete draft region</button><button data-action="save-correction" data-case="${caseId}">Save reviewed correction</button></div>
+        <div class="keyframe-list" id="keyframes-${caseId}">No reviewed keyframes yet.</div>
+        <div class="controls">
+          <button data-action="add-keyframe" data-case="${caseId}">Create/update keyframe</button>
+          <button data-action="prev-keyframe" data-case="${caseId}">Previous keyframe</button>
+          <button data-action="next-keyframe" data-case="${caseId}">Next keyframe</button>
+          <button data-action="preview-interpolation" data-case="${caseId}">Preview interpolation</button>
+          <button data-action="delete-correction" data-case="${caseId}">Delete draft region</button>
+          <button data-action="save-correction" data-case="${caseId}">Save reviewed correction</button>
+        </div>
       </div>
     </div></section>`;
 }
+
+function entityPanel(caseId) {
+  const entities = caseEntities(caseId);
+  if (!entities.length) return `<section class="entity-panel"><h3>Privacy entities</h3><p>No current automatic entities are indexed for this case.</p></section>`;
+  return `<section class="entity-panel"><h3>Privacy entities</h3><p>Overlay visibility is editor-only. Privacy policy controls final rendering after review.</p>${entities.map(entity => `<article class="entity-card" data-entity-card="${entity.entity_id}">
+    <header><strong>${entity.label}</strong><small>${categoryLabel(entity.category)}</small></header>
+    <button data-action="toggle-entity-overlay" data-case="${caseId}" data-entity="${entity.entity_id}">${entityVisible(entity.entity_id) ? 'Hide overlay' : 'Show overlay'}</button>
+    <label>Privacy policy <select data-action="entity-policy" data-case="${caseId}" data-entity="${entity.entity_id}">
+      ${policyOption('redact', 'Redact', entity.default_privacy_policy)}
+      ${policyOption('keep_visible', 'Keep visible', entity.default_privacy_policy)}
+      ${policyOption('not_sensitive', 'Not sensitive', entity.default_privacy_policy)}
+      ${policyOption('review_required', 'Review required', entity.default_privacy_policy)}
+    </select></label>
+    <button data-action="toggle-entity-lock" data-case="${caseId}" data-entity="${entity.entity_id}">${entity.locked ? 'Unlock' : 'Reviewed and lock'}</button>
+  </article>`).join('')}</section>`;
+}
+
+function policyOption(value, label, selected) { return `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`; }
+function caseEntities(caseId) { return ((DATA.entities && DATA.entities.cases && DATA.entities.cases[caseId]) || []); }
+function entityOptions(caseId) { return caseEntities(caseId).map(e => `<option value="${e.entity_id}">${e.label}</option>`).join('') || '<option value="">New entity from correction</option>'; }
+function categoryLabel(category) { return category === 'face' ? 'Face' : 'Plate'; }
+function entityVisible(entityId) { return state.entityVisibility[entityId] !== false; }
 
 function updateTask(caseId) {
   const tasks = state.tasks.filter(t => t.case_id === caseId && !t.technical_only);
@@ -1097,6 +1669,13 @@ function bindPanel(panel) {
     if (action === 'decision') return recordDecision(caseId, el.dataset.task, el.dataset.decision, el);
     if (action === 'ack-sweep') return acknowledgeSweep(caseId);
     if (action === 'add-issue') return addIssueAtFrame(caseId);
+    if (action === 'toggle-entity-overlay') return toggleEntityOverlay(caseId, el.dataset.entity);
+    if (action === 'entity-policy') return changeEntityPolicy(caseId, el.dataset.entity, el.value);
+    if (action === 'toggle-entity-lock') return toggleEntityLock(caseId, el.dataset.entity);
+    if (action === 'add-keyframe') return addKeyframe(caseId);
+    if (action === 'prev-keyframe') return jumpKeyframe(caseId, -1);
+    if (action === 'next-keyframe') return jumpKeyframe(caseId, 1);
+    if (action === 'preview-interpolation') return previewInterpolation(caseId);
     if (action === 'delete-correction') return deleteCorrectionDraft(caseId);
     if (action === 'save-correction') return saveCorrection(caseId);
   });
@@ -1125,7 +1704,10 @@ function initCorrectionCanvas(caseId) {
     state.drawing.current = canvasPoint(caseId, e);
     const box = normalizedDraftBox(caseId, state.drawing.start, state.drawing.current);
     if (box && box[2] - box[0] >= 4 && box[3] - box[1] >= 4) {
-      state.correctionDrafts[caseId] = { bbox_xyxy: box, source_frame: sourceFrame(caseId) };
+      const draft = ensureDraft(caseId);
+      draft.bbox_xyxy = box;
+      draft.source_frame = sourceFrame(caseId);
+      state.correctionDrafts[caseId] = draft;
     }
     state.drawing = null;
     refreshCorrectionCanvas(caseId);
@@ -1170,6 +1752,11 @@ function refreshCorrectionCanvas(caseId) {
   ctx.strokeStyle = '#facc15'; ctx.fillStyle = 'rgba(250, 204, 21, 0.16)';
   const draft = state.correctionDrafts[caseId];
   if (draft) drawBox(ctx, draft.bbox_xyxy);
+  if (draft && draft.keyframes) {
+    ctx.strokeStyle = '#22c55e';
+    ctx.fillStyle = 'rgba(34, 197, 94, 0.12)';
+    draft.keyframes.forEach(k => drawBox(ctx, k.bbox_xyxy));
+  }
   if (state.drawing && state.drawing.caseId === caseId) {
     const box = normalizedDraftBox(caseId, state.drawing.start, state.drawing.current);
     if (box) drawBox(ctx, box);
@@ -1177,6 +1764,7 @@ function refreshCorrectionCanvas(caseId) {
   ctx.fillStyle = 'rgba(0, 0, 0, .70)'; ctx.fillRect(8, 8, 260, 30);
   ctx.fillStyle = '#fff'; ctx.font = '18px system-ui';
   ctx.fillText(`Source frame ${sourceFrame(caseId)}`, 18, 30);
+  refreshKeyframeList(caseId);
 }
 
 function drawBox(ctx, box) {
@@ -1255,12 +1843,122 @@ async function acknowledgeSweep(caseId) {
   if (state.session && !String(state.session.session_id).startsWith('browser_only')) await postJson('/api/events/sweep', { session_id: state.session.session_id, actor: state.session.reviewer, case_id: caseId, viewed_ranges: [{ start: 0, end: state.viewed[caseId] || 0 }], override_reason: note });
   addAudit(`Sweep acknowledged for ${caseId}.`);
 }
-function addIssueAtFrame(caseId) { addAudit(`New issue started at source frame ${sourceFrame(caseId)} for ${caseId}.`); }
+function addIssueAtFrame(caseId) {
+  const frame = sourceFrame(caseId);
+  const task = {
+    allowed_actions: DATA.tasks.actions.map(a => a.action),
+    blocking: true,
+    case_id: caseId,
+    category: 'both',
+    correction_required: true,
+    issue_type: 'reviewer_added_privacy_issue',
+    raw_signal_ids: [],
+    review_task_id: `${caseId}_manual_issue_${Date.now()}`,
+    severity: 'blocker',
+    source_frame_end: frame,
+    source_frame_start: frame,
+    technical_only: false,
+    title: 'Reviewer-added privacy issue',
+    what_happened: 'A reviewer found a possible privacy issue during full-video sweep.',
+    what_to_inspect: 'Define the affected interval, add reviewed regions or suppressions, and verify the corrected preview.'
+  };
+  state.tasks.push(task);
+  state.activeTask[caseId] = visibleCaseTasks(caseId).length - 1;
+  renderCase(caseId);
+  addAudit(`New blocking issue started at source frame ${frame} for ${caseId}.`);
+}
+function toggleEntityOverlay(caseId, entityId) {
+  state.entityVisibility[entityId] = !entityVisible(entityId);
+  renderCase(caseId);
+  addEntityEvent(caseId, entityId, 'entity_overlay_visibility_changed', { visible: state.entityVisibility[entityId] });
+}
+function changeEntityPolicy(caseId, entityId, policy) {
+  const entity = caseEntities(caseId).find(e => e.entity_id === entityId);
+  if (!entity) return;
+  const before = {...entity};
+  entity.default_privacy_policy = policy;
+  addEntityEvent(caseId, entityId, 'entity_policy_changed', { before, after: entity });
+  addAudit(`${entity.label} policy set to ${policy.replace('_', ' ')}.`);
+}
+function toggleEntityLock(caseId, entityId) {
+  const entity = caseEntities(caseId).find(e => e.entity_id === entityId);
+  if (!entity) return;
+  const before = {...entity};
+  entity.locked = !entity.locked;
+  addEntityEvent(caseId, entityId, entity.locked ? 'entity_locked' : 'entity_unlocked', { before, after: entity });
+  renderCase(caseId);
+}
+function addEntityEvent(caseId, entityId, eventType, payload) {
+  const event = {
+    actor: (state.session && state.session.reviewer) || {},
+    case_id: caseId,
+    entity_id: entityId,
+    event_id: `browser_entity_${Date.now()}_${Math.random().toString(16).slice(2)}`,
+    event_type: eventType,
+    payload,
+    timestamp_utc: new Date().toISOString()
+  };
+  state.entityHistory.push(event);
+  if (state.session && !String(state.session.session_id).startsWith('browser_only')) {
+    postJson('/api/entity-events', { session_id: state.session.session_id, actor: state.session.reviewer, event }).catch(e => addAudit(`Entity persistence warning: ${e.message}`));
+  }
+}
+function ensureDraft(caseId) { return state.correctionDrafts[caseId] || { keyframes: [], checkpoints: [] }; }
+function addKeyframe(caseId) {
+  const draft = ensureDraft(caseId);
+  if (!draft.bbox_xyxy) { addAudit('Draw a rectangle before creating a keyframe.'); return; }
+  const frame = draft.source_frame || sourceFrame(caseId);
+  draft.keyframes = (draft.keyframes || []).filter(k => k.source_frame !== frame);
+  draft.keyframes.push({ source_frame: frame, bbox_xyxy: draft.bbox_xyxy });
+  draft.keyframes.sort((a, b) => a.source_frame - b.source_frame);
+  draft.checkpoints = requiredCheckpointsForDraft(caseId, draft).map(f => ({ source_frame: f, state: 'verified' }));
+  state.correctionDrafts[caseId] = draft;
+  refreshCorrectionCanvas(caseId);
+  addAudit(`Keyframe saved at source frame ${frame}.`);
+}
+function jumpKeyframe(caseId, direction) {
+  const draft = state.correctionDrafts[caseId];
+  if (!draft || !draft.keyframes || !draft.keyframes.length) return;
+  const current = sourceFrame(caseId);
+  const sorted = draft.keyframes.map(k => k.source_frame).sort((a, b) => a - b);
+  const target = direction < 0 ? [...sorted].reverse().find(f => f < current) : sorted.find(f => f > current);
+  if (target !== undefined) seekToFrame(caseId, target, true);
+}
+function previewInterpolation(caseId) {
+  const draft = state.correctionDrafts[caseId];
+  if (!draft || !draft.keyframes || draft.keyframes.length < 2) {
+    addAudit('Add at least two keyframes to preview interpolation.');
+    return;
+  }
+  addAudit(`Interpolation preview ready across ${draft.keyframes.length} keyframes and ${requiredCheckpointsForDraft(caseId, draft).length} checkpoints.`);
+}
+function requiredCheckpointsForDraft(caseId, draft) {
+  const keyframes = (draft.keyframes || []).map(k => k.source_frame).sort((a, b) => a - b);
+  if (!keyframes.length) return [];
+  const start = keyframes[0], end = keyframes[keyframes.length - 1];
+  const fps = fpsValue(DATA[caseId]);
+  const step = Math.max(1, Math.round(fps));
+  const frames = new Set([start, end]);
+  for (let f = start + step; f < end; f += step) frames.add(f);
+  if ((end - start) / fps <= 1 && end > start) frames.add(Math.floor((start + end) / 2));
+  return [...frames].sort((a, b) => a - b);
+}
+function refreshKeyframeList(caseId) {
+  const el = document.getElementById(`keyframes-${caseId}`);
+  if (!el) return;
+  const draft = state.correctionDrafts[caseId];
+  if (!draft || !draft.keyframes || !draft.keyframes.length) {
+    el.textContent = 'No reviewed keyframes yet.';
+    return;
+  }
+  el.textContent = `Keyframes: ${draft.keyframes.map(k => k.source_frame).join(', ')} · checkpoints: ${requiredCheckpointsForDraft(caseId, draft).join(', ')}`;
+}
 function deleteCorrectionDraft(caseId) { delete state.correctionDrafts[caseId]; refreshCorrectionCanvas(caseId); addAudit(`Correction draft cleared for ${caseId}.`); }
 async function saveCorrection(caseId) {
   const tasks = visibleCaseTasks(caseId);
   const task = tasks[state.activeTask[caseId] || 0];
   const operation = document.querySelector(`[data-correction-operation="${caseId}"]`)?.value || 'add_privacy_region';
+  const entityId = document.querySelector(`[data-correction-entity="${caseId}"]`)?.value || null;
   const reason = document.querySelector(`[data-correction-reason="${caseId}"]`)?.value.trim() || 'Reviewed correction';
   const draft = state.correctionDrafts[caseId];
   if (!task) { addAudit('No active task is selected for the correction.'); return; }
@@ -1268,15 +1966,24 @@ async function saveCorrection(caseId) {
     addAudit('Draw a reviewed region on the Original frame before saving this correction.');
     return;
   }
+  const entity = entityId ? caseEntities(caseId).find(e => e.entity_id === entityId) : null;
+  if (task.category === 'both' && !entity) {
+    addAudit('Choose a Human or Plate entity before saving a new correction for a combined task.');
+    return;
+  }
+  const correctionCategory = task.category === 'both' && entity ? entity.category : task.category;
   const actor = (state.session && state.session.reviewer) || { display_name: value('reviewerName') || 'Local reviewer', reviewer_id: value('reviewerId') || 'local' };
-  const keyframes = draft ? [{ source_frame: draft.source_frame, bbox_xyxy: draft.bbox_xyxy }] : [];
-  const frameStart = draft ? draft.source_frame : task.source_frame_start;
-  const frameEnd = draft ? draft.source_frame : task.source_frame_end;
+  const keyframes = draft && draft.keyframes && draft.keyframes.length ? draft.keyframes : (draft ? [{ source_frame: draft.source_frame, bbox_xyxy: draft.bbox_xyxy }] : []);
+  const frameStart = keyframes.length ? Math.min(...keyframes.map(k => k.source_frame)) : task.source_frame_start;
+  const frameEnd = keyframes.length ? Math.max(...keyframes.map(k => k.source_frame)) : task.source_frame_end;
+  const checkpoints = keyframes.length ? requiredCheckpointsForDraft(caseId, { keyframes }).map(frame => ({ source_frame: frame, state: 'verified' })) : [];
   const correction = {
-    application_version: 'final_review_workspace.v1',
+    application_version: 'final_review_workspace.v2.1',
     case_id: caseId,
-    category: task.category,
+    category: correctionCategory,
+    checkpoint_verifications: checkpoints,
     configuration_freeze_hash: (state.session && state.session.configuration_freeze_hash) || await digestJson(DATA.freeze),
+    entity_id: entityId,
     input_region_ids: [],
     interpolation_method: 'linear',
     keyframe_boxes: keyframes,

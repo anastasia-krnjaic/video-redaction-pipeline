@@ -15,7 +15,7 @@ It gives the simplest visual walkthrough: what the system does, what the current
 For review, serve:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_1 --open
 ```
 
 The workspace shows one case at a time:
@@ -26,7 +26,7 @@ The workspace shows one case at a time:
 - Full-video sweep controls
 - Audit trail and local session export
 
-The Night case has compatible Original and Current result media. The Day case now has proven parent-source lineage and a canonical original interval, but the combined Day current result remains blocked until the frozen local model files are supplied and the face/plate pipelines are rerun on that parent interval.
+The Day and Night cases each show only Original and Current result by default. The Day case uses a canonical interval from `artifacts/day_primary.mp4`; its Current result is rendered from lineage-proven frozen face and plate evidence rather than concatenated old clips.
 
 ## How To Read The Labels
 

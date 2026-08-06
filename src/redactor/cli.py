@@ -1815,10 +1815,34 @@ def summarize_final_audit(
     type=click.Path(exists=True, file_okay=False, path_type=Path),
     help="Existing final_pipeline_package_v1 root used as frozen input evidence.",
 )
+@click.option(
+    "--adas-xml",
+    "adas_xml_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Frozen OpenVINO face-detection-adas-0001 XML path. REDACTOR_ADAS_XML is honored.",
+)
+@click.option(
+    "--adas-bin",
+    "adas_bin_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Frozen OpenVINO face-detection-adas-0001 BIN path. REDACTOR_ADAS_BIN is honored.",
+)
+@click.option(
+    "--plate-model",
+    "plate_model_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Frozen OIM YOLOv9-S-608 ONNX path. REDACTOR_OIM_PLATE_MODEL is honored.",
+)
 @click.option("--overwrite", is_flag=True, help="Replace an existing v2 package directory.")
 def build_final_review_workspace(
     output_dir: Path,
     v1_package_root: Path,
+    adas_xml_path: Path | None,
+    adas_bin_path: Path | None,
+    plate_model_path: Path | None,
     overwrite: bool,
 ) -> None:
     """Build the local case-based final review workspace package."""
@@ -1828,6 +1852,9 @@ def build_final_review_workspace(
         summary = review_workspace.build_workspace_package(
             package_root=output_dir,
             v1_package_root=v1_package_root,
+            adas_xml_path=adas_xml_path,
+            adas_bin_path=adas_bin_path,
+            plate_model_path=plate_model_path,
             overwrite=overwrite,
         )
     except (

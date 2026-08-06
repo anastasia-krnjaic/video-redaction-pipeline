@@ -8,14 +8,20 @@ It is generated under:
 artifacts/final_pipeline_package_v2/
 ```
 
-It does not change detectors, thresholds, tracking, evidence accumulation, recovery, or rendering configuration. It gives a reviewer one case at a time, clear tasks, local correction records, an append-only audit trail, and finalization gates.
+The current v2.1 package is generated under:
+
+```text
+artifacts/final_pipeline_package_v2_1/
+```
+
+It does not change detectors, thresholds, tracking, evidence accumulation, recovery, or rendering configuration. It gives a reviewer one case at a time, clear tasks, local correction records, logical privacy entities, an append-only audit trail, and finalization gates.
 
 ## Launch
 
 Serve the package locally:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_1 --open
 ```
 
 The server binds to `127.0.0.1`, serves only files under the package root, supports MP4 range requests for seeking, and writes review sessions only under the package `sessions/` directory.
@@ -42,9 +48,13 @@ Diagnostic face-only, plate-only, provenance, and raw-signal details stay behind
 
 ## Current Day Boundary
 
-The previous day face and day plate outputs came from different extracted clips. Their metadata now maps both clips to a common parent source, `artifacts/day_primary.mp4`, and the v2 package extracts one canonical Day original interval from that parent source.
+The previous day face and day plate outputs came from different extracted clips. Their metadata now maps both clips to a common parent source, `artifacts/day_primary.mp4`, and the v2.1 package extracts one canonical Day original interval from that parent source.
 
-The combined Day current result is not fabricated from incompatible encoded clips. It remains blocked until the frozen face and plate pipelines are rerun on the canonical parent interval with the required local model files.
+The combined Day current result is not fabricated from incompatible encoded clips. It is rendered from lineage-proven frozen evidence mapped into the canonical Day source-frame interval. The build validates the local ADAS XML/BIN and OIM ONNX hashes before packaging.
+
+## Privacy Entities
+
+The workspace indexes automatic and reviewed region tracks into simple reviewer-facing entities such as `Human 1` and `Plate 1`. Raw detector track IDs remain in Technical details. Each entity has separate controls for editor overlay visibility, privacy policy, and reviewed lock state.
 
 ## Review Sessions
 
@@ -98,9 +108,11 @@ Supported correction records include:
 - add privacy region;
 - replace privacy region;
 - suppress existing region;
-- mark region not sensitive.
+- suppress track segment;
+- mark region not sensitive;
+- mark interval not visible or occluded.
 
-Corrections are tied to a case, task, source-video hash, source-frame interval, reviewer identity, reason, keyframe boxes, interpolation method, application version, and configuration freeze hash. Interpolation is bounded to reviewed keyframes inside the task interval; unbounded extrapolation is rejected.
+Corrections are tied to a case, task, entity, source-video hash, source-frame interval, reviewer identity, reason, keyframe boxes, checkpoint verification states, interpolation method, application version, and configuration freeze hash. Interpolation is bounded to reviewed keyframes inside the task interval; unbounded extrapolation is rejected and unreviewed checkpoints block finalization.
 
 ## Finalization
 
@@ -120,7 +132,7 @@ Finalize with:
 
 ```bash
 redactor finalize-reviewed-case \
-  --package-root artifacts/final_pipeline_package_v2 \
+  --package-root artifacts/final_pipeline_package_v2_1 \
   --case-id CASE_ID \
   --session-dir SESSION_DIR
 ```

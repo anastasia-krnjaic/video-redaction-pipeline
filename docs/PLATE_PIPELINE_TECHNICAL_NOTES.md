@@ -282,6 +282,11 @@ plate rendering configuration frozen. Reviewer additions, replacements,
 suppressions, and not-sensitive decisions are stored as append-only
 reviewed-correction events that sit above the automatic plate evidence.
 
+Final Review Workspace v2.1 validates the expected OIM YOLOv9-S-608 ONNX hash
+before packaging. It indexes plate tracks into reviewer-facing entities such as
+`Plate 1`, separates editor overlay visibility from privacy policy, and supports
+multi-keyframe reviewed plate corrections with checkpoint verification.
+
 `redactor finalize-reviewed-case` can render a reviewed-final case only when all
 blocking tasks are green, every correction has been verified, full-video sweep
 acknowledgement exists, source/configuration hashes match, event-log provenance

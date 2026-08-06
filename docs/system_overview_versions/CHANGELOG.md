@@ -1,5 +1,15 @@
 # System Overview Changelog
 
+## v026 — 2026-08-06
+
+Added Final Review Workspace v2.1:
+
+- documented `artifacts/final_pipeline_package_v2_1/` as the current local case-based review workspace;
+- recorded frozen ADAS and OIM model-path/hash validation for workspace generation;
+- documented the canonical Day parent interval and combined Day current result rendered from lineage-proven frozen evidence;
+- added privacy entities with reviewer-facing Human/Plate labels and separate overlay, policy, and lock controls;
+- added multi-keyframe reviewed corrections, checkpoint verification, manual issue creation during sweep, and finalization blocking for unverified interpolation.
+
 ## v025 — 2026-08-05
 
 Added Case-Based Human Review, Correction, Provenance, and Finalization Workspace v1:

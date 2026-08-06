@@ -63,7 +63,7 @@ The current frozen package separates machine-derived results from human-reviewed
 
 The latest plate evidence engine kept day and close/stress behavior stable and increased full-night rendered plate regions substantially. It also preserved review blockers for long ambiguous gaps. This is useful progress, but it is not a final privacy guarantee.
 
-Day face and day plate reference media originally came from different extracted clips. The current review workspace traces both back to a common parent source and extracts one canonical Day original interval, but it does not fabricate a combined result from the old encoded clips. The frozen pipelines must be rerun on that canonical parent interval before a combined Day current result can be reviewed.
+Day face and day plate reference media originally came from different extracted clips. The current review workspace traces both back to a common parent source, extracts one canonical Day interval, and renders a combined current result from lineage-proven frozen face and plate evidence mapped into that interval. It does not concatenate incompatible encoded clips or fabricate source lineage.
 
 Night face and night plate references share the same source video, so the workspace includes a combined Night current result for review.
 
@@ -71,7 +71,7 @@ Night face and night plate references share the same source video, so the worksp
 
 The system does not claim that a clean automatic pass proves every privacy target was found. Some misses are silent: if a face or plate produces no detector, tracker, or review evidence, software alone may not know it was present.
 
-The final package therefore includes a local case-based review workspace. It shows Original and Current result side by side where available, keeps raw machine signals in a technical audit, and presents concise reviewer tasks for unresolved intervals, uncertain tracks, provenance changes, and deterministic spot checks.
+The final package therefore includes a local case-based review workspace. It shows Original and Current result side by side, keeps raw machine signals in a technical audit, and presents concise reviewer tasks for unresolved intervals, uncertain tracks, provenance changes, and deterministic spot checks. Reviewers can also add a privacy issue found during full-video sweep and save category-independent keyframe corrections.
 
 Reviewer decisions and corrections are stored as local append-only events with hash-chain validation. Reviewer identity is declared locally; it is not enterprise authentication.
 
@@ -84,7 +84,7 @@ The prototype is not production-ready and does not claim zero leaks. Known limit
 - Plate previews are still review-required.
 - Some nighttime plate gaps remain unresolved.
 - Some false plate redactions are visible and must be adjudicated.
-- The canonical Day source interval is identified, but the combined Day result still needs a frozen-pipeline rerun with local model files.
+- Human review corrections remain a local provenance layer; they are not model retraining or threshold tuning.
 - Human full-video audit has not yet been completed.
 - Face production tracking is intentionally frozen and has not migrated to the shared evidence engine.
 

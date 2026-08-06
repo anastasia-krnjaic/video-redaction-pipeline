@@ -10,6 +10,7 @@ import numpy as np
 
 from redactor import (
     case_manifests,
+    privacy_entities,
     review_corrections,
     review_finalization,
     review_sessions,
@@ -17,6 +18,7 @@ from redactor import (
 )
 from redactor.privacy_records import (
     APPROVAL_ACCEPTED,
+    CATEGORY_FACE,
     CATEGORY_PLATE,
     PrivacyRegionRecord,
     stable_hash,
@@ -458,3 +460,293 @@ def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> 
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_frozen_model_path_validation_honors_explicit_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adas_xml = tmp_path / "face-detection-adas-0001.xml"
+    adas_bin = tmp_path / "face-detection-adas-0001.bin"
+    plate_model = tmp_path / "yolo-v9-s-608-license-plates-end2end.onnx"
+    adas_xml.write_text("xml", encoding="utf-8")
+    adas_bin.write_text("bin", encoding="utf-8")
+    plate_model.write_text("onnx", encoding="utf-8")
+    monkeypatch.setattr(review_workspace, "EXPECTED_ADAS_XML_SHA256", media_hash(adas_xml))
+    monkeypatch.setattr(review_workspace, "EXPECTED_ADAS_BIN_SHA256", media_hash(adas_bin))
+    monkeypatch.setattr(
+        review_workspace,
+        "EXPECTED_OIM_PLATE_ONNX_SHA256",
+        media_hash(plate_model),
+    )
+
+    paths = review_workspace.resolve_frozen_model_paths(
+        adas_xml_path=adas_xml,
+        adas_bin_path=adas_bin,
+        plate_model_path=plate_model,
+    )
+    validation = review_workspace.validate_frozen_models(paths)
+
+    assert validation["passed"] is True
+    assert validation["files"]["plate_model"]["sha256"] == media_hash(plate_model)
+
+
+def test_frozen_model_path_validation_honors_environment(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adas_xml = tmp_path / "face-detection-adas-0001.xml"
+    adas_bin = tmp_path / "face-detection-adas-0001.bin"
+    plate_model = tmp_path / "yolo-v9-s-608-license-plates-end2end.onnx"
+    for path, text in ((adas_xml, "xml"), (adas_bin, "bin"), (plate_model, "onnx")):
+        path.write_text(text, encoding="utf-8")
+    monkeypatch.setenv("REDACTOR_ADAS_XML", adas_xml.as_posix())
+    monkeypatch.setenv("REDACTOR_ADAS_BIN", adas_bin.as_posix())
+    monkeypatch.setenv("REDACTOR_OIM_PLATE_MODEL", plate_model.as_posix())
+
+    paths = review_workspace.resolve_frozen_model_paths()
+
+    assert paths.adas_xml == adas_xml
+    assert paths.adas_bin == adas_bin
+    assert paths.plate_model == plate_model
+
+
+def test_frozen_model_validation_rejects_historical_plate_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    adas_xml = tmp_path / "face-detection-adas-0001.xml"
+    adas_bin = tmp_path / "face-detection-adas-0001.bin"
+    plate_model = tmp_path / "rtdetr" / "yolo-v9-s-608-license-plates-end2end.onnx"
+    plate_model.parent.mkdir()
+    for path, text in ((adas_xml, "xml"), (adas_bin, "bin"), (plate_model, "onnx")):
+        path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(review_workspace, "EXPECTED_ADAS_XML_SHA256", media_hash(adas_xml))
+    monkeypatch.setattr(review_workspace, "EXPECTED_ADAS_BIN_SHA256", media_hash(adas_bin))
+    monkeypatch.setattr(
+        review_workspace,
+        "EXPECTED_OIM_PLATE_ONNX_SHA256",
+        media_hash(plate_model),
+    )
+
+    try:
+        review_workspace.validate_frozen_models(
+            review_workspace.FrozenModelPaths(adas_xml, adas_bin, plate_model)
+        )
+    except ValueError as exc:
+        assert "rejected historical model" in str(exc)
+    else:  # pragma: no cover
+        raise AssertionError("historical detector path was accepted")
+
+
+def test_privacy_entity_creation_policy_merge_split_and_reassign() -> None:
+    face = privacy_entities.create_entity(case_id="day", category=CATEGORY_FACE)
+    plate_a = privacy_entities.create_entity(case_id="day", category=CATEGORY_PLATE)
+    plate_b = privacy_entities.create_entity(
+        case_id="day",
+        category=CATEGORY_PLATE,
+        existing=[plate_a],
+        automatic_source_track_ids=("track_b",),
+    )
+
+    assert face.label == "Human 1"
+    assert plate_a.label == "Plate 1"
+    assert plate_b.label == "Plate 2"
+
+    kept = privacy_entities.set_entity_policy(plate_a, privacy_entities.POLICY_KEEP_VISIBLE)
+    interval = privacy_entities.set_entity_policy(
+        kept,
+        privacy_entities.POLICY_REVIEW_REQUIRED,
+        frame_start=10,
+        frame_end=20,
+        reason="occluded",
+    )
+    locked = privacy_entities.set_entity_lock(interval, True)
+
+    assert locked.default_privacy_policy == privacy_entities.POLICY_KEEP_VISIBLE
+    assert locked.interval_policy_overrides[0].policy == privacy_entities.POLICY_REVIEW_REQUIRED
+    assert locked.locked is True
+
+    source = privacy_entities.create_entity(
+        case_id="day",
+        category=CATEGORY_PLATE,
+        automatic_source_track_ids=("track_a", "track_c"),
+    )
+    source_after_split, new_entity = privacy_entities.split_entity(
+        entity=source,
+        moved_track_ids=("track_c",),
+        existing=[source],
+    )
+    reassigned_source, reassigned_target = privacy_entities.reassign_region_track(
+        source=source_after_split,
+        target=new_entity,
+        track_id="track_a",
+    )
+
+    assert "track_c" in new_entity.automatic_source_track_ids
+    assert not reassigned_source.automatic_source_track_ids
+    assert set(reassigned_target.automatic_source_track_ids) == {"track_a", "track_c"}
+
+    merged, retired = privacy_entities.merge_entities(primary=plate_b, secondary=reassigned_target)
+    assert set(merged.automatic_source_track_ids) >= {"track_a", "track_c", "track_b"}
+    assert retired.current_status == privacy_entities.STATUS_MERGED
+
+
+def test_privacy_entities_group_face_regions_by_track_not_region_id() -> None:
+    records = [
+        PrivacyRegionRecord(
+            approval_state=APPROVAL_ACCEPTED,
+            bbox_xyxy=(1, 1, 10, 10),
+            category=CATEGORY_FACE,
+            object_id="face_track_6",
+            provenance="detector",
+            render_eligible=True,
+            source_frame=frame,
+            source_record={"region_id": f"face_{frame}", "track_id": "6"},
+        )
+        for frame in (10, 11, 12)
+    ]
+
+    entities = privacy_entities.entities_from_region_records("day", records)
+
+    assert len(entities) == 1
+    assert entities[0].label == "Human 1"
+    assert entities[0].automatic_source_track_ids == ("6",)
+
+
+def test_checkpoint_policy_and_adjustment_revision() -> None:
+    checkpoints = review_corrections.default_checkpoints_for_interval(
+        source_frame_start=0,
+        source_frame_end=90,
+        fps=30.0,
+    )
+    high_motion = review_corrections.required_checkpoint_frames(
+        source_frame_start=0,
+        source_frame_end=30,
+        fps=30.0,
+        high_motion=True,
+    )
+    correction = review_corrections.ReviewCorrection(
+        case_id="day",
+        category=CATEGORY_PLATE,
+        configuration_freeze_hash="hash",
+        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+        keyframes=(
+            review_corrections.CorrectionKeyframe(0, (0, 0, 10, 10)),
+            review_corrections.CorrectionKeyframe(90, (10, 10, 20, 20)),
+        ),
+        operation=review_corrections.OP_ADD,
+        reason="gap",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=90,
+        source_frame_start=0,
+        source_video_hash="source",
+        task_id="task",
+    )
+
+    adjusted = review_corrections.mark_checkpoint(
+        correction,
+        source_frame=45,
+        state=review_corrections.CHECKPOINT_VERIFIED,
+        bbox_xyxy=(5, 5, 15, 15),
+    )
+
+    assert [checkpoint.source_frame for checkpoint in checkpoints] == [0, 30, 60, 90]
+    assert high_motion == (0, 15, 30)
+    assert len(adjusted.keyframes) == 3
+    assert adjusted.previous_revision_id == correction.revision_id
+
+
+def test_finalization_blocks_unreviewed_correction_checkpoint(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_base_region(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    review_sessions.append_sweep_acknowledgement(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        viewed_ranges=[{"start": 0, "end": 4}],
+    )
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_PLATE,
+        checkpoints=(
+            review_corrections.CorrectionCheckpoint(
+                source_frame=0,
+                state=review_corrections.CHECKPOINT_UNREVIEWED,
+            ),
+        ),
+        configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
+        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (10, 10, 30, 20)),),
+        operation=review_corrections.OP_ADD,
+        reason="needs checkpoint",
+        reviewer_identity={"reviewer_id": "analyst@example.test"},
+        source_frame_end=0,
+        source_frame_start=0,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id="task",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        correction=correction,
+    )
+
+    blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+
+    assert blockers["ready"] is False
+    assert any("checkpoint is unreviewed" in blocker for blocker in blockers["blockers"])
+
+
+def test_apply_corrections_maps_parent_source_frames_to_case_local_frames() -> None:
+    correction = review_corrections.ReviewCorrection(
+        case_id="day",
+        category=CATEGORY_PLATE,
+        checkpoints=(
+            review_corrections.CorrectionCheckpoint(
+                source_frame=1828,
+                state=review_corrections.CHECKPOINT_VERIFIED,
+            ),
+            review_corrections.CorrectionCheckpoint(
+                source_frame=1829,
+                state=review_corrections.CHECKPOINT_VERIFIED,
+            ),
+        ),
+        configuration_freeze_hash="hash",
+        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+        keyframes=(
+            review_corrections.CorrectionKeyframe(1828, (1, 1, 10, 10)),
+            review_corrections.CorrectionKeyframe(1829, (2, 2, 11, 11)),
+        ),
+        operation=review_corrections.OP_ADD,
+        reason="reviewed",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=1829,
+        source_frame_start=1828,
+        source_video_hash="source",
+        task_id="task",
+    )
+
+    final_regions, provenance = review_finalization.apply_corrections(
+        [],
+        [correction],
+        case_id="day",
+        source_frame_offset=1828,
+    )
+
+    assert [region.source_frame for region in final_regions] == [0, 1]
+    assert final_regions[0].source_record["source_frame"] == 1828
+    assert provenance["final_region_count"] == 2
+
+
+def media_hash(path: Path) -> str:
+    from redactor import media
+
+    return media.sha256_file(path)
