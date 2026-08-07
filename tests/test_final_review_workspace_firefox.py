@@ -42,7 +42,7 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
     package = Path(
         os.environ.get(
             "REDACTOR_FIREFOX_WORKSPACE",
-            "artifacts/final_pipeline_package_v2_3_3",
+            "artifacts/final_pipeline_package_v2_3_4",
         )
     )
     if not package.exists():
@@ -85,7 +85,17 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
                 entity_count = page.locator("#entitiesModal .entity-card").count()
                 assert entity_count > 0
                 assert "Unresolved evidence" in page.locator("#entitiesModal").inner_text()
+                assert page.locator("#entitySearch").count() == 0
+                assert page.locator("#entitiesModal .policy-segment").count() > 0
                 record_step(report, "entity_modal", entity_count=entity_count)
+
+                page.locator("#entitiesModal [data-filter='unresolved']").click()
+                assert "Unresolved evidence" in page.locator("#entitiesModal").inner_text()
+                assert page.evaluate(
+                    "() => DATA.entities.unresolved_evidence_by_case.day.fragment_count > 0"
+                )
+                page.locator("#entitiesModal [data-filter='all']").click()
+                record_step(report, "unresolved_filter")
 
                 representative_frame = page.locator("#entitiesModal .entity-card").first.evaluate(
                     "node => Number((findEntity('day', node.dataset.entityId) || {})"
@@ -99,34 +109,38 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
                 )
                 record_step(report, "representative_thumbnail_jump", frame=representative_frame)
 
-                overlap_pair = page.evaluate(
-                    """() => {
-                      const rows = effectiveEntities('day');
-                      for (let i = 0; i < rows.length; i++) {
-                        for (let j = i + 1; j < rows.length; j++) {
-                          const sameCategory = rows[i].category === rows[j].category;
-                          if (sameCategory && entitiesOverlap(rows[i], rows[j])) {
-                            return [rows[i].entity_id, rows[j].entity_id];
-                          }
-                        }
-                      }
-                      return null;
-                    }"""
+                page.get_by_role("button", name="Entities").click()
+                page.locator("#entitiesModal.open").wait_for()
+                dialog_seen = False
+                page.on(
+                    "dialog", lambda dialog: (_ for _ in ()).throw(AssertionError(dialog.message))
                 )
-                if overlap_pair:
-                    page.get_by_role("button", name="Entities").click()
-                    page.once("dialog", lambda dialog: dialog.accept(overlap_pair[1]))
-                    merge_selector = (
-                        f'#entitiesModal .entity-card[data-entity-id="{overlap_pair[0]}"] '
-                        '[data-action="entity-merge"]'
-                    )
-                    page.locator(merge_selector).click()
-                    page.wait_for_function(
-                        "() => document.querySelector('#sessionBanner')"
-                        "?.textContent.includes('Merge rejected')",
-                        timeout=3000,
-                    )
-                    record_step(report, "simultaneous_merge_rejection", pair=overlap_pair)
+                first_entity_id = page.locator("#entitiesModal .entity-card").first.get_attribute(
+                    "data-entity-id"
+                )
+                with page.expect_response("**/api/entity-events"):
+                    page.locator(
+                        f'#entitiesModal .entity-card[data-entity-id="{first_entity_id}"] '
+                        '[data-policy="keep_visible"]'
+                    ).click()
+                assert (
+                    page.locator(
+                        f'#entitiesModal .entity-card[data-entity-id="{first_entity_id}"] '
+                        '[data-policy="keep_visible"]'
+                    ).get_attribute("aria-pressed")
+                    == "true"
+                )
+                record_step(report, "policy_segment_no_prompt", dialog_seen=dialog_seen)
+
+                page.locator(
+                    f'#entitiesModal .entity-card[data-entity-id="{first_entity_id}"] '
+                    '[data-action="entity-merge"]'
+                ).click()
+                page.locator("#mergeModal.open").wait_for()
+                assert page.locator("#mergeModal .merge-card").count() >= 0
+                assert "entity_" not in page.locator("#mergeModal").inner_text()
+                record_step(report, "visual_merge_modal")
+                page.keyboard.press("Escape")
 
                 page.keyboard.press("Escape")
                 page.wait_for_function(
@@ -231,6 +245,13 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
                 assert page.evaluate("state.frame.day") == frame_after_right - 1
                 record_step(report, "single_frame_keys")
 
+                before_shift = page.evaluate("state.frame.day")
+                page.keyboard.press("Shift+ArrowRight")
+                assert page.evaluate("state.frame.day") == before_shift + 10
+                page.keyboard.press("Shift+ArrowLeft")
+                assert page.evaluate("state.frame.day") == before_shift
+                record_step(report, "ten_frame_keys")
+
                 page.locator("#case-day.active [data-action='fullscreen']").click()
                 page.wait_for_function(
                     "() => document.fullscreenElement && "
@@ -248,6 +269,13 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
                 assert page.evaluate("state.session?.session_id") == session_id
                 assert session_id in page.locator("#sessionBanner").inner_text()
                 assert page.evaluate("(taskId) => Boolean(state.decisions[taskId])", first_task_id)
+                assert (
+                    page.evaluate(
+                        "(entityId) => findEntity('day', entityId)?.current_policy",
+                        first_entity_id,
+                    )
+                    == "keep_visible"
+                )
                 record_step(report, "reload_state_restoration")
                 report["passed"] = True
             finally:

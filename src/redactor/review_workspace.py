@@ -43,11 +43,11 @@ from redactor.privacy_records import (
     stable_hash,
 )
 
-SCHEMA_VERSION = "final_review_workspace.v2.3.3"
+SCHEMA_VERSION = "final_review_workspace.v2.3.4"
 DAY_PARENT_PATH = Path("artifacts/day_primary.mp4")
 DAY_CANONICAL_SOURCE_FRAME_START = 1828
 DAY_CANONICAL_SOURCE_FRAME_END = 5694
-PREVIOUS_FROZEN_WORKSPACE_PACKAGE = Path("artifacts/final_pipeline_package_v2_3_2")
+PREVIOUS_FROZEN_WORKSPACE_PACKAGE = Path("artifacts/final_pipeline_package_v2_3_3")
 
 EXPECTED_ADAS_XML_SHA256 = "ef8fb491060e64da9d31893045f36dbb24f59455308e961274dd234190db997b"
 EXPECTED_ADAS_BIN_SHA256 = "54883903421c8ee5289334ca4da779976a8be66daf7d57e45d005d0bc2b8c637"
@@ -1321,6 +1321,10 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
     generation_audit_by_case: dict[str, Any] = {}
     metrics_by_case: dict[str, Any] = {}
     merge_audit_by_case: dict[str, Any] = {}
+    cluster_audit_by_case: dict[str, Any] = {}
+    cannot_link_audit_by_case: dict[str, Any] = {}
+    pairwise_audit_by_case: dict[str, Any] = {}
+    scores_by_case: dict[str, list[dict[str, Any]]] = {}
     profile = review_entity_profile()
     for case_id in ("day", "night"):
         region_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
@@ -1335,6 +1339,10 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
             generation_audit_by_case[case_id] = empty_entity_generation_audit(case_id)
             metrics_by_case[case_id] = empty_entity_metrics(case_id)
             merge_audit_by_case[case_id] = empty_entity_merge_audit(case_id)
+            cluster_audit_by_case[case_id] = empty_entity_merge_audit(case_id)
+            cannot_link_audit_by_case[case_id] = {"case_id": case_id, "pairs": []}
+            pairwise_audit_by_case[case_id] = {"case_id": case_id, "pairs": []}
+            scores_by_case[case_id] = []
             write_json(
                 package_root / "entities" / f"{case_id}.json",
                 {"case_id": case_id, "entities": [], "schema_version": "privacy_entities.v1"},
@@ -1342,7 +1350,7 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
             continue
         records = review_finalization.load_privacy_region_records(region_path)
         manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
-        tracklets = review_entity_tracklets(case_id, records, manifest)
+        tracklets = review_entity_tracklets(case_id, records, manifest, package_root)
         previous_entities = privacy_entities.entities_from_region_records(case_id, records)
         accumulation = ReviewEntityAccumulator(profile).accumulate(
             case_id=case_id,
@@ -1396,6 +1404,10 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
         )
         metrics_by_case[case_id] = accumulation.metrics()
         merge_audit_by_case[case_id] = accumulation.merge_audit()
+        cluster_audit_by_case[case_id] = accumulation.cluster_audit()
+        cannot_link_audit_by_case[case_id] = accumulation.cannot_link_audit()
+        pairwise_audit_by_case[case_id] = accumulation.pairwise_audit()
+        scores_by_case[case_id] = [tracklet.to_dict() for tracklet in accumulation.tracklets]
         contact_sheets = write_entity_contact_sheets(
             package_root=package_root,
             manifest=manifest,
@@ -1448,12 +1460,25 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
         },
     )
     write_json(
-        package_root / "review_entity_profile.json",
+        package_root / "review_entity_evidence_profile.json",
         {
             "configuration_hash": stable_hash(profile),
             "profile": profile,
-            "schema_version": "review_entity_profile.v1",
+            "schema_version": "review_entity_evidence_profile.v1",
         },
+    )
+    shutil.copy2(
+        package_root / "review_entity_evidence_profile.json",
+        package_root / "review_entity_profile.json",
+    )
+    write_text(
+        package_root / "review_entity_evidence_scores.jsonl",
+        "\n".join(
+            json.dumps({"case_id": case_id, **score}, sort_keys=True)
+            for case_id, rows in sorted(scores_by_case.items())
+            for score in rows
+        )
+        + "\n",
     )
     write_json(
         package_root / "entity_generation_audit.json",
@@ -1477,11 +1502,59 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
         },
     )
     write_json(
+        package_root / "review_entity_before_after_metrics.json",
+        {
+            "cases": metrics_by_case,
+            "created_at_utc": media.utc_timestamp(),
+            "schema_version": "review_entity_before_after_metrics.v1",
+        },
+    )
+    write_json(
         package_root / "review_entity_merge_audit.json",
         {
             "cases": merge_audit_by_case,
             "created_at_utc": media.utc_timestamp(),
             "schema_version": "review_entity_merge_audit.v1",
+        },
+    )
+    write_json(
+        package_root / "review_entity_clusters.json",
+        {
+            "cases": cluster_audit_by_case,
+            "created_at_utc": media.utc_timestamp(),
+            "schema_version": "review_entity_clusters.v1",
+        },
+    )
+    write_json(
+        package_root / "review_entity_pairwise_audit.json",
+        {
+            "cases": pairwise_audit_by_case,
+            "created_at_utc": media.utc_timestamp(),
+            "schema_version": "review_entity_pairwise_audit.v1",
+        },
+    )
+    write_json(
+        package_root / "review_entity_cannot_link_audit.json",
+        {
+            "cases": cannot_link_audit_by_case,
+            "created_at_utc": media.utc_timestamp(),
+            "schema_version": "review_entity_cannot_link_audit.v1",
+        },
+    )
+    write_json(
+        package_root / "review_entity_consolidation_audit.json",
+        {
+            "cases": {
+                case_id: {
+                    "clusters": cluster_audit_by_case.get(case_id, {}),
+                    "generation": generation_audit_by_case.get(case_id, {}),
+                    "metrics": metrics_by_case.get(case_id, {}),
+                    "pairwise": pairwise_audit_by_case.get(case_id, {}),
+                }
+                for case_id in sorted(metrics_by_case)
+            },
+            "created_at_utc": media.utc_timestamp(),
+            "schema_version": "review_entity_consolidation_audit.v1",
         },
     )
     audit = {
@@ -1504,32 +1577,64 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
 
 def review_entity_profile() -> dict[str, Any]:
     return {
+        "appearance_encoder": {
+            "descriptor": "deterministic_hsv_luma_edge_crop_descriptor",
+            "license": "project-local deterministic OpenCV descriptor; no model weights",
+            "network_runtime": False,
+            "schema_version": "review_appearance_encoder.v1",
+            "source": "redactor.review_workspace.DeterministicCropAppearanceEncoder",
+        },
         "categories": {
             CATEGORY_FACE: {
                 "attachment_max_gap_seconds": 1.0,
+                "auto_cluster_min_pair_score": 0.82,
                 "confirmed_min_density": 0.2,
                 "confirmed_min_observations": 30,
+                "confirmed_score_threshold": 0.58,
                 "max_aspect_delta": 0.85,
                 "max_norm_center_distance": 0.095,
                 "max_scale_ratio": 2.3,
+                "min_appearance_similarity": 0.72,
                 "needs_review_min_observations": 15,
+                "needs_review_score_threshold": 0.38,
                 "short_gap_survival_seconds": 1.0,
             },
             CATEGORY_PLATE: {
                 "attachment_max_gap_seconds": 0.8,
+                "auto_cluster_min_pair_score": 0.84,
                 "confirmed_min_density": 0.18,
                 "confirmed_min_observations": 12,
+                "confirmed_score_threshold": 0.56,
                 "max_aspect_delta": 1.15,
                 "max_norm_center_distance": 0.11,
                 "max_scale_ratio": 2.6,
+                "min_appearance_similarity": 0.74,
                 "needs_review_min_observations": 6,
+                "needs_review_score_threshold": 0.34,
                 "short_gap_survival_seconds": 0.8,
             },
+        },
+        "component_weights": {
+            "appearance_quality": 0.09,
+            "aspect_ratio_stability": 0.06,
+            "center_motion_continuity": 0.08,
+            "confidence_lower_tail": 0.09,
+            "confidence_median": 0.09,
+            "confidence_peak": 0.05,
+            "crop_quality": 0.09,
+            "density": 0.09,
+            "duration": 0.08,
+            "edge_clipping": -0.06,
+            "geometry_stability": 0.08,
+            "internal_gap_burden": -0.08,
+            "observation_count": 0.1,
+            "provenance_support": 0.08,
+            "scale_motion_continuity": 0.06,
         },
         "notes": [
             "This profile controls only the user-facing review entity registry.",
             "It does not change detector outputs, tracker outputs, privacy regions, rendering, or finalization.",
-            "Conservative attachment is temporal evidence grouping, not identity recognition.",
+            "Conservative attachment is temporal/appearance review grouping, not identity recognition.",
         ],
         "states": [
             "unconfirmed",
@@ -1539,12 +1644,14 @@ def review_entity_profile() -> dict[str, Any]:
             "unresolved",
             "closed",
         ],
-        "schema_version": "review_entity_profile.v1",
+        "schema_version": "review_entity_evidence_profile.v2",
     }
 
 
 @dataclass(frozen=True)
 class ReviewTrackletEvidence:
+    appearance_descriptor: tuple[float, ...]
+    appearance_quality: float
     aspect_ratio_stability: float
     bbox_xyxy: tuple[int, int, int, int]
     category: str
@@ -1552,8 +1659,12 @@ class ReviewTrackletEvidence:
     confidence_p10: float | None
     crop_quality: float
     density: float
+    detector_confidence_max: float | None
+    detector_confidence_median: float | None
     duration_seconds: float
     edge_penalty: float
+    evidence_components: dict[str, float]
+    evidence_score: float
     first_frame: int
     geometry_stability: float
     jump_penalty: float
@@ -1568,6 +1679,8 @@ class ReviewTrackletEvidence:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "appearance_descriptor": [round(value, 6) for value in self.appearance_descriptor],
+            "appearance_quality": round(self.appearance_quality, 6),
             "aspect_ratio_stability": round(self.aspect_ratio_stability, 6),
             "bbox_xyxy": list(self.bbox_xyxy),
             "category": self.category,
@@ -1575,8 +1688,14 @@ class ReviewTrackletEvidence:
             "confidence_p10": self.confidence_p10,
             "crop_quality": round(self.crop_quality, 6),
             "density": round(self.density, 6),
+            "detector_confidence_max": self.detector_confidence_max,
+            "detector_confidence_median": self.detector_confidence_median,
             "duration_seconds": round(self.duration_seconds, 6),
             "edge_penalty": round(self.edge_penalty, 6),
+            "evidence_components": {
+                key: round(value, 6) for key, value in sorted(self.evidence_components.items())
+            },
+            "evidence_score": round(self.evidence_score, 6),
             "first_frame": self.first_frame,
             "geometry_stability": round(self.geometry_stability, 6),
             "jump_penalty": round(self.jump_penalty, 6),
@@ -1605,13 +1724,19 @@ class AttachmentDecision:
     child_track_id: str
     parent_track_id: str | None
     accepted: bool
+    appearance_similarity: float
+    components: dict[str, float]
+    gap_frames: int | None
     reason: str
     score: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "accepted": self.accepted,
+            "appearance_similarity": round(self.appearance_similarity, 6),
             "child_track_id": self.child_track_id,
+            "components": {key: round(value, 6) for key, value in sorted(self.components.items())},
+            "gap_frames": self.gap_frames,
             "parent_track_id": self.parent_track_id,
             "reason": self.reason,
             "score": round(self.score, 6),
@@ -1631,15 +1756,19 @@ class ReviewEntityAccumulationResult:
         previous = len(self.tracklets)
         confirmed = sum(1 for entity in self.user_entities if entity.state == "confirmed")
         needs_review = sum(1 for entity in self.user_entities if entity.state == "unresolved")
+        attached = sum(1 for decision in self.attachment_decisions if decision.accepted)
         return {
-            "attached_fragment_count": sum(
-                1 for decision in self.attachment_decisions if decision.accepted
+            "attached_fragment_count": attached,
+            "automatic_clustered_entity_count": sum(
+                1 for entity in self.user_entities if len(entity.member_track_ids) > 1
             ),
             "confirmed_entity_count": confirmed,
             "needs_review_entity_count": needs_review,
             "new_user_facing_entity_count": len(self.user_entities),
             "previous_user_facing_entity_count": previous,
             "raw_tracklet_count": previous,
+            "reduction_from_attachment_count": attached,
+            "reduction_from_unresolved_filtering_count": len(self.unresolved_fragments),
             "rejected_merge_count": len(self.rejected_merge_decisions),
             "sampled_suspected_false_merge_count": 0,
             "schema_version": "review_entity_metrics.v1",
@@ -1657,6 +1786,51 @@ class ReviewEntityAccumulationResult:
             "simultaneous_overlap_rejections": [
                 decision.to_dict() for decision in self.simultaneous_overlap_rejections
             ],
+        }
+
+    def cluster_audit(self) -> dict[str, Any]:
+        return {
+            "clusters": [
+                {
+                    "category": entity.category,
+                    "child_fragment_ids": list(entity.member_track_ids),
+                    "grouping_confidence": round(
+                        max(
+                            [
+                                decision.score
+                                for decision in self.attachment_decisions
+                                if decision.accepted
+                                and decision.parent_track_id in entity.member_track_ids
+                            ]
+                            or [1.0]
+                        ),
+                        6,
+                    ),
+                    "representative_track_id": entity.representative_track_id,
+                    "state": entity.state,
+                }
+                for entity in self.user_entities
+            ],
+            "schema_version": "review_entity_clusters.v1",
+        }
+
+    def pairwise_audit(self) -> dict[str, Any]:
+        return {
+            "pairs": [
+                decision.to_dict()
+                for decision in (
+                    *self.attachment_decisions,
+                    *self.rejected_merge_decisions,
+                    *self.simultaneous_overlap_rejections,
+                )
+            ],
+            "schema_version": "review_entity_pairwise_audit.v1",
+        }
+
+    def cannot_link_audit(self) -> dict[str, Any]:
+        return {
+            "pairs": [decision.to_dict() for decision in self.simultaneous_overlap_rejections],
+            "schema_version": "review_entity_cannot_link_audit.v1",
         }
 
     def entity_state_for_tracks(self, track_ids: list[str]) -> str:
@@ -1797,12 +1971,14 @@ class ReviewEntityAccumulator:
         if (
             tracklet.observation_count >= category_profile["confirmed_min_observations"]
             and tracklet.density >= category_profile["confirmed_min_density"]
+            and tracklet.evidence_score >= category_profile["confirmed_score_threshold"]
             and tracklet.geometry_stability >= 0.15
             and tracklet.jump_penalty < 0.9
         ):
             return "confirmed"
         if (
             tracklet.observation_count >= category_profile["needs_review_min_observations"]
+            and tracklet.evidence_score >= category_profile["needs_review_score_threshold"]
             and tracklet.geometry_stability >= 0.08
             and tracklet.crop_quality >= 0.02
         ):
@@ -1837,7 +2013,10 @@ class ReviewEntityAccumulator:
         ):
             return AttachmentDecision(
                 accepted=False,
+                appearance_similarity=appearance_similarity(parent, child),
                 child_track_id=child.source_track_id,
+                components={"temporal_overlap": 1.0},
+                gap_frames=0,
                 parent_track_id=parent.source_track_id,
                 reason="simultaneous_same_category_visibility",
                 score=0.0,
@@ -1849,7 +2028,10 @@ class ReviewEntityAccumulator:
         if gap_frames > max_gap:
             return AttachmentDecision(
                 accepted=False,
+                appearance_similarity=appearance_similarity(parent, child),
                 child_track_id=child.source_track_id,
+                components={"gap_frames": float(gap_frames), "max_gap_frames": float(max_gap)},
+                gap_frames=gap_frames,
                 parent_track_id=parent.source_track_id,
                 reason="gap_too_large_for_review_entity_attachment",
                 score=0.0,
@@ -1857,21 +2039,46 @@ class ReviewEntityAccumulator:
         center_distance = normalized_center_distance(parent.bbox_xyxy, child.bbox_xyxy)
         scale_ratio = bbox_scale_ratio(parent.bbox_xyxy, child.bbox_xyxy)
         aspect_delta = abs(bbox_aspect(parent.bbox_xyxy) - bbox_aspect(child.bbox_xyxy))
+        appearance = appearance_similarity(parent, child)
+        center_component = max(
+            0.0,
+            1.0 - center_distance / max(0.001, profile["max_norm_center_distance"]),
+        )
+        scale_component = max(
+            0.0,
+            1.0 - max(0.0, scale_ratio - 1.0) / max(0.001, profile["max_scale_ratio"]),
+        )
+        aspect_component = max(
+            0.0,
+            1.0 - aspect_delta / max(0.001, profile["max_aspect_delta"]),
+        )
+        gap_component = max(0.0, 1.0 - gap_frames / max(1.0, max_gap))
         score = max(
             0.0,
-            1.0
-            - center_distance / max(0.001, profile["max_norm_center_distance"])
-            - max(0.0, scale_ratio - 1.0) / max(0.001, profile["max_scale_ratio"])
-            - aspect_delta / max(0.001, profile["max_aspect_delta"]),
+            0.34 * center_component
+            + 0.22 * scale_component
+            + 0.16 * aspect_component
+            + 0.18 * appearance
+            + 0.10 * gap_component,
         )
         accepted = (
             center_distance <= profile["max_norm_center_distance"]
             and scale_ratio <= profile["max_scale_ratio"]
             and aspect_delta <= profile["max_aspect_delta"]
+            and appearance >= profile["min_appearance_similarity"]
+            and score >= profile["auto_cluster_min_pair_score"]
         )
         return AttachmentDecision(
             accepted=accepted,
+            appearance_similarity=appearance,
             child_track_id=child.source_track_id,
+            components={
+                "aspect": aspect_component,
+                "center": center_component,
+                "gap": gap_component,
+                "scale": scale_component,
+            },
+            gap_frames=gap_frames,
             parent_track_id=parent.source_track_id,
             reason="compatible_short_gap_fragment" if accepted else "spatial_motion_incompatible",
             score=score,
@@ -1891,19 +2098,30 @@ def review_entity_tracklets(
     case_id: str,
     records: list[PrivacyRegionRecord],
     manifest: case_manifests.CaseManifest,
+    package_root: Path,
 ) -> list[ReviewTrackletEvidence]:
     del case_id
     grouped: dict[tuple[str, str], list[PrivacyRegionRecord]] = defaultdict(list)
     for record in records:
         grouped[(record.category, record_track_id(record))].append(record)
-    return [
-        tracklet_evidence(
-            category, track_id, sorted(items, key=lambda item: item.source_frame), manifest
-        )
-        for (category, track_id), items in sorted(
-            grouped.items(), key=lambda pair: (pair[0][0], pair[1][0].source_frame, pair[0][1])
-        )
-    ]
+    source_path = package_root / str(manifest.source_path or "")
+    capture = cv.VideoCapture(str(source_path)) if source_path.exists() else None
+    try:
+        return [
+            tracklet_evidence(
+                category,
+                track_id,
+                sorted(items, key=lambda item: item.source_frame),
+                manifest,
+                capture,
+            )
+            for (category, track_id), items in sorted(
+                grouped.items(), key=lambda pair: (pair[0][0], pair[1][0].source_frame, pair[0][1])
+            )
+        ]
+    finally:
+        if capture is not None:
+            capture.release()
 
 
 def tracklet_evidence(
@@ -1911,6 +2129,7 @@ def tracklet_evidence(
     track_id: str,
     records: list[PrivacyRegionRecord],
     manifest: case_manifests.CaseManifest,
+    capture: Any | None = None,
 ) -> ReviewTrackletEvidence:
     frames = [record.source_frame for record in records]
     first = min(frames)
@@ -1934,7 +2153,28 @@ def tracklet_evidence(
     ]
     frame_gaps = [frames[i] - frames[i - 1] - 1 for i in range(1, len(frames))]
     crop_quality = representative_tracklet_quality(records, manifest)
+    appearance_descriptor, appearance_quality = DeterministicCropAppearanceEncoder().encode(
+        records,
+        capture,
+    )
+    components = review_evidence_components(
+        confidences=confidences,
+        crop_quality=crop_quality,
+        density=len(records) / max(1, span),
+        duration_seconds=span / fps,
+        edge_penalty_value=edge_penalty(bbox, manifest),
+        geometry_stability_value=0.5 * stability_score(areas) + 0.5 * stability_score(aspects),
+        observation_count=len(records),
+        provenance_counts=provenance_counts,
+        scale_motion_continuity=stability_score(areas),
+        center_motion_continuity=1.0 - min(1.0, median(center_jumps) / 160.0),
+        aspect_ratio_stability=stability_score(aspects),
+        large_internal_gap_penalty=min(1.0, max(frame_gaps or [0]) / max(1.0, fps)),
+        appearance_quality=appearance_quality,
+    )
     return ReviewTrackletEvidence(
+        appearance_descriptor=appearance_descriptor,
+        appearance_quality=appearance_quality,
         aspect_ratio_stability=stability_score(aspects),
         bbox_xyxy=bbox,
         category=category,
@@ -1942,8 +2182,12 @@ def tracklet_evidence(
         confidence_p10=percentile(confidences, 10) if confidences else None,
         crop_quality=crop_quality,
         density=len(records) / max(1, span),
+        detector_confidence_max=max(confidences) if confidences else None,
+        detector_confidence_median=percentile(confidences, 50) if confidences else None,
         duration_seconds=span / fps,
         edge_penalty=edge_penalty(bbox, manifest),
+        evidence_components=components,
+        evidence_score=review_evidence_score(components, review_entity_profile()),
         first_frame=first,
         geometry_stability=0.5 * stability_score(areas) + 0.5 * stability_score(aspects),
         jump_penalty=min(1.0, max(center_jumps or [0.0]) / 420.0),
@@ -1967,6 +2211,137 @@ def confidence_for_record(record: PrivacyRegionRecord) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+class DeterministicCropAppearanceEncoder:
+    """Small review-only descriptor; this is not identity recognition."""
+
+    schema_version = "deterministic_crop_appearance_encoder.v1"
+
+    def encode(
+        self,
+        records: list[PrivacyRegionRecord],
+        capture: Any | None,
+    ) -> tuple[tuple[float, ...], float]:
+        if capture is None or not records:
+            return (0.0,) * 18, 0.0
+        selected = max(records, key=lambda record: bbox_area(record.bbox_xyxy))
+        capture.set(cv.CAP_PROP_POS_FRAMES, int(selected.source_frame))
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            return (0.0,) * 18, 0.0
+        x1, y1, x2, y2 = selected.bbox_xyxy
+        height, width = frame.shape[:2]
+        x1, x2 = sorted((clamp_int(x1, 0, width), clamp_int(x2, 0, width)))
+        y1, y2 = sorted((clamp_int(y1, 0, height), clamp_int(y2, 0, height)))
+        crop = frame[y1:y2, x1:x2]
+        if crop.size == 0:
+            return (0.0,) * 18, 0.0
+        resized = cv.resize(crop, (32, 32), interpolation=cv.INTER_AREA)
+        hsv = cv.cvtColor(resized, cv.COLOR_BGR2HSV)
+        gray = cv.cvtColor(resized, cv.COLOR_BGR2GRAY)
+        hist_h = cv.calcHist([hsv], [0], None, [8], [0, 180]).flatten()
+        hist_s = cv.calcHist([hsv], [1], None, [4], [0, 256]).flatten()
+        hist_v = cv.calcHist([hsv], [2], None, [4], [0, 256]).flatten()
+        descriptor = [
+            *normalize_vector(hist_h),
+            *normalize_vector(hist_s),
+            *normalize_vector(hist_v),
+        ]
+        descriptor.extend(
+            [
+                float(gray.mean()) / 255.0,
+                min(1.0, float(gray.std()) / 90.0),
+            ]
+        )
+        sharpness = min(1.0, cv.Laplacian(gray, cv.CV_64F).var() / 600.0)
+        quality = max(0.0, min(1.0, 0.55 * sharpness + 0.45 * min(1.0, crop.size / 8000.0)))
+        return tuple(float(value) for value in descriptor), quality
+
+
+def review_evidence_components(
+    *,
+    confidences: list[float],
+    crop_quality: float,
+    density: float,
+    duration_seconds: float,
+    edge_penalty_value: float,
+    geometry_stability_value: float,
+    observation_count: int,
+    provenance_counts: Counter[str],
+    scale_motion_continuity: float,
+    center_motion_continuity: float,
+    aspect_ratio_stability: float,
+    large_internal_gap_penalty: float,
+    appearance_quality: float,
+) -> dict[str, float]:
+    directly_observed = sum(
+        provenance_counts.get(name, 0)
+        for name in (
+            "detector",
+            "ordinary_tracker",
+            "plate_detector_observation",
+            "reviewed_correction",
+        )
+    )
+    total = sum(provenance_counts.values()) or 1
+    return {
+        "appearance_quality": max(0.0, min(1.0, appearance_quality)),
+        "aspect_ratio_stability": max(0.0, min(1.0, aspect_ratio_stability)),
+        "center_motion_continuity": max(0.0, min(1.0, center_motion_continuity)),
+        "confidence_lower_tail": max(0.0, min(1.0, percentile(confidences, 10)))
+        if confidences
+        else 0.0,
+        "confidence_median": max(0.0, min(1.0, percentile(confidences, 50)))
+        if confidences
+        else 0.5,
+        "confidence_peak": max(0.0, min(1.0, max(confidences))) if confidences else 0.5,
+        "crop_quality": max(0.0, min(1.0, crop_quality)),
+        "density": max(0.0, min(1.0, density)),
+        "duration": max(0.0, min(1.0, duration_seconds / 4.0)),
+        "edge_clipping": max(0.0, min(1.0, edge_penalty_value)),
+        "geometry_stability": max(0.0, min(1.0, geometry_stability_value)),
+        "internal_gap_burden": max(0.0, min(1.0, large_internal_gap_penalty)),
+        "observation_count": max(0.0, min(1.0, observation_count / 40.0)),
+        "provenance_support": max(0.0, min(1.0, directly_observed / total)),
+        "scale_motion_continuity": max(0.0, min(1.0, scale_motion_continuity)),
+    }
+
+
+def review_evidence_score(components: dict[str, float], profile: dict[str, Any]) -> float:
+    weights = profile["component_weights"]
+    raw = sum(float(weights.get(key, 0.0)) * float(value) for key, value in components.items())
+    positive_weight = sum(float(value) for value in weights.values() if float(value) > 0)
+    negative_floor = sum(abs(float(value)) for value in weights.values() if float(value) < 0)
+    if positive_weight <= 0:
+        return 0.0
+    return max(0.0, min(1.0, (raw + negative_floor) / (positive_weight + negative_floor)))
+
+
+def appearance_similarity(left: ReviewTrackletEvidence, right: ReviewTrackletEvidence) -> float:
+    if not left.appearance_descriptor or not right.appearance_descriptor:
+        return 0.0
+    if len(left.appearance_descriptor) != len(right.appearance_descriptor):
+        return 0.0
+    distance = math.sqrt(
+        sum(
+            (float(a) - float(b)) ** 2
+            for a, b in zip(left.appearance_descriptor, right.appearance_descriptor, strict=True)
+        )
+    )
+    return max(0.0, min(1.0, 1.0 - distance / 2.0))
+
+
+def normalize_vector(values: Any) -> list[float]:
+    floats = [float(value) for value in values]
+    total = sum(floats)
+    if total <= 0:
+        return [0.0 for _ in floats]
+    return [value / total for value in floats]
+
+
+def clamp_int(value: int, low: int, high: int) -> int:
+    return max(low, min(high, int(value)))
 
 
 def track_status(records: list[PrivacyRegionRecord]) -> str:
@@ -2007,7 +2382,7 @@ def privacy_entity_from_accumulated(
             "schema_version": "review_accumulated_entity_uuid.v1",
         }
     )[:32]
-    return privacy_entities.create_entity(
+    entity = privacy_entities.create_entity(
         case_id=case_id,
         category=item.category,
         existing=existing,
@@ -2024,6 +2399,31 @@ def privacy_entity_from_accumulated(
             "track_ids": list(item.member_track_ids),
         },
     )
+    if item.state != "confirmed":
+        entity = replace(entity, label=next_possible_entity_label(item.category, existing))
+    return entity
+
+
+def next_possible_entity_label(
+    category: str,
+    existing: list[privacy_entities.PrivacyEntity],
+) -> str:
+    prefix = "Possible person" if category == CATEGORY_FACE else "Possible plate"
+    used: set[int] = set()
+    for entity in existing:
+        if entity.category != category:
+            continue
+        parts = entity.label.split()
+        if (
+            len(parts) == 3
+            and f"{parts[0]} {parts[1]}".lower() == prefix.lower()
+            and parts[2].isdigit()
+        ):
+            used.add(int(parts[2]))
+    index = 1
+    while index in used:
+        index += 1
+    return f"{prefix} {index:02d}"
 
 
 def unresolved_fragment_payload(
@@ -3490,8 +3890,8 @@ def index_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Final Review Workspace v2.3.3</title>
-  <link rel="stylesheet" href="assets/workspace.css?v=2.3.3">
+  <title>Final Review Workspace v2.3.4</title>
+  <link rel="stylesheet" href="assets/workspace.css?v=2.3.4">
 </head>
 <body>
   <header class="app-header">
@@ -3542,7 +3942,22 @@ def index_html() -> str:
       <div id="entitiesModalContent"></div>
     </div>
   </section>
-  <script src="assets/workspace.js?v=2.3.3"></script>
+  <section id="mergeModal" class="modal" aria-hidden="true">
+    <div class="modal-card large">
+      <div class="case-header">
+        <div>
+          <h2>Merge review objects</h2>
+          <p class="case-subtitle">Suggested candidates are review-only groupings, not identity recognition.</p>
+        </div>
+        <button id="cancelMerge">Cancel</button>
+      </div>
+      <div id="mergeModalContent"></div>
+      <div class="button-row">
+        <button id="confirmMerge" class="primary">Merge selected</button>
+      </div>
+    </div>
+  </section>
+  <script src="assets/workspace.js?v=2.3.4"></script>
 </body>
 </html>
 """
@@ -3615,6 +4030,8 @@ main { padding: 16px 20px 44px; }
 .stat strong { display: block; font-size: 19px; }
 .filter-row { display: flex; gap: 7px; margin: 8px 0 10px; }
 .filter-row button.active { background: #172033; color: #fff; }
+.entity-filter-row { display: flex; flex-wrap: wrap; gap: 7px; margin: 0 0 10px; }
+.entity-filter-row button.active { background: #172033; color: #fff; border-color: #172033; }
 .task-list { display: grid; gap: 8px; }
 .task-card, .entity-card, .edit-card, .audit-card { border: 1px solid #d8dee8; border-radius: 8px; background: #fff; padding: 10px; }
 .task-card.selected { border-color: #0f766e; box-shadow: 0 0 0 2px rgba(15,118,110,.16); }
@@ -3634,7 +4051,16 @@ main { padding: 16px 20px 44px; }
 .object-list { display: grid; gap: 8px; margin-top: 8px; }
 .entity-card { display: grid; grid-template-columns: 76px minmax(0,1fr); gap: 9px; align-items: start; }
 .entity-card img { width: 76px; height: 56px; object-fit: cover; border-radius: 5px; background: #e5e7eb; cursor: pointer; }
-.entity-card .entity-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
+.entity-card .entity-actions { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.policy-segment { display: inline-flex; flex-wrap: wrap; gap: 4px; border: 1px solid #d8dee8; border-radius: 7px; padding: 3px; background: #f8fafc; }
+.policy-segment button { border-radius: 5px; border-color: transparent; padding: 5px 7px; }
+.policy-segment button[aria-pressed="true"][data-policy="redact"] { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+.policy-segment button[aria-pressed="true"][data-policy="keep_visible"] { background: #ecfdf5; border-color: #a7f3d0; color: #065f46; }
+.policy-segment button[aria-pressed="true"][data-policy="not_sensitive"] { background: #f3f4f6; border-color: #cbd5e1; color: #374151; }
+.merge-candidates { display: grid; gap: 8px; margin: 12px 0; }
+.merge-card { display: grid; grid-template-columns: 86px minmax(0,1fr) auto; gap: 10px; align-items: center; border: 1px solid #d8dee8; border-radius: 8px; padding: 8px; background: #fff; }
+.merge-card.selected { border-color: #0f766e; box-shadow: 0 0 0 2px rgba(15,118,110,.14); }
+.merge-card img { width: 86px; height: 62px; object-fit: cover; border-radius: 5px; background: #e5e7eb; }
 .badge { display: inline-block; border-radius: 999px; padding: 2px 7px; font-size: 12px; background: #e2e8f0; color: #334155; }
 .badge.open { background: #fef2f2; color: #991b1b; } .badge.done { background: #ecfdf5; color: #047857; } .badge.warn { background: #fff7ed; color: #9a3412; }
 .editor-canvas-wrap { position: relative; background: #020617; border-radius: 6px; overflow: hidden; }
@@ -3657,7 +4083,7 @@ main { padding: 16px 20px 44px; }
 
 def workspace_js() -> str:
     return r"""
-const APP_VERSION = 'final_review_workspace.v2.3.3';
+const APP_VERSION = 'final_review_workspace.v2.3.4';
 const ACTIONS = {
   looks: 'looks_correct', leak: 'privacy_leak', partial: 'partial_coverage',
   falseRedaction: 'false_redaction', wrong: 'wrong_target', notSensitive: 'not_sensitive',
@@ -3672,10 +4098,11 @@ const state = {
   filter: { day: 'Open', night: 'Open' }, selectedTask: { day: null, night: null },
   session: null, attribution: null, decisions: {}, events: [], corrections: [], latestReviewed: {},
   draft: { caseId: null, start: null, end: null, keyframes: [], selectedEntityId: null, selectedTaskId: null },
-  savedFlash: {}, entityOverrides: {}, manualTasks: []
+  savedFlash: {}, entityOverrides: {}, manualTasks: [],
+  mergeDraft: { caseId: null, sourceEntityId: null, targetEntityId: null }
 };
 
-function storageKey(name) { return `final-review-v2.3.3:${location.pathname}:${name}`; }
+function storageKey(name) { return `final-review-v2.3.4:${location.pathname}:${name}`; }
 async function loadJson(path) { const res = await fetch(path, { cache: 'no-store' }); if (!res.ok) throw new Error(`${path}: ${res.status}`); return res.json(); }
 async function postJson(path, payload) { const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await res.json().catch(() => ({})); if (!res.ok || data.ok === false) throw new Error(data.error || `${path}: ${res.status}`); return data; }
 function esc(value) { return String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -3837,7 +4264,7 @@ function setDecisionError(button, message) { const card = button?.closest('.task
 function decisionNote(action, task) { if (action === ACTIONS.leak || action === ACTIONS.partial) return 'Reviewer marked this item for correction.'; if (action === ACTIONS.falseRedaction) return 'Reviewer requested bounded redaction removal.'; return `Reviewer selected ${actionLabel(action)} for ${task?.review_task_id || 'task'}.`; }
 function requiresEditor(task) { const d = state.decisions[task.review_task_id]; return d && [ACTIONS.leak, ACTIONS.partial, ACTIONS.falseRedaction, ACTIONS.wrong].includes(d.action); }
 
-function editPanelHtml(caseId) { const task = selectedTask(caseId); const draft = state.draft.caseId === caseId ? state.draft : {start:null,end:null,keyframes:[]}; return `<div class="edit-section"><section class="edit-card"><h3>Selected issue</h3><p class="task-title">${esc(task ? cleanTaskTitle(task) : 'No issue selected')}</p><p class="task-meta">${task ? `source ${task.source_frame_start}-${task.source_frame_end}` : 'Choose a review item or add an issue at the current frame.'}</p><div class="button-row"><button data-action="add-issue">Add issue at current frame</button><button data-action="back-review">Back to Review</button></div></section><section class="edit-card"><h3>Correction interval</h3><div class="button-row"><button data-action="set-start">Set start at current frame</button><button data-action="set-end">Set end at current frame</button></div><p class="muted">Start: ${draft.start ?? 'not set'} · End: ${draft.end ?? 'not set'} · ${draft.start !== null && draft.end !== null ? `${Math.abs(draft.end-draft.start)+1} frames` : 'set boundaries first'}</p></section><section class="edit-card"><h3>Keyframes</h3><div class="editor-canvas-wrap"><canvas id="editorCanvas-${caseId}" width="640" height="360"></canvas></div><div class="button-row"><button data-action="add-keyframe">Add keyframe at current frame</button><button data-action="barrier">Add not-visible / scene-cut barrier</button></div><div class="keyframe-list">${draft.keyframes.map(k => `<div class="keyframe-row"><span>Frame ${k.source_frame}</span><span>${k.bbox_xyxy.join(', ')}</span><button data-action="delete-keyframe" data-frame="${k.source_frame}">Delete</button></div>`).join('') || '<p class="muted">No keyframes yet.</p>'}</div></section><section class="edit-card"><h3>Preview and save</h3><div class="button-row"><button class="primary" data-action="preview-correction">Preview correction</button><button data-action="save-correction">Save correction revision</button><button data-action="verify-correction">Verify corrected interval</button><button data-action="discard-draft">Discard draft</button></div><p class="muted" id="correctionPreview-${caseId}">${state.latestReviewed[caseId] ? `Latest reviewed preview: ${esc(state.latestReviewed[caseId].path)}` : 'No correction preview yet.'}</p></section><section class="edit-card"><h3>Objects</h3><div class="inline-actions"><input data-action="entity-search" placeholder="Search objects"><select data-action="entity-filter"><option value="all">All</option><option value="face">People</option><option value="license_plate">Plates</option></select></div><div class="object-list">${entityCardsHtml(caseId)}</div></section></div>`; }
+function editPanelHtml(caseId) { const task = selectedTask(caseId); const draft = state.draft.caseId === caseId ? state.draft : {start:null,end:null,keyframes:[]}; return `<div class="edit-section"><section class="edit-card"><h3>Selected issue</h3><p class="task-title">${esc(task ? cleanTaskTitle(task) : 'No issue selected')}</p><p class="task-meta">${task ? `source ${task.source_frame_start}-${task.source_frame_end}` : 'Choose a review item or add an issue at the current frame.'}</p><div class="button-row"><button data-action="add-issue">Add issue at current frame</button><button data-action="back-review">Back to Review</button></div></section><section class="edit-card"><h3>Correction interval</h3><div class="button-row"><button data-action="set-start">Set start at current frame</button><button data-action="set-end">Set end at current frame</button></div><p class="muted">Start: ${draft.start ?? 'not set'} · End: ${draft.end ?? 'not set'} · ${draft.start !== null && draft.end !== null ? `${Math.abs(draft.end-draft.start)+1} frames` : 'set boundaries first'}</p></section><section class="edit-card"><h3>Keyframes</h3><div class="editor-canvas-wrap"><canvas id="editorCanvas-${caseId}" width="640" height="360"></canvas></div><div class="button-row"><button data-action="add-keyframe">Add keyframe at current frame</button><button data-action="barrier">Add not-visible / scene-cut barrier</button></div><div class="keyframe-list">${draft.keyframes.map(k => `<div class="keyframe-row"><span>Frame ${k.source_frame}</span><span>${k.bbox_xyxy.join(', ')}</span><button data-action="delete-keyframe" data-frame="${k.source_frame}">Delete</button></div>`).join('') || '<p class="muted">No keyframes yet.</p>'}</div></section><section class="edit-card"><h3>Preview and save</h3><div class="button-row"><button class="primary" data-action="preview-correction">Preview correction</button><button data-action="save-correction">Save correction revision</button><button data-action="verify-correction">Verify corrected interval</button><button data-action="discard-draft">Discard draft</button></div><p class="muted" id="correctionPreview-${caseId}">${state.latestReviewed[caseId] ? `Latest reviewed preview: ${esc(state.latestReviewed[caseId].path)}` : 'No correction preview yet.'}</p></section><section class="edit-card"><h3>Objects</h3><div class="entity-filter-row">${entityFilterButtons('all')}</div><div class="object-list">${entityCardsHtml(caseId)}</div>${unresolvedEvidenceHtml(caseId)}</section></div>`; }
 function bindEditPanel(caseId) { const panel = document.getElementById(`case-${caseId}`); panel.querySelector('[data-action="back-review"]')?.addEventListener('click', () => setMode(caseId, 'review')); panel.querySelector('[data-action="set-start"]')?.addEventListener('click', () => { ensureDraft(caseId); state.draft.start = sourceFrame(caseId); renderCase(caseId); }); panel.querySelector('[data-action="set-end"]')?.addEventListener('click', () => { ensureDraft(caseId); state.draft.end = sourceFrame(caseId); renderCase(caseId); }); panel.querySelector('[data-action="add-keyframe"]')?.addEventListener('click', () => addDraftKeyframe(caseId)); panel.querySelector('[data-action="barrier"]')?.addEventListener('click', () => addDraftBarrier(caseId)); panel.querySelector('[data-action="discard-draft"]')?.addEventListener('click', () => { state.draft = { caseId: null, start: null, end: null, keyframes: [], selectedEntityId: null, selectedTaskId: null }; renderCase(caseId); }); panel.querySelector('[data-action="preview-correction"]')?.addEventListener('click', () => saveCorrection(caseId, {previewOnly:true})); panel.querySelector('[data-action="save-correction"]')?.addEventListener('click', () => saveCorrection(caseId)); panel.querySelector('[data-action="verify-correction"]')?.addEventListener('click', () => verifyCorrection(caseId)); panel.querySelector('[data-action="add-issue"]')?.addEventListener('click', () => createManualIssue(caseId, sourceFrame(caseId), sourceFrame(caseId), 'Reviewer discovered issue')); panel.querySelectorAll('[data-action="delete-keyframe"]').forEach(btn => btn.addEventListener('click', () => { state.draft.keyframes = state.draft.keyframes.filter(k => String(k.source_frame) !== btn.dataset.frame); renderCase(caseId); })); drawEditorCanvas(caseId); }
 function ensureDraft(caseId) { if (state.draft.caseId !== caseId) state.draft = { caseId, start: null, end: null, keyframes: [], selectedEntityId: null, selectedTaskId: state.selectedTask[caseId] }; }
 function addDraftKeyframe(caseId) { ensureDraft(caseId); const frame = sourceFrame(caseId); const box = defaultDraftBox(caseId); const existing = state.draft.keyframes.filter(k => k.source_frame !== frame); state.draft.keyframes = [...existing, { source_frame: frame, bbox_xyxy: box }].sort((a,b) => a.source_frame-b.source_frame); if (state.draft.start === null) state.draft.start = frame; if (state.draft.end === null) state.draft.end = frame; renderCase(caseId); }
@@ -3848,21 +4275,37 @@ async function saveCorrection(caseId, opts = {}) { if (!state.session) return sh
 async function verifyCorrection(caseId) { const task = selectedTask(caseId); if (!task) return; await recordDecision(caseId, task.review_task_id, ACTIONS.looks); }
 async function createManualIssue(caseId, startSource, endSource, reason) { const task = { blocking: true, case_id: caseId, category: 'license_plate', correction_required: true, decision_state: 'pending', issue_type: 'reviewer_created_issue', normal_task_class: 'reviewer_created_issue', raw_signal_ids: [], review_task_id: `manual_${caseId}_${Date.now()}`, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: startSource, source_frame_end: endSource, technical_only: false, title: 'Reviewer-created issue', what_happened: 'A reviewer added this issue during full-video review.', what_to_inspect: 'Open in editor, add a reviewed correction if privacy protection is needed.' }; if (state.session) await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'manual_issue_created', case_id: caseId, entity_id: null, payload: { after: { task } } } }); state.manualTasks.push(task); state.selectedTask[caseId] = task.review_task_id; refreshSidePanel(caseId, {preserveScroll:true}); return task; }
 
-function entityCardsHtml(caseId) { const entities = effectiveEntities(caseId).slice(0, 100); return entities.map(entity => `<article class="entity-card" data-entity-id="${esc(entity.entity_id)}"><img src="${esc(entity.representative_thumbnail_path || '')}" alt="${esc(entity.label)} thumbnail" data-action="jump-entity"><div><div class="task-title">${esc(entity.label)}${entity.possible_duplicate ? ' · possible duplicate' : ''}</div><div class="task-meta">${entity.category === 'face' ? 'Person' : 'Plate'} · source ${entity.first_visible_source_frame ?? '?'}-${entity.last_visible_source_frame ?? '?'}</div><p class="muted">${esc(entityEvidenceText(entity))}</p><span class="badge ${entity.current_policy === 'review_required' ? 'open' : 'done'}">${policyLabel(entity.current_policy || entity.default_privacy_policy)}</span></div><div class="entity-actions"><button data-action="entity-redact">Redact</button><button data-action="entity-keep">Keep visible</button><button data-action="entity-invalid">${entity.category === 'face' ? 'Not a person' : 'Not a plate'}</button><button data-action="entity-merge">Merge with...</button></div><details><summary>Technical details</summary><pre>${esc(JSON.stringify({entity_id: entity.entity_id, state: entity.review_entity_state, tracks: entity.member_detector_tracker_ids || entity.automatic_source_track_ids, attached_fragments: entity.attached_fragment_track_ids || [], provenance: entity.created_provenance, possible_duplicates: entity.possible_duplicate_suggestions || []}, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No review objects available.</p>'; }
+function entityFilterButtons(active) { const rows = [['all','All'], ['face','People'], ['license_plate','Plates'], ['needs_review','Needs review'], ['unresolved','Unresolved evidence']]; return rows.map(([value,label]) => `<button data-action="entity-filter" data-filter="${value}" class="${value === active ? 'active' : ''}">${label}</button>`).join(''); }
+function entityCardsHtml(caseId, filter = 'all') {
+  const entities = effectiveEntities(caseId).filter(entity => entityMatchesFilter(entity, filter)).slice(0, 100);
+  const cards = entities.map(entity => {
+    const policy = entity.current_policy || entity.default_privacy_policy || 'redact';
+    return `<article class="entity-card" data-entity-id="${esc(entity.entity_id)}" data-category="${esc(entity.category)}" data-policy="${esc(policy)}"><img src="${esc(entity.representative_thumbnail_path || '')}" alt="${esc(entity.label)} thumbnail" data-action="jump-entity"><div><div class="task-title">${esc(entity.label)}${entity.possible_duplicate ? ' · possible duplicate' : ''}</div><div class="task-meta">${entity.category === 'face' ? 'Person' : 'Plate'} · source ${entity.first_visible_source_frame ?? '?'}-${entity.last_visible_source_frame ?? '?'}</div><p class="muted">${esc(entityEvidenceText(entity))}</p><span class="badge ${policy === 'review_required' ? 'open' : 'done'}">${policyLabel(policy)}</span></div><div class="entity-actions"><div class="policy-segment" role="group" aria-label="${esc(entity.label)} policy"><button data-action="entity-policy" data-policy="redact" aria-pressed="${policy === 'redact'}">Redact</button><button data-action="entity-policy" data-policy="keep_visible" aria-pressed="${policy === 'keep_visible'}">Keep visible</button><button data-action="entity-policy" data-policy="not_sensitive" aria-pressed="${policy === 'not_sensitive'}">${entity.category === 'face' ? 'Not a person' : 'Not a plate'}</button></div><button data-action="entity-merge">Merge...</button></div><details><summary>Technical details</summary><pre>${esc(JSON.stringify({entity_id: entity.entity_id, state: entity.review_entity_state, tracks: entity.member_detector_tracker_ids || entity.automatic_source_track_ids, attached_fragments: entity.attached_fragment_track_ids || [], child_ids: entity.member_detector_tracker_ids || [], provenance: entity.created_provenance, possible_duplicates: entity.possible_duplicate_suggestions || []}, null, 2))}</pre></details></article>`;
+  }).join('');
+  if (filter === 'unresolved') return unresolvedEvidenceHtml(caseId) || '<p class="muted">No unresolved evidence.</p>';
+  return cards || '<p class="muted">No review objects match this filter.</p>';
+}
+function entityMatchesFilter(entity, filter) { if (filter === 'all') return true; if (filter === 'face' || filter === 'license_plate') return entity.category === filter; if (filter === 'needs_review') return (entity.current_policy || entity.default_privacy_policy) === 'review_required' || entity.review_entity_state === 'unresolved'; return true; }
 function entityEvidenceText(entity) { const summary = entity.evidence_summary || {}; const observations = summary.review_observation_count || summary.region_count || 0; const seconds = entity.first_visible_timestamp_seconds !== undefined && entity.last_visible_timestamp_seconds !== undefined ? Math.max(0, Number(entity.last_visible_timestamp_seconds) - Number(entity.first_visible_timestamp_seconds)) : null; const duration = seconds === null ? '' : ` across ${seconds.toFixed(1)} s`; const tracklets = summary.review_tracklet_count || summary.tracklet_count || 1; return `${observations} observations${duration} · ${tracklets} tracklet${tracklets === 1 ? '' : 's'}`; }
 function effectiveEntities(caseId) { const base = (DATA.entities?.cases?.[caseId] || []).map(e => ({...e, ...(state.entityOverrides[e.entity_id] || {})})); return base.filter(e => e.current_status !== 'merged'); }
 function unresolvedEvidence(caseId) { return DATA.entities?.unresolved_evidence?.[caseId] || DATA.entities?.cases_unresolved?.[caseId] || DATA.entities?.unresolved?.[caseId] || null; }
 function unresolvedEvidenceHtml(caseId) { const unresolved = unresolvedEvidence(caseId) || DATA.entities?.case_unresolved?.[caseId] || null; const casePayload = DATA.entities?.unresolved_evidence_by_case?.[caseId] || unresolved; const fragments = casePayload?.fragments || []; const count = casePayload?.fragment_count ?? fragments.length; if (!count) return ''; return `<details class="technical"><summary>Unresolved evidence (${count})</summary><p class="muted">Low-evidence unmatched fragments are preserved for audit but are not named as separate reviewer objects.</p><pre>${esc(JSON.stringify(fragments.slice(0, 50), null, 2))}</pre></details>`; }
-function bindEntityPanel(caseId, root = document.getElementById(`case-${caseId}`)) { if (!root) return; root.querySelectorAll('[data-action="jump-entity"]').forEach(img => img.addEventListener('click', () => { const entity = findEntity(caseId, img.closest('.entity-card').dataset.entityId); if (entity?.representative_source_frame !== undefined) { closeEntities(); seekToFrame(caseId, entity.representative_source_frame - caseData(caseId).source_frame_start); } })); root.querySelectorAll('[data-action="entity-redact"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'redact'))); root.querySelectorAll('[data-action="entity-keep"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'keep_visible'))); root.querySelectorAll('[data-action="entity-invalid"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'not_sensitive'))); root.querySelectorAll('[data-action="entity-merge"]').forEach(btn => btn.addEventListener('click', () => mergeEntityPrompt(caseId, btn.closest('.entity-card').dataset.entityId))); }
-function openEntities(caseId) { const modal = document.getElementById('entitiesModal'); const content = document.getElementById('entitiesModalContent'); content.innerHTML = `<div class="inline-actions"><input id="entitySearch" placeholder="Search objects"><select id="entityFilter"><option value="all">All</option><option value="face">People</option><option value="license_plate">Plates</option></select></div><div class="object-list">${entityCardsHtml(caseId)}</div>${unresolvedEvidenceHtml(caseId)}<details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; modal.dataset.caseId = caseId; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); bindEntityPanel(caseId, content); const search = content.querySelector('#entitySearch'); const filter = content.querySelector('#entityFilter'); const apply = () => filterEntityCards(content, search.value, filter.value); search.addEventListener('input', apply); filter.addEventListener('change', apply); }
-function filterEntityCards(root, query, category) { const q = String(query || '').toLowerCase(); root.querySelectorAll('.entity-card').forEach(card => { const entity = findEntity(root.closest('.modal')?.dataset.caseId || visibleCaseId(), card.dataset.entityId); const text = card.textContent.toLowerCase(); const matchesQuery = !q || text.includes(q); const matchesCategory = category === 'all' || entity?.category === category; card.style.display = matchesQuery && matchesCategory ? '' : 'none'; }); }
+function bindEntityPanel(caseId, root = document.getElementById(`case-${caseId}`)) { if (!root) return; root.querySelectorAll('[data-action="jump-entity"]').forEach(img => img.addEventListener('click', () => { const entity = findEntity(caseId, img.closest('.entity-card').dataset.entityId); if (entity?.representative_source_frame !== undefined) { closeEntities(); seekToFrame(caseId, entity.representative_source_frame - caseData(caseId).source_frame_start); } })); root.querySelectorAll('[data-action="entity-policy"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, btn.dataset.policy))); root.querySelectorAll('[data-action="entity-merge"]').forEach(btn => btn.addEventListener('click', () => openMergeModal(caseId, btn.closest('.entity-card').dataset.entityId))); root.querySelectorAll('[data-action="entity-filter"]').forEach(btn => btn.addEventListener('click', () => applyEntityFilter(root, caseId, btn.dataset.filter))); }
+function openEntities(caseId) { const modal = document.getElementById('entitiesModal'); const content = document.getElementById('entitiesModalContent'); content.innerHTML = `<div class="entity-filter-row">${entityFilterButtons('all')}</div><div class="object-list">${entityCardsHtml(caseId)}</div><details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; modal.dataset.caseId = caseId; modal.dataset.filter = 'all'; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); bindEntityPanel(caseId, content); }
+function applyEntityFilter(root, caseId, filter) { const modal = root.closest('.modal'); if (modal) modal.dataset.filter = filter; const objectList = root.querySelector('.object-list'); const filters = root.querySelector('.entity-filter-row'); if (filters) filters.innerHTML = entityFilterButtons(filter); if (objectList) objectList.innerHTML = entityCardsHtml(caseId, filter); bindEntityPanel(caseId, root); }
 function closeEntities() { const modal = document.getElementById('entitiesModal'); if (!modal) return; modal.classList.remove('open'); modal.setAttribute('aria-hidden', 'true'); }
 function possibleDuplicateSuggestions(caseId) { const entities = effectiveEntities(caseId); const suggestions = []; for (let i=0; i<entities.length; i++) for (let j=i+1; j<entities.length; j++) { const a=entities[i], b=entities[j]; if (a.category !== b.category || entitiesOverlap(a,b)) continue; const gap = Math.max(0, Math.max(a.first_visible_source_frame || 0, b.first_visible_source_frame || 0) - Math.min(a.last_visible_source_frame || 0, b.last_visible_source_frame || 0)); if (gap <= 30) suggestions.push({entity_ids:[a.entity_id,b.entity_id], labels:[a.label,b.label], reason:'nearby_non_overlapping_tracklets'}); } return suggestions.slice(0, 20); }
 function findEntity(caseId, id) { return effectiveEntities(caseId).find(e => e.entity_id === id); }
 function policyLabel(policy) { return {redact:'Redact', keep_visible:'Keep visible', not_sensitive:'Invalid / not sensitive', review_required:'Needs review'}[policy] || policy; }
-async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; let reason = 'Reviewer object policy update.'; if (policy !== 'redact') { reason = (window.prompt(`Reason for ${policyLabel(policy)}?`, '') || '').trim(); if (!reason) return; } const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; if (verificationTaskId) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after } }, reason }); refreshSidePanel(caseId, {preserveScroll:true}); if (document.getElementById('entitiesModal')?.classList.contains('open')) openEntities(caseId); }
+async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; const reason = 'Reviewer object policy update.'; const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; if (verificationTaskId && !state.manualTasks.some(t => t.review_task_id === verificationTaskId)) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after, child_track_ids: entity.member_detector_tracker_ids || entity.automatic_source_track_ids || [] } }, reason }); refreshSidePanel(caseId, {preserveScroll:true}); refreshOpenEntities(caseId); }
 function policyTask(caseId, entity, taskId) { return { blocking: true, case_id: caseId, category: entity.category, correction_required: false, decision_state: 'pending', issue_type: 'entity_policy_verification', raw_signal_ids: [], review_task_id: taskId, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: entity.first_visible_source_frame || caseData(caseId).source_frame_start, source_frame_end: entity.first_visible_source_frame || caseData(caseId).source_frame_start, technical_only: false, title: `Verify ${policyLabel(entity.current_policy)} for ${entity.label}`, what_to_inspect: 'Confirm this object policy is correct before finalization.' }; }
-async function mergeEntityPrompt(caseId, entityId) { if (!state.session) return showSessionError('Start review before merging objects.'); const source = findEntity(caseId, entityId); const candidates = effectiveEntities(caseId).filter(e => e.entity_id !== entityId && e.category === source.category); const targetId = (window.prompt(`Merge ${source.label} with which ID?\n${candidates.map(e => `${e.entity_id}: ${e.label}`).join('\n')}`, '') || '').trim(); const target = findEntity(caseId, targetId); if (!target) return; if (entitiesOverlap(source, target)) return showSessionError('Merge rejected: these objects are simultaneously visible.'); const reason = (window.prompt('Reason for merging these objects?', '') || '').trim(); if (!reason) return; const before = { source, target }; const merged = {...source, member_detector_tracker_ids: [...new Set([...(source.member_detector_tracker_ids || []), ...(target.member_detector_tracker_ids || [])])], merge_split_lineage: [...(source.merge_split_lineage || []), { operation:'merge', merged_entity_id: target.entity_id }]}; state.entityOverrides[source.entity_id] = merged; state.entityOverrides[target.entity_id] = {...target, current_status:'merged'}; await postJson('/api/entities/merge', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, before_state: before, after_state: { primary: merged, retired_entity_ids: [target.entity_id] }, reason }); refreshSidePanel(caseId, {preserveScroll:true}); if (document.getElementById('entitiesModal')?.classList.contains('open')) openEntities(caseId); }
+function refreshOpenEntities(caseId) { const modal = document.getElementById('entitiesModal'); if (!modal?.classList.contains('open')) return; const content = document.getElementById('entitiesModalContent'); const filter = modal.dataset.filter || 'all'; content.innerHTML = `<div class="entity-filter-row">${entityFilterButtons(filter)}</div><div class="object-list">${entityCardsHtml(caseId, filter)}</div><details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; bindEntityPanel(caseId, content); }
+function openMergeModal(caseId, entityId) { if (!state.session) return showSessionError('Start review before merging objects.'); const source = findEntity(caseId, entityId); if (!source) return; const modal = document.getElementById('mergeModal'); const content = document.getElementById('mergeModalContent'); const candidates = mergeCandidates(caseId, source); state.mergeDraft = {caseId, sourceEntityId: entityId, targetEntityId: candidates[0]?.entity_id || null}; content.innerHTML = `<p class="task-title">Merge ${esc(source.label)} with...</p><p class="muted">Only same-category, non-overlapping candidates are shown.</p><div class="merge-candidates">${candidates.map((candidate, index) => mergeCandidateHtml(candidate, index === 0)).join('') || '<p class="muted">No safe merge candidates are available.</p>'}</div>`; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); content.querySelectorAll('.merge-card').forEach(card => card.addEventListener('click', () => { state.mergeDraft.targetEntityId = card.dataset.entityId; content.querySelectorAll('.merge-card').forEach(item => item.classList.toggle('selected', item === card)); })); }
+function mergeCandidateHtml(candidate, selected) { return `<article class="merge-card ${selected ? 'selected' : ''}" data-entity-id="${esc(candidate.entity_id)}"><img src="${esc(candidate.representative_thumbnail_path || '')}" alt="${esc(candidate.label)} thumbnail"><div><div class="task-title">${esc(candidate.label)}</div><p class="task-meta">source ${candidate.first_visible_source_frame ?? '?'}-${candidate.last_visible_source_frame ?? '?'} · ${esc(candidate.similarity_label || 'Medium')} similarity</p><p class="muted">${esc(candidate.merge_reason || 'Compatible review-object evidence')}</p></div><input type="radio" ${selected ? 'checked' : ''} aria-label="Select ${esc(candidate.label)}"></article>`; }
+function mergeCandidates(caseId, source) { return effectiveEntities(caseId).filter(e => e.entity_id !== source.entity_id && e.category === source.category && !entitiesOverlap(source, e)).map(e => { const gap = entityGap(source, e); const suggested = (source.possible_duplicate_suggestions || []).find(s => (s.child_track_id && (e.member_detector_tracker_ids || []).includes(s.child_track_id)) || (s.parent_track_id && (e.member_detector_tracker_ids || []).includes(s.parent_track_id))); const score = Number(suggested?.score || (gap <= 30 ? 0.65 : 0.45)); const reason = suggested ? 'Similar review evidence, but not automatically merged.' : `Temporal gap ${gap} frames`; return {...e, merge_score: score, similarity_label: score >= 0.8 ? 'High' : 'Medium', merge_reason: reason}; }).sort((a,b) => b.merge_score - a.merge_score || (a.first_visible_source_frame || 0) - (b.first_visible_source_frame || 0)).slice(0, 12); }
+async function confirmMerge() { const {caseId, sourceEntityId, targetEntityId} = state.mergeDraft || {}; if (!caseId || !sourceEntityId || !targetEntityId) return showSessionError('Choose one merge candidate first.'); const source = findEntity(caseId, sourceEntityId); const target = findEntity(caseId, targetEntityId); if (!source || !target) return; if (entitiesOverlap(source, target)) return showSessionError('Merge rejected: these objects are simultaneously visible.'); const before = { source, target }; const merged = {...source, member_detector_tracker_ids: [...new Set([...(source.member_detector_tracker_ids || []), ...(target.member_detector_tracker_ids || [])])], automatic_source_track_ids: [...new Set([...(source.automatic_source_track_ids || []), ...(target.automatic_source_track_ids || [])])], merge_split_lineage: [...(source.merge_split_lineage || []), { operation:'merge', merged_entity_id: target.entity_id, source_entity_ids:[source.entity_id, target.entity_id] }]}; state.entityOverrides[source.entity_id] = merged; state.entityOverrides[target.entity_id] = {...target, current_status:'merged'}; await postJson('/api/entities/merge', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, before_state: before, after_state: { primary: merged, retired_entity_ids: [target.entity_id], source_entity_ids:[source.entity_id, target.entity_id] }, reason: 'Reviewer confirmed visual merge.' }); closeMergeModal(); refreshSidePanel(caseId, {preserveScroll:true}); refreshOpenEntities(caseId); }
+function closeMergeModal() { const modal = document.getElementById('mergeModal'); if (!modal) return; modal.classList.remove('open'); modal.setAttribute('aria-hidden', 'true'); state.mergeDraft = { caseId: null, sourceEntityId: null, targetEntityId: null }; }
+function entityGap(a,b) { const a1=a.first_visible_source_frame, a2=a.last_visible_source_frame, b1=b.first_visible_source_frame, b2=b.last_visible_source_frame; if ([a1,a2,b1,b2].some(v => v === null || v === undefined)) return 999999; if (entitiesOverlap(a,b)) return 0; return Math.max(0, Math.max(a1,b1) - Math.min(a2,b2)); }
 function entitiesOverlap(a,b) { const a1=a.first_visible_source_frame, a2=a.last_visible_source_frame, b1=b.first_visible_source_frame, b2=b.last_visible_source_frame; if ([a1,a2,b1,b2].some(v => v === null || v === undefined)) return false; return Math.max(a1,b1) <= Math.min(a2,b2); }
 
 async function restoreSession() { const sessionId = localStorage.getItem(storageKey('session_id')); if (!sessionId) return; try { await loadSessionState(sessionId); } catch { localStorage.removeItem(storageKey('session_id')); } }
@@ -3879,8 +4322,8 @@ function renderAudit() { const panel = document.getElementById('case-audit'); pa
 function renderFinal() { const panel = document.getElementById('case-final'); panel.innerHTML = `<h2>Final Results</h2><p class="case-subtitle">Reviewed-final outputs remain unavailable until finalization gates pass.</p><div class="final-card"><p class="muted">Finalization is currently controlled by the same validated backend gates. Use Review/Edit to resolve blockers, then finalize from the supported workflow.</p><div class="button-row"><button data-action="finalize-day">Check Day finalization</button><button data-action="finalize-night">Check Night finalization</button></div><pre id="finalizeStatus"></pre></div>`; panel.querySelector('[data-action="finalize-day"]').addEventListener('click', () => finalizeCase('day')); panel.querySelector('[data-action="finalize-night"]').addEventListener('click', () => finalizeCase('night')); }
 async function finalizeCase(caseId) { if (!state.session) return showSessionError('Start review before finalizing.'); if (!state.attribution?.display_name) { openAttributionModal(); return; } const out = document.getElementById('finalizeStatus'); try { const res = await postJson('/api/finalize', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId }); out.textContent = JSON.stringify(res.result, null, 2); } catch (err) { out.textContent = `Finalization blocked: ${err.message}`; } }
 function actionLabel(action) { if (action === ACTIONS.looks) return 'Correct'; if ([ACTIONS.leak, ACTIONS.partial, ACTIONS.falseRedaction, ACTIONS.wrong].includes(action)) return 'Needs correction'; if (action === ACTIONS.unsure) return 'Unsure'; if (action === ACTIONS.notSensitive) return 'Not sensitive'; if (action === ACTIONS.cosmetic) return 'Cosmetic only'; const found = (DATA.tasks?.actions || []).find(a => a.action === action); return found ? found.label : action; }
-function installGlobalHandlers() { document.body.tabIndex = -1; document.body.focus(); document.getElementById('startSession').addEventListener('click', startSession); document.getElementById('changeAttribution').addEventListener('click', openAttributionModal); document.getElementById('exportSession').addEventListener('click', exportSession); document.getElementById('submitAttribution').addEventListener('click', submitAttribution); document.getElementById('cancelAttribution').addEventListener('click', closeAttributionModal); document.getElementById('closeEntities')?.addEventListener('click', closeEntities); document.querySelectorAll('.case-tabs button').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab))); window.addEventListener('keydown', onKeyDown, { capture: true }); document.addEventListener('fullscreenchange', () => updatePlayerUi(visibleCaseId())); }
+function installGlobalHandlers() { document.body.tabIndex = -1; document.body.focus(); document.getElementById('startSession').addEventListener('click', startSession); document.getElementById('changeAttribution').addEventListener('click', openAttributionModal); document.getElementById('exportSession').addEventListener('click', exportSession); document.getElementById('submitAttribution').addEventListener('click', submitAttribution); document.getElementById('cancelAttribution').addEventListener('click', closeAttributionModal); document.getElementById('closeEntities')?.addEventListener('click', closeEntities); document.getElementById('cancelMerge')?.addEventListener('click', closeMergeModal); document.getElementById('confirmMerge')?.addEventListener('click', confirmMerge); document.querySelectorAll('.case-tabs button').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab))); window.addEventListener('keydown', onKeyDown, { capture: true }); document.addEventListener('fullscreenchange', () => updatePlayerUi(visibleCaseId())); }
 function isTextEntryTarget(element) { const tag = element?.tagName?.toLowerCase(); if (!tag) return false; if (element.isContentEditable) return true; if (tag === 'textarea' || tag === 'select') return true; if (tag !== 'input') return false; const type = String(element.type || 'text').toLowerCase(); return !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes(type); }
-function onKeyDown(event) { if (isTextEntryTarget(document.activeElement)) return; if (event.key === 'ArrowRight' || event.key === 'Right') { event.preventDefault(); stepFrame(event.shiftKey ? 10 : 1); } else if (event.key === 'ArrowLeft' || event.key === 'Left') { event.preventDefault(); stepFrame(event.shiftKey ? -10 : -1); } else if (event.key === ' ') { event.preventDefault(); togglePlay(visibleCaseId()); } else if (event.key.toLowerCase() === 'f') { const wrapper = document.querySelector(`#case-${visibleCaseId()}.active .player-wrapper`); if (wrapper) toggleFullscreen(wrapper); } else if (event.key === 'Escape' && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); } else if (event.key === 'Escape') { closeEntities(); closeAttributionModal(); } }
+function onKeyDown(event) { if (isTextEntryTarget(document.activeElement)) return; if (event.key === 'ArrowRight' || event.key === 'Right') { event.preventDefault(); stepFrame(event.shiftKey ? 10 : 1); } else if (event.key === 'ArrowLeft' || event.key === 'Left') { event.preventDefault(); stepFrame(event.shiftKey ? -10 : -1); } else if (event.key === ' ') { event.preventDefault(); togglePlay(visibleCaseId()); } else if (event.key.toLowerCase() === 'f') { const wrapper = document.querySelector(`#case-${visibleCaseId()}.active .player-wrapper`); if (wrapper) toggleFullscreen(wrapper); } else if (event.key === 'Escape' && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); } else if (event.key === 'Escape') { closeMergeModal(); closeEntities(); closeAttributionModal(); } }
 init().catch(err => { document.body.innerHTML = `<pre>${err.stack || err}</pre>`; });
 """

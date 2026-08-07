@@ -688,8 +688,8 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     assert "'range'" in js
     assert "stepFrame(event.shiftKey ? 10 : 1)" in js
     assert "stepFrame(event.shiftKey ? -10 : -1)" in js
-    assert "Final Review Workspace v2.3.3" in html
-    assert "final_review_workspace.v2.3.3" in js
+    assert "Final Review Workspace v2.3.4" in html
+    assert "final_review_workspace.v2.3.4" in js
     assert "function closestElement" in js
     assert "reviewDelegated" in js
     assert "function refreshSidePanel" in js
@@ -699,6 +699,12 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     assert "Open Corrections" in js
     assert "openEntities(caseId)" in js
     assert "entitiesModal" in html
+    assert "mergeModal" in html
+    assert "Search objects" not in js
+    assert "window.prompt" not in js
+    assert "entityFilterButtons" in js
+    assert "policy-segment" in css
+    assert "openMergeModal" in js
     assert "video.addEventListener('click'" in js
     assert "togglePlay(caseId)" in js
     assert ".decision-correct" in css
@@ -815,6 +821,184 @@ def test_conservative_entity_consolidation_rejects_simultaneous_visibility() -> 
 
     assert decision["allowed"] is False
     assert "simultaneously_visible" in decision["reasons"]
+
+
+def review_tracklet(
+    track_id: str,
+    *,
+    category: str = CATEGORY_FACE,
+    first: int = 0,
+    last: int = 39,
+    observations: int = 40,
+    descriptor: tuple[float, ...] = (0.2, 0.3, 0.5, *([0.0] * 15)),
+    evidence_score: float = 0.82,
+    bbox: tuple[int, int, int, int] = (100, 100, 160, 180),
+) -> review_workspace.ReviewTrackletEvidence:
+    components = {
+        "appearance_quality": 0.8,
+        "aspect_ratio_stability": 0.8,
+        "center_motion_continuity": 0.8,
+        "confidence_lower_tail": 0.8,
+        "confidence_median": 0.8,
+        "confidence_peak": 0.9,
+        "crop_quality": 0.8,
+        "density": 0.8,
+        "duration": 0.6,
+        "edge_clipping": 0.05,
+        "geometry_stability": 0.8,
+        "internal_gap_burden": 0.0,
+        "observation_count": min(1.0, observations / 40.0),
+        "provenance_support": 1.0,
+        "scale_motion_continuity": 0.8,
+    }
+    return review_workspace.ReviewTrackletEvidence(
+        appearance_descriptor=descriptor,
+        appearance_quality=0.8,
+        aspect_ratio_stability=0.8,
+        bbox_xyxy=bbox,
+        category=category,
+        center_motion_continuity=0.8,
+        confidence_p10=0.8,
+        crop_quality=0.8,
+        density=observations / max(1, last - first + 1),
+        detector_confidence_max=0.9,
+        detector_confidence_median=0.8,
+        duration_seconds=(last - first + 1) / 30.0,
+        edge_penalty=0.05,
+        evidence_components=components,
+        evidence_score=evidence_score,
+        first_frame=first,
+        geometry_stability=0.8,
+        jump_penalty=0.05,
+        large_internal_gap_penalty=0.0,
+        last_frame=last,
+        mean_confidence=0.8,
+        observation_count=observations,
+        provenance_counts={"detector": observations},
+        scale_motion_continuity=0.8,
+        source_track_id=track_id,
+        status="accepted",
+    )
+
+
+def test_review_entity_accumulator_attaches_same_appearance_fragments() -> None:
+    profile = review_workspace.review_entity_profile()
+    result = review_workspace.ReviewEntityAccumulator(profile).accumulate(
+        case_id="synthetic",
+        previous_user_entity_count=3,
+        tracklets=[
+            review_tracklet("person_main"),
+            review_tracklet(
+                "person_fragment",
+                first=45,
+                last=48,
+                observations=4,
+                evidence_score=0.24,
+                bbox=(104, 102, 164, 182),
+            ),
+        ],
+    )
+
+    assert result.metrics()["confirmed_entity_count"] == 1
+    assert result.metrics()["attached_fragment_count"] == 1
+    assert result.metrics()["unresolved_fragment_count"] == 0
+
+
+def test_review_entity_accumulator_rejects_simultaneous_similar_people() -> None:
+    profile = review_workspace.review_entity_profile()
+    result = review_workspace.ReviewEntityAccumulator(profile).accumulate(
+        case_id="synthetic",
+        previous_user_entity_count=2,
+        tracklets=[
+            review_tracklet("person_main", first=10, last=60),
+            review_tracklet(
+                "person_overlap",
+                first=30,
+                last=34,
+                observations=4,
+                evidence_score=0.24,
+                bbox=(102, 101, 162, 181),
+            ),
+        ],
+    )
+
+    assert result.metrics()["attached_fragment_count"] == 0
+    assert result.metrics()["simultaneous_overlap_merge_rejection_count"] == 1
+
+
+def test_review_entity_accumulator_collapses_weak_unrelated_noise() -> None:
+    profile = review_workspace.review_entity_profile()
+    result = review_workspace.ReviewEntityAccumulator(profile).accumulate(
+        case_id="synthetic",
+        previous_user_entity_count=1,
+        tracklets=[
+            review_tracklet(
+                "weak_noise",
+                first=0,
+                last=0,
+                observations=1,
+                evidence_score=0.05,
+                bbox=(10, 10, 14, 14),
+            )
+        ],
+    )
+
+    assert result.metrics()["new_user_facing_entity_count"] == 0
+    assert result.metrics()["unresolved_fragment_count"] == 1
+
+
+def test_review_entity_accumulator_keeps_different_plates_separate() -> None:
+    profile = review_workspace.review_entity_profile()
+    result = review_workspace.ReviewEntityAccumulator(profile).accumulate(
+        case_id="synthetic",
+        previous_user_entity_count=2,
+        tracklets=[
+            review_tracklet(
+                "plate_main",
+                category=CATEGORY_PLATE,
+                descriptor=(0.9, 0.1, *([0.0] * 16)),
+                bbox=(100, 300, 180, 330),
+            ),
+            review_tracklet(
+                "plate_other",
+                category=CATEGORY_PLATE,
+                first=45,
+                last=48,
+                observations=4,
+                descriptor=(0.0, 0.9, 0.1, *([0.0] * 15)),
+                evidence_score=0.2,
+                bbox=(102, 300, 182, 330),
+            ),
+        ],
+    )
+
+    assert result.metrics()["attached_fragment_count"] == 0
+    assert result.metrics()["unresolved_fragment_count"] == 1
+
+
+def test_review_entity_accumulator_rejects_long_gap_scene_barrier() -> None:
+    profile = review_workspace.review_entity_profile()
+    result = review_workspace.ReviewEntityAccumulator(profile).accumulate(
+        case_id="synthetic",
+        previous_user_entity_count=2,
+        tracklets=[
+            review_tracklet("person_main"),
+            review_tracklet(
+                "person_after_cut",
+                first=300,
+                last=304,
+                observations=4,
+                evidence_score=0.24,
+                bbox=(104, 102, 164, 182),
+            ),
+        ],
+    )
+
+    assert result.metrics()["attached_fragment_count"] == 0
+    assert any(
+        item["reason"] == "gap_too_large_for_review_entity_attachment"
+        for item in result.merge_audit()["rejected_merges"]
+    )
 
 
 def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> None:
