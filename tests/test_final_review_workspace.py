@@ -305,7 +305,46 @@ def test_task_aggregation_preserves_raw_ids_and_separates_technical() -> None:
     technical = [task for task in tasks if task.get("technical_only")][0]
     assert merged["raw_signal_ids"] == ["a", "b"]
     assert merged["blocking"] is True
+    assert merged["normal_task_class"] == "possible_privacy_gap"
+    assert merged["issue_type"] == "possible_privacy_gap"
     assert technical["raw_signal_ids"] == ["c"]
+
+
+def test_detector_span_audit_requires_every_canonical_day_frame(tmp_path: Path) -> None:
+    detections = tmp_path / "detections.jsonl"
+    rows = [
+        {"frame_index": 0, "detections": []},
+        {"frame_index": 2, "detections": []},
+    ]
+    detections.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+    audit = review_workspace.detector_span_audit(
+        detections,
+        source_frame_count=3,
+        parent_source_start=1828,
+    )
+
+    assert audit["full_source_processed"] is False
+    assert audit["detector_frame_available_for_every_canonical_day_frame"] is False
+    assert audit["missing_source_frame_ranges"] == [
+        {"frame_start": 1829, "frame_end": 1829, "length": 1}
+    ]
+
+
+def test_normal_review_task_classes_are_actionable() -> None:
+    roots = [
+        review_workspace.root_cause_for_signal(
+            {"issue_type": "visible_plate_leak", "severity": "blocker", "category": "plate"}
+        ),
+        review_workspace.root_cause_for_signal(
+            {"issue_type": "uncertain", "severity": "low", "category": "face"}
+        ),
+        review_workspace.root_cause_for_signal(
+            {"issue_type": "false_plate_redaction", "severity": "medium", "category": "plate"}
+        ),
+    ]
+
+    assert roots == ["possible_privacy_gap", "spot_check", "possible_false_redaction"]
 
 
 def test_review_session_event_chain_and_decision_revision(tmp_path: Path) -> None:
@@ -649,10 +688,17 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     assert "'range'" in js
     assert "stepFrame(event.shiftKey ? 10 : 1)" in js
     assert "stepFrame(event.shiftKey ? -10 : -1)" in js
-    assert "Final Review Workspace v2.3.1" in html
-    assert "final_review_workspace.v2.3.1" in js
+    assert "Final Review Workspace v2.3.2" in html
+    assert "final_review_workspace.v2.3.2" in js
     assert "function closestElement" in js
     assert "reviewDelegated" in js
+    assert "function refreshSidePanel" in js
+    assert "function taskState" in js
+    assert "Needs correction" in js
+    assert "Unsure / Escalated" in js
+    assert "Open Corrections" in js
+    assert "openEntities(caseId)" in js
+    assert "entitiesModal" in html
     assert "video.addEventListener('click'" in js
     assert "togglePlay(caseId)" in js
     assert ".decision-correct" in css
@@ -664,6 +710,12 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     assert 'data-action="filter"' in js
     assert "Saving..." in js
     assert "Could not save:" in js
+    assert (
+        "renderCase(caseId);"
+        not in js[
+            js.index("async function recordDecision") : js.index("function setDecisionPending")
+        ]
+    )
     assert ".toFixed(3)" not in js
     assert "padStart(2, '0')" in js
     decision_buttons = js[

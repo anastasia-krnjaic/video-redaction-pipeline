@@ -22,8 +22,10 @@ from redactor import (
     detection,
     face_policy,
     final_package,
+    frame_spans,
     media,
     plate_rendering,
+    plate_tracking,
     privacy_entities,
     privacy_rendering,
     rendering,
@@ -39,7 +41,7 @@ from redactor.privacy_records import (
     stable_hash,
 )
 
-SCHEMA_VERSION = "final_review_workspace.v2.3.1"
+SCHEMA_VERSION = "final_review_workspace.v2.3.2"
 DAY_PARENT_PATH = Path("artifacts/day_primary.mp4")
 DAY_CANONICAL_SOURCE_FRAME_START = 1828
 DAY_CANONICAL_SOURCE_FRAME_END = 5694
@@ -210,11 +212,22 @@ def build_day_case(package_root: Path, *, model_paths: FrozenModelPaths) -> dict
         else 30000 / 1001
     ) or 30000 / 1001
     start_seconds = DAY_CANONICAL_SOURCE_FRAME_START / parent_fps
-    duration_seconds = (
-        DAY_CANONICAL_SOURCE_FRAME_END - DAY_CANONICAL_SOURCE_FRAME_START
-    ) / parent_fps
+    canonical_frame_count = DAY_CANONICAL_SOURCE_FRAME_END - DAY_CANONICAL_SOURCE_FRAME_START + 1
+    # FFmpeg's time-based trim can include the first frame after an exact inclusive
+    # duration. The shorter duration below has been validated by the frame-count
+    # gate immediately after extraction: it yields frames 1828 through 5694.
+    duration_seconds = (canonical_frame_count - 1) / parent_fps
     canonical_source = package_root / "media" / "day" / "original_reference.mp4"
-    if parent_file.exists() and not canonical_source.exists():
+    canonical_needs_extraction = not canonical_source.exists()
+    if canonical_source.exists():
+        try:
+            existing_info = media.probe_media(canonical_source)
+            canonical_needs_extraction = (
+                int(existing_info.video_stream.frame_count or 0) != canonical_frame_count
+            )
+        except ValueError:
+            canonical_needs_extraction = True
+    if parent_file.exists() and canonical_needs_extraction:
         media.trim_video(
             parent_file,
             canonical_source,
@@ -255,6 +268,18 @@ def build_day_case(package_root: Path, *, model_paths: FrozenModelPaths) -> dict
                 source_frame_start=parent_frame_start,
             ),
         ]
+        automatic_path = package_root / "media" / "day" / "automatic_result.mp4"
+        if automatic_path.exists():
+            roles.append(
+                case_manifests.VideoRole(
+                    label="Automatic",
+                    path="media/day/automatic_result.mp4",
+                    role="automatic",
+                    sha256=media.sha256_file(automatic_path),
+                    source_frame_end=parent_frame_end,
+                    source_frame_start=parent_frame_start,
+                )
+            )
         current_path = package_root / "media" / "day" / "current_combined_result.mp4"
         if current_path.exists():
             roles.append(
@@ -269,6 +294,18 @@ def build_day_case(package_root: Path, *, model_paths: FrozenModelPaths) -> dict
             )
         else:
             blockers.append("canonical Day current combined result was not generated")
+        latest_path = package_root / "media" / "day" / "latest_reviewed_result.mp4"
+        if latest_path.exists():
+            roles.append(
+                case_manifests.VideoRole(
+                    label="Latest reviewed",
+                    path="media/day/latest_reviewed_result.mp4",
+                    role="latest_reviewed",
+                    sha256=media.sha256_file(latest_path),
+                    source_frame_end=parent_frame_end,
+                    source_frame_start=parent_frame_start,
+                )
+            )
         video_roles = tuple(roles)
     else:
         source_hash = None
@@ -287,8 +324,9 @@ def build_day_case(package_root: Path, *, model_paths: FrozenModelPaths) -> dict
         display_name="Day case",
         duration_seconds=duration_seconds_actual,
         face_evidence_inputs=(
-            "artifacts/face_full_video_acceptance_v1/day/reviewed_candidate_privacy_regions.jsonl",
-            "artifacts/day_reviewer_discovered_correction_v1/privacy_regions.jsonl",
+            "technical/day_pipeline/face_detection/detections.jsonl",
+            "technical/day_pipeline/face_policy/tracking/tracks.jsonl",
+            "technical/day_pipeline/face_policy/privacy_regions/privacy_regions.jsonl",
         ),
         fps=fps,
         frame_count=frame_count,
@@ -303,7 +341,10 @@ def build_day_case(package_root: Path, *, model_paths: FrozenModelPaths) -> dict
             "canonical_generation_status": "generated" if day_generation else "blocked",
         },
         parent_source_hash=media.sha256_file(parent_file) if parent_file.exists() else None,
-        plate_evidence_inputs=("artifacts/shared_temporal_evidence_v1/day/tracking/tracks.jsonl",),
+        plate_evidence_inputs=(
+            "technical/day_pipeline/plate_detection/detections.jsonl",
+            "technical/day_pipeline/plate_tracking/tracks.jsonl",
+        ),
         reviewed_correction_inputs=(
             "artifacts/day_reviewer_discovered_correction_v1/privacy_regions.jsonl",
         ),
@@ -420,75 +461,148 @@ def build_day_current_result(
     model_paths: FrozenModelPaths,
 ) -> dict[str, Any]:
     technical_root = package_root / "technical" / "day_pipeline"
+    face_detection_dir = technical_root / "face_detection"
+    face_policy_dir = technical_root / "face_policy"
+    plate_detection_dir = technical_root / "plate_detection"
+    plate_tracking_dir = technical_root / "plate_tracking"
+    automatic_video = package_root / "media" / "day" / "automatic_result.mp4"
     current_video = package_root / "media" / "day" / "current_combined_result.mp4"
+    latest_video = package_root / "media" / "day" / "latest_reviewed_result.mp4"
     current_regions_path = package_root / "regions" / "day_current_regions.jsonl"
 
-    records = build_mapped_day_region_records(
-        face_regions_path=Path(
-            "artifacts/face_full_video_acceptance_v1/day/reviewed_candidate_privacy_regions.jsonl"
-        ),
-        face_reviewer_correction_path=Path(
-            "artifacts/day_reviewer_discovered_correction_v1/privacy_regions.jsonl"
-        ),
-        plate_tracks_path=Path("artifacts/shared_temporal_evidence_v1/day/tracking/tracks.jsonl"),
+    source_info = media.probe_media(canonical_source)
+    source_frame_count = int(source_info.video_stream.frame_count or 0)
+    if source_frame_count != DAY_CANONICAL_SOURCE_FRAME_END - DAY_CANONICAL_SOURCE_FRAME_START + 1:
+        raise ValueError(
+            "canonical Day source frame count mismatch before processing: "
+            f"expected {DAY_CANONICAL_SOURCE_FRAME_END - DAY_CANONICAL_SOURCE_FRAME_START + 1}, "
+            f"got {source_frame_count}"
+        )
+
+    face_detection_summary = detection.run_detection(
+        canonical_source,
+        category=CATEGORY_FACE,
+        model_path=model_paths.adas_xml,
+        threshold=detection.DEFAULT_ADAS_PROPOSAL_THRESHOLD,
+        primary_threshold=detection.DEFAULT_ADAS_PRIMARY_THRESHOLD,
+        detector_backend=detection.DETECTOR_BACKEND_ADAS,
+        adas_bin_path=model_paths.adas_bin,
+        output_dir=face_detection_dir,
+        overwrite=True,
+        write_overlay_video=False,
+    )
+    face_policy_summary = run_face_policy_compile_only(
+        canonical_source,
+        output_dir=face_policy_dir,
+        detections_path=face_detection_dir / "detections.jsonl",
+        overwrite=True,
+    )
+    plate_detection_summary = detection.run_detection(
+        canonical_source,
+        category=CATEGORY_PLATE,
+        model_path=model_paths.plate_model,
+        threshold=detection.DEFAULT_THRESHOLDS[CATEGORY_PLATE],
+        primary_threshold=detection.DEFAULT_THRESHOLDS[CATEGORY_PLATE],
+        detector_backend=detection.DETECTOR_BACKEND_OIM_YOLOV9_S_608,
+        output_dir=plate_detection_dir,
+        overwrite=True,
+        write_overlay_video=False,
+    )
+    plate_tracking_summary = plate_tracking.run_plate_tracking(
+        canonical_source,
+        detections_path=plate_detection_dir / "detections.jsonl",
+        output_dir=plate_tracking_dir,
+        overwrite=True,
+        write_overlay_video=False,
+    )
+
+    records = build_full_span_day_region_records(
+        face_regions_path=face_policy_dir / "privacy_regions" / "privacy_regions.jsonl",
+        plate_tracks_path=plate_tracking_dir / "tracks.jsonl",
     )
     review_finalization.write_privacy_region_records(current_regions_path, records)
     render_summary = render_combined_current_result(
         canonical_source=canonical_source,
-        output_video=current_video,
+        output_video=automatic_video,
         records=records,
         overwrite=True,
     )
+    shutil.copy2(automatic_video, current_video)
+    shutil.copy2(automatic_video, latest_video)
+    processing_audit = build_day_full_span_processing_audit(
+        canonical_source=canonical_source,
+        source_info=source_info,
+        face_detections_path=face_detection_dir / "detections.jsonl",
+        plate_detections_path=plate_detection_dir / "detections.jsonl",
+        face_summary=face_detection_summary,
+        face_policy_summary=face_policy_summary,
+        plate_summary=plate_detection_summary,
+        plate_tracking_summary=plate_tracking_summary,
+        output_paths={
+            "automatic": automatic_video,
+            "current_result": current_video,
+            "latest_reviewed": latest_video,
+        },
+        package_root=package_root,
+    )
+    if not processing_audit["passed"]:
+        raise ValueError(
+            "canonical Day full-span processing validation failed: "
+            + "; ".join(processing_audit["errors"])
+        )
+    write_json(technical_root / "day_full_span_processing_audit.json", processing_audit)
     write_json(
         technical_root / "canonical_day_generation.json",
         {
             "case_source": canonical_source.relative_to(package_root).as_posix(),
             "combined_current_video": current_video.relative_to(package_root).as_posix(),
             "face": {
-                "lineage_parent_start_frame": 4615,
-                "mapped_inputs": [
-                    "artifacts/face_full_video_acceptance_v1/day/reviewed_candidate_privacy_regions.jsonl",
-                    "artifacts/day_reviewer_discovered_correction_v1/privacy_regions.jsonl",
+                "detection_summary": face_detection_summary,
+                "lineage_parent_start_frame": DAY_CANONICAL_SOURCE_FRAME_START,
+                "policy_summary": face_policy_summary,
+                "processed_frame_range": [
+                    DAY_CANONICAL_SOURCE_FRAME_START,
+                    DAY_CANONICAL_SOURCE_FRAME_END,
                 ],
             },
-            "generation_mode": "lineage_mapped_frozen_evidence",
+            "full_span_processing_audit": "technical/day_pipeline/day_full_span_processing_audit.json",
+            "generation_mode": "full_span_frozen_face_and_plate_pipelines",
             "model_validation": model_paths.to_dict(),
             "plate": {
+                "detection_summary": plate_detection_summary,
                 "lineage_parent_start_frame": 1828,
-                "mapped_inputs": [
-                    "artifacts/shared_temporal_evidence_v1/day/tracking/tracks.jsonl"
+                "processed_frame_range": [
+                    DAY_CANONICAL_SOURCE_FRAME_START,
+                    DAY_CANONICAL_SOURCE_FRAME_END,
                 ],
+                "tracking_summary": plate_tracking_summary,
             },
             "render": render_summary,
-            "schema_version": "canonical_day_generation.v1",
+            "schema_version": "canonical_day_generation.v2",
         },
     )
     return {
+        "automatic": automatic_video.relative_to(package_root).as_posix(),
+        "automatic_sha256": media.sha256_file(automatic_video),
         "combined_current": current_video.relative_to(package_root).as_posix(),
         "combined_current_sha256": media.sha256_file(current_video),
+        "full_span_processing_audit": "technical/day_pipeline/day_full_span_processing_audit.json",
+        "latest_reviewed": latest_video.relative_to(package_root).as_posix(),
+        "latest_reviewed_sha256": media.sha256_file(latest_video),
         "current_region_count": len(records),
         "region_provenance": privacy_rendering.provenance_counts(records),
     }
 
 
-def build_mapped_day_region_records(
+def build_full_span_day_region_records(
     *,
     face_regions_path: Path,
-    face_reviewer_correction_path: Path,
     plate_tracks_path: Path,
 ) -> list[PrivacyRegionRecord]:
-    face_local_offset = 4615 - DAY_CANONICAL_SOURCE_FRAME_START
     records = face_region_records_from_render_input(
         face_regions_path,
-        case_frame_offset=face_local_offset,
-        parent_frame_offset=4615,
-    )
-    records.extend(
-        face_region_records_from_render_input(
-            face_reviewer_correction_path,
-            case_frame_offset=face_local_offset,
-            parent_frame_offset=4615,
-        )
+        case_frame_offset=0,
+        parent_frame_offset=DAY_CANONICAL_SOURCE_FRAME_START,
     )
     plate_rows = plate_rendering.load_track_rows(plate_tracks_path)
     plate_regions = plate_rendering.eligible_regions_from_rows(
@@ -511,6 +625,138 @@ def build_mapped_day_region_records(
             item.provenance,
         ),
     )
+
+
+def build_day_full_span_processing_audit(
+    *,
+    canonical_source: Path,
+    source_info: media.MediaInfo,
+    face_detections_path: Path,
+    plate_detections_path: Path,
+    face_summary: dict[str, Any],
+    face_policy_summary: dict[str, Any],
+    plate_summary: dict[str, Any],
+    plate_tracking_summary: dict[str, Any],
+    output_paths: dict[str, Path],
+    package_root: Path,
+) -> dict[str, Any]:
+    source_frame_count = int(source_info.video_stream.frame_count or 0)
+    source_range = [DAY_CANONICAL_SOURCE_FRAME_START, DAY_CANONICAL_SOURCE_FRAME_END]
+    errors: list[str] = []
+    face_span = detector_span_audit(
+        face_detections_path,
+        source_frame_count=source_frame_count,
+        parent_source_start=DAY_CANONICAL_SOURCE_FRAME_START,
+    )
+    plate_span = detector_span_audit(
+        plate_detections_path,
+        source_frame_count=source_frame_count,
+        parent_source_start=DAY_CANONICAL_SOURCE_FRAME_START,
+    )
+    if not face_span["full_source_processed"]:
+        errors.append("face detector did not process every canonical Day frame")
+    if not plate_span["full_source_processed"]:
+        errors.append("plate detector did not process every canonical Day frame")
+
+    rendered_roles: dict[str, Any] = {}
+    for role, path in sorted(output_paths.items()):
+        role_info = media.probe_media(path)
+        role_frame_count = int(role_info.video_stream.frame_count or 0)
+        role_errors: list[str] = []
+        if role_frame_count != source_frame_count:
+            role_errors.append(
+                f"{role} frame count {role_frame_count} != canonical {source_frame_count}"
+            )
+        if role_info.video_stream.width != source_info.video_stream.width:
+            role_errors.append(f"{role} width mismatch")
+        if role_info.video_stream.height != source_info.video_stream.height:
+            role_errors.append(f"{role} height mismatch")
+        role_mapping = {
+            "0": DAY_CANONICAL_SOURCE_FRAME_START,
+            str(source_frame_count - 1): DAY_CANONICAL_SOURCE_FRAME_END,
+        }
+        rendered_roles[role] = {
+            "case_frame_to_source_frame": role_mapping,
+            "errors": role_errors,
+            "frame_count": role_frame_count,
+            "path": path.relative_to(package_root).as_posix(),
+            "resolution": [role_info.video_stream.width, role_info.video_stream.height],
+            "sha256": media.sha256_file(path),
+            "source_frame_end": DAY_CANONICAL_SOURCE_FRAME_END,
+            "source_frame_start": DAY_CANONICAL_SOURCE_FRAME_START,
+        }
+        errors.extend(role_errors)
+
+    return {
+        "canonical_case_frame_count": source_frame_count,
+        "canonical_parent_source": DAY_PARENT_PATH.as_posix(),
+        "canonical_source_hash": source_info.sha256,
+        "created_at_utc": media.utc_timestamp(),
+        "detectors": {
+            "face": {
+                "detector_frame_available": face_span,
+                "summary": face_summary,
+            },
+            "plate": {
+                "detector_frame_available": plate_span,
+                "summary": plate_summary,
+            },
+        },
+        "errors": errors,
+        "face_policy_summary": face_policy_summary,
+        "fps": source_info.video_stream.nominal_frame_rate,
+        "frame_count": source_frame_count,
+        "height": source_info.video_stream.height,
+        "output_roles": rendered_roles,
+        "passed": not errors,
+        "plate_tracking_summary": plate_tracking_summary,
+        "schema_version": "canonical_day_full_span_processing_audit.v1",
+        "source_frame_end": DAY_CANONICAL_SOURCE_FRAME_END,
+        "source_frame_start": DAY_CANONICAL_SOURCE_FRAME_START,
+        "source_frame_range": source_range,
+        "width": source_info.video_stream.width,
+    }
+
+
+def detector_span_audit(
+    detections_path: Path,
+    *,
+    source_frame_count: int,
+    parent_source_start: int,
+) -> dict[str, Any]:
+    indices = frame_spans.jsonl_frame_indices(detections_path)
+    span_report = frame_spans.build_frame_span_report(
+        indices,
+        source_frame_count=source_frame_count,
+    )
+    missing_source_ranges = [
+        {
+            "frame_start": parent_source_start + item["frame_start"],
+            "frame_end": parent_source_start + item["frame_end"],
+            "length": item["length"],
+        }
+        for item in span_report["missing_processed_ranges"]
+    ]
+    return {
+        **span_report,
+        "available_source_frame_count": span_report["processed_frame_count"],
+        "available_source_frame_end": (
+            None
+            if span_report["last_processed_frame"] is None
+            else parent_source_start + int(span_report["last_processed_frame"])
+        ),
+        "available_source_frame_start": (
+            None
+            if span_report["first_processed_frame"] is None
+            else parent_source_start + int(span_report["first_processed_frame"])
+        ),
+        "detector_frame_available_for_every_canonical_day_frame": span_report[
+            "full_source_processed"
+        ],
+        "missing_source_frame_ranges": missing_source_ranges,
+        "parent_source_frame_end": parent_source_start + source_frame_count - 1,
+        "parent_source_frame_start": parent_source_start,
+    }
 
 
 def run_face_policy_compile_only(
@@ -1275,7 +1521,11 @@ def load_raw_audit_signals(path: Path) -> list[dict[str, Any]]:
 
 
 def aggregate_reviewer_tasks(raw_signals: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    visible = [signal for signal in raw_signals if not signal["technical"]]
+    visible = [
+        signal | {"root_cause": normalize_review_task_class(str(signal["root_cause"]))}
+        for signal in raw_signals
+        if not signal["technical"]
+    ]
     groups: list[list[dict[str, Any]]] = []
     for signal in sorted(
         visible,
@@ -1294,7 +1544,7 @@ def aggregate_reviewer_tasks(raw_signals: list[dict[str, Any]]) -> list[dict[str
                 and first["category"] == signal["category"]
                 and first["root_cause"] == signal["root_cause"]
                 and signal["source_frame_start"]
-                <= max(item["source_frame_end"] for item in group) + 30
+                <= max(item["source_frame_end"] for item in group) + 1
             ):
                 group.append(signal)
                 placed = True
@@ -1317,6 +1567,23 @@ def aggregate_reviewer_tasks(raw_signals: list[dict[str, Any]]) -> list[dict[str
     )
 
 
+def normalize_review_task_class(root_cause: str) -> str:
+    if root_cause in {"optional_spot_check", "spot_check"}:
+        return "spot_check"
+    if root_cause in {"possible_false_redaction", "wrong_target_redaction"}:
+        return "possible_false_redaction"
+    if root_cause in {"reviewer_created_issue", "manual_reviewer_issue"}:
+        return "reviewer_created_issue"
+    if root_cause in {
+        "unresolved_gap",
+        "uncertain_face_coverage",
+        "uncertain_plate_track",
+        "possible_privacy_gap",
+    }:
+        return "possible_privacy_gap"
+    return "possible_privacy_gap"
+
+
 def reviewer_task_from_group(index: int, group: list[dict[str, Any]]) -> dict[str, Any]:
     case_id = group[0]["case_id"]
     category = group[0]["category"]
@@ -1334,6 +1601,8 @@ def reviewer_task_from_group(index: int, group: list[dict[str, Any]]) -> dict[st
         "correction_required": blocking,
         "decision_state": "pending",
         "issue_type": root,
+        "normal_task_class": root,
+        "optional": root == "spot_check",
         "raw_signal_ids": [item["raw_signal_id"] for item in group],
         "review_task_id": f"{case_id}_task_{index:04d}",
         "schema_version": "case_reviewer_task.v1",
@@ -1376,22 +1645,40 @@ def task_language(category: str, root: str, blocking: bool) -> tuple[str, str, s
             "The day face and plate clips have a common parent source, but the frozen detector model files are not available locally to regenerate one combined current result.",
             "Review the lineage report. Do not approve a combined Day result until the frozen pipelines are rerun on the canonical parent interval.",
         )
-    if category == CATEGORY_PLATE and blocking:
+    if root == "possible_false_redaction":
         return (
-            "Plate coverage needs correction",
+            "Possible false redaction",
+            "The system may have hidden something that is not a privacy object.",
+            "Compare the video at this interval. If the redaction is wrong, open the editor to remove it for the bounded frames.",
+        )
+    if root == "spot_check":
+        return (
+            "Optional spot check",
+            "This interval was selected as a deterministic quality sample.",
+            "Look briefly at the current result. If you see a privacy issue, mark it for correction; otherwise mark it correct.",
+        )
+    if root == "reviewer_created_issue":
+        return (
+            "Reviewer-created issue",
+            "A reviewer added this issue while sweeping the video.",
+            "Open the editor and create or verify the reviewed correction for this interval.",
+        )
+    if root == "possible_privacy_gap" and category == CATEGORY_PLATE and blocking:
+        return (
+            "Possible plate privacy gap",
             "The system could not safely maintain plate redaction through this interval.",
             "Compare Original and Current result. If the plate is visible, add a reviewed region before finalization.",
         )
-    if category == CATEGORY_FACE:
+    if root == "possible_privacy_gap" and category == CATEGORY_FACE:
         return (
-            "Check face coverage",
-            "The system flagged this face interval for human confirmation.",
+            "Possible face privacy gap",
+            "The system flagged this face interval for human review.",
             "Compare Original and Current result and confirm that the face remains protected without redacting the wrong person.",
         )
     return (
-        "Check the redaction result",
-        "The system selected this interval because coverage or identity is uncertain.",
-        "Compare Original and Current result and record the clearest decision.",
+        "Possible privacy gap",
+        "The system selected this interval because privacy coverage is uncertain.",
+        "Compare Original and Current result and decide whether a correction is needed.",
     )
 
 
@@ -1572,7 +1859,7 @@ def write_manual_firefox_checklist(package_root: Path) -> None:
 
 Open the workspace with:
 
-`redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3_1 --open`
+`redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3_2 --open`
 
 - Start review creates a visible session id and survives reload.
 - Day and Night media play inline; no Picture-in-Picture opens.
@@ -1926,13 +2213,14 @@ def normalize_audit_category(category: str) -> str:
 
 
 def root_cause_for_signal(item: dict[str, Any]) -> str:
-    if item.get("issue_type") == "visible_plate_leak":
-        return "unresolved_gap"
+    issue_type = str(item.get("issue_type") or "")
+    if "false" in issue_type or "wrong" in issue_type:
+        return "possible_false_redaction"
+    if issue_type in {"visible_plate_leak", "visible_face_leak"}:
+        return "possible_privacy_gap"
     if item.get("severity") == "low":
-        return "optional_spot_check"
-    if item.get("category") == "face":
-        return "uncertain_face_coverage"
-    return "uncertain_plate_track"
+        return "spot_check"
+    return "possible_privacy_gap"
 
 
 def severity_rank(severity: str) -> int:
@@ -1947,7 +2235,7 @@ def severity_rank(severity: str) -> int:
 def task_sort_rank(task: dict[str, Any]) -> int:
     if task.get("blocking"):
         return 0
-    if task.get("issue_type") == "corrected_result_check":
+    if task.get("issue_type") == "possible_false_redaction":
         return 1
     if task.get("severity") == "low":
         return 4
@@ -2068,8 +2356,8 @@ def index_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Final Review Workspace v2.3.1</title>
-  <link rel="stylesheet" href="assets/workspace.css?v=2.3.1">
+  <title>Final Review Workspace v2.3.2</title>
+  <link rel="stylesheet" href="assets/workspace.css?v=2.3.2">
 </head>
 <body>
   <header class="app-header">
@@ -2108,7 +2396,19 @@ def index_html() -> str:
       </div>
     </div>
   </section>
-  <script src="assets/workspace.js?v=2.3.1"></script>
+  <section id="entitiesModal" class="modal" aria-hidden="true">
+    <div class="modal-card large">
+      <div class="case-header">
+        <div>
+          <h2>Review objects</h2>
+          <p class="case-subtitle">Object actions affect privacy policy. Thumbnails jump the player to the representative frame.</p>
+        </div>
+        <button id="closeEntities">Close</button>
+      </div>
+      <div id="entitiesModalContent"></div>
+    </div>
+  </section>
+  <script src="assets/workspace.js?v=2.3.2"></script>
 </body>
 </html>
 """
@@ -2143,16 +2443,16 @@ main { padding: 16px 20px 44px; }
 .case-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
 .case-subtitle { color: #516070; margin-top: 4px; }
 .mode-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-.workspace-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 380px); gap: 14px; align-items: start; }
-.player-column { min-width: 0; }
-.side-panel { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; min-height: 0; max-height: calc(100vh - 175px); overflow: auto; padding: 12px; }
+.workspace-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 390px); gap: 14px; align-items: stretch; height: calc(100vh - 176px); min-height: 560px; }
+.player-column { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.side-panel { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; min-height: 0; height: 100%; overflow: auto; padding: 12px; }
 .version-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
 .version-row label { display: flex; align-items: center; gap: 8px; min-width: 260px; }
 .player-wrapper { background: #060b14; color: #fff; border-radius: 8px; overflow: hidden; position: relative; box-shadow: 0 12px 30px rgba(15,23,42,.18); }
 .player-wrapper:fullscreen { display: flex; flex-direction: column; width: 100vw; height: 100vh; border-radius: 0; }
 .player-wrapper:fullscreen .video-stage { flex: 1; min-height: 0; }
 .video-stage { position: relative; background: #000; }
-.video-stage video { display: block; width: 100%; background: #000; aspect-ratio: 16 / 9; max-height: calc(100vh - 245px); object-fit: contain; }
+.video-stage video { display: block; width: 100%; background: #000; aspect-ratio: 16 / 9; max-height: calc(100vh - 265px); object-fit: contain; cursor: pointer; }
 .player-wrapper:fullscreen video { height: 100%; max-height: none; }
 .frame-hud { position: absolute; left: 10px; top: 10px; padding: 5px 8px; border-radius: 5px; background: rgba(0,0,0,.72); color: #fff; font-size: 13px; pointer-events: none; z-index: 4; }
 .media-error { display: none; position: absolute; left: 10px; right: 10px; bottom: 10px; background: rgba(127, 29, 29, .94); color: #fff; padding: 8px 10px; border-radius: 6px; z-index: 5; font-size: 13px; }
@@ -2176,7 +2476,7 @@ main { padding: 16px 20px 44px; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: #d8dee8; font-size: 12px; }
 .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 4px; vertical-align: 1px; }
 .legend .red::before { background: #dc2626; } .legend .orange::before { background: #f97316; } .legend .blue::before { background: #2563eb; } .legend .purple::before { background: #7c3aed; } .legend .green::before { background: #16a34a; }
-.task-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+.task-summary { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px; }
 .stat { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 7px; padding: 8px; }
 .stat strong { display: block; font-size: 19px; }
 .filter-row { display: flex; gap: 7px; margin: 8px 0 10px; }
@@ -2212,23 +2512,24 @@ main { padding: 16px 20px 44px; }
 .modal { display: none; position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 80; align-items: center; justify-content: center; padding: 20px; }
 .modal.open { display: flex; }
 .modal-card { width: min(460px, 100%); background: #fff; border-radius: 9px; padding: 18px; box-shadow: 0 24px 80px rgba(15,23,42,.32); }
+.modal-card.large { width: min(920px, 94vw); max-height: 86vh; overflow: auto; }
 .modal-card label { display: grid; gap: 6px; margin: 12px 0; }
 .error-text { color: #b91c1c; }
 .audit-list { display: grid; gap: 8px; }
 .final-card { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; padding: 12px; }
-@media (max-width: 980px) { .workspace-layout { grid-template-columns: 1fr; } .side-panel { max-height: none; } .video-stage video { max-height: none; } .app-header { align-items: flex-start; flex-direction: column; } }
+@media (max-width: 980px) { .workspace-layout { grid-template-columns: 1fr; height: auto; min-height: 0; } .side-panel { height: auto; max-height: none; } .video-stage video { max-height: none; } .app-header { align-items: flex-start; flex-direction: column; } }
 """
 
 
 def workspace_js() -> str:
     return r"""
-const APP_VERSION = 'final_review_workspace.v2.3.1';
+const APP_VERSION = 'final_review_workspace.v2.3.2';
 const ACTIONS = {
   looks: 'looks_correct', leak: 'privacy_leak', partial: 'partial_coverage',
   falseRedaction: 'false_redaction', wrong: 'wrong_target', notSensitive: 'not_sensitive',
   cosmetic: 'cosmetic_only', unsure: 'uncertain_escalate'
 };
-const DATA = { workspace: null, tasks: null, entities: null, alignment: null, cases: {} };
+const DATA = { workspace: null, tasks: null, entities: null, rawSignals: null, alignment: null, cases: {} };
 const state = {
   tab: localStorage.getItem(storageKey('active_tab')) || 'day',
   mode: { day: localStorage.getItem(storageKey('mode_day')) || 'review', night: localStorage.getItem(storageKey('mode_night')) || 'review' },
@@ -2240,7 +2541,7 @@ const state = {
   savedFlash: {}, entityOverrides: {}, manualTasks: []
 };
 
-function storageKey(name) { return `final-review-v2.3.1:${location.pathname}:${name}`; }
+function storageKey(name) { return `final-review-v2.3.2:${location.pathname}:${name}`; }
 async function loadJson(path) { const res = await fetch(path, { cache: 'no-store' }); if (!res.ok) throw new Error(`${path}: ${res.status}`); return res.json(); }
 async function postJson(path, payload) { const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await res.json().catch(() => ({})); if (!res.ok || data.ok === false) throw new Error(data.error || `${path}: ${res.status}`); return data; }
 function esc(value) { return String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -2263,6 +2564,7 @@ async function init() {
   DATA.workspace = await loadJson('workspace_manifest.json');
   DATA.tasks = await loadJson('reviewer_tasks.json');
   DATA.entities = await loadJson('review_entities.json');
+  DATA.rawSignals = await loadJson('raw_audit_signals.json').catch(() => ({raw_signals: []}));
   DATA.alignment = await loadJson('version_alignment_audit.json').catch(() => null);
   for (const [caseId, path] of Object.entries(DATA.workspace.cases || {})) DATA.cases[caseId] = await loadJson(path);
   await restoreSession();
@@ -2284,12 +2586,13 @@ function renderCase(caseId) {
   const manifest = DATA.cases[caseId]; const mode = state.mode[caseId] || 'review';
   if (!state.selectedTask[caseId]) state.selectedTask[caseId] = firstOpenTask(caseId)?.review_task_id || allTasks(caseId)[0]?.review_task_id || null;
   panel.innerHTML = `
-    <div class="case-header"><div><h2>${esc(manifest.display_name || caseId)}</h2><p class="case-subtitle">${esc(caseSubtitle(caseId))}</p></div><div class="segmented"><button class="${mode === 'review' ? 'active' : ''}" data-mode="review">Review</button><button class="${mode === 'edit' ? 'active' : ''}" data-mode="edit">Edit</button></div></div>
+    <div class="case-header"><div><h2>${esc(manifest.display_name || caseId)}</h2><p class="case-subtitle">${esc(caseSubtitle(caseId))}</p></div><div class="header-actions"><div class="segmented"><button class="${mode === 'review' ? 'active' : ''}" data-mode="review">Review</button><button class="${mode === 'edit' ? 'active' : ''}" data-mode="edit">Edit</button></div><button data-action="open-entities">Entities</button></div></div>
     <div class="workspace-layout">
       <div class="player-column">${playerHtml(caseId)}<details class="technical"><summary>Technical details</summary><pre>${esc(JSON.stringify(technicalSummary(caseId), null, 2))}</pre></details></div>
       <aside class="side-panel">${mode === 'edit' ? editPanelHtml(caseId) : reviewPanelHtml(caseId)}</aside>
     </div>`;
   panel.querySelectorAll('[data-mode]').forEach(btn => btn.addEventListener('click', () => setMode(caseId, btn.dataset.mode)));
+  panel.querySelector('[data-action="open-entities"]')?.addEventListener('click', () => openEntities(caseId));
   bindPlayer(caseId); bindTimeline(caseId); bindReviewPanel(caseId); bindEditPanel(caseId); bindEntityPanel(caseId);
 }
 function caseSubtitle(caseId) { const m = caseData(caseId); return `${m.frame_count} frames · Source ${m.source_frame_start}-${m.source_frame_end}`; }
@@ -2305,11 +2608,12 @@ function playerHtml(caseId) {
 }
 function availableVersions(caseId) {
   const roles = caseData(caseId).video_roles || [];
-  const original = roles.find(r => r.role === 'original'); const current = roles.find(r => r.role === 'current_result'); const final = roles.find(r => r.role === 'final_reviewed');
+  const original = roles.find(r => r.role === 'original'); const automatic = roles.find(r => r.role === 'automatic') || roles.find(r => r.role === 'current_result'); const current = roles.find(r => r.role === 'current_result'); const latest = roles.find(r => r.role === 'latest_reviewed'); const final = roles.find(r => r.role === 'final_reviewed');
   const versions = [];
   if (original) versions.push({ key: 'original', label: 'Original', path: original.path, role: original.role });
-  if (current) versions.push({ key: 'automatic', label: 'Automatic', path: current.path, role: current.role });
+  if (automatic) versions.push({ key: 'automatic', label: 'Automatic', path: automatic.path, role: automatic.role });
   if (state.latestReviewed[caseId]) versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: state.latestReviewed[caseId].path, role: 'latest_reviewed', note: 'Correction preview' });
+  else if (latest) versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: latest.path, role: latest.role, note: 'Current result' });
   else if (current) versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: current.path, role: current.role, note: 'Current result' });
   if (final) versions.push({ key: 'final_reviewed', label: 'Final reviewed', path: final.path, role: final.role });
   return versions;
@@ -2317,8 +2621,8 @@ function availableVersions(caseId) {
 function selectedVersion(caseId) { const versions = availableVersions(caseId); const stored = state.version[caseId]; return versions.find(v => v.key === stored) || versions.find(v => v.key === 'latest_reviewed') || versions.find(v => v.key === 'automatic') || versions[0]; }
 function bindPlayer(caseId) {
   const panel = document.getElementById(`case-${caseId}`); const video = panel.querySelector('video'); const version = selectedVersion(caseId); const wrapper = panel.querySelector(`#player-${caseId}`);
-  video.disablePictureInPicture = true; video.playsInline = true; video.dataset.path = version.path;
-  if (!video.src.endsWith(version.path)) { video.removeAttribute('src'); video.load(); video.src = version.path; video.load(); }
+  video.disablePictureInPicture = true; video.playsInline = true;
+  setPlayerSource(video, version.path);
   video.addEventListener('loadedmetadata', () => { hideMediaError(caseId); seekToFrame(caseId, state.frame[caseId] || 0, { keepPaused: true }); });
   video.addEventListener('error', () => showMediaError(caseId, version.path, video.error ? video.error.code : 'unknown'));
   video.addEventListener('timeupdate', () => { if (!video.paused) updateFrameFromTime(caseId, video.currentTime); });
@@ -2332,6 +2636,14 @@ function bindPlayer(caseId) {
   panel.querySelector('[data-action="scrub"]').addEventListener('input', e => seekToFrame(caseId, Number(e.target.value)));
   panel.querySelector('[data-action="version"]').addEventListener('change', e => switchVersion(caseId, e.target.value));
   updatePlayerUi(caseId);
+}
+function setPlayerSource(video, path) {
+  if (!video || video.dataset.path === path) return;
+  video.dataset.path = path;
+  video.removeAttribute('src');
+  video.load();
+  video.src = path;
+  video.load();
 }
 function bindTimeline(caseId) {
   const markerBox = document.querySelector(`#case-${caseId} [data-role="markers"]`); if (!markerBox) return;
@@ -2349,7 +2661,7 @@ function bindTimeline(caseId) {
 function markerClass(task) { if (decisionGreen(task.review_task_id)) return 'resolved'; if (String(task.issue_type || '').includes('false') || String(task.issue_type || '').includes('wrong')) return 'false'; if (task.blocking) return 'blocking'; if (task.severity === 'low') return 'info'; return 'partial'; }
 function updateFrameFromTime(caseId, time) { const next = clamp(Math.round(time * fpsValue(caseId)), 0, caseFrameCount(caseId) - 1); if (next !== state.frame[caseId]) { state.frame[caseId] = next; persistFrame(caseId); updatePlayerUi(caseId); } }
 function persistFrame(caseId) { localStorage.setItem(storageKey(`frame_${caseId}`), String(state.frame[caseId] || 0)); }
-async function switchVersion(caseId, key) { const video = activeVideo(caseId); const wasPlaying = video && !video.paused; const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId) - 1); if (video) video.pause(); state.frame[caseId] = frame; state.version[caseId] = key; localStorage.setItem(storageKey(`version_${caseId}`), key); persistFrame(caseId); renderCase(caseId); state.frame[caseId] = frame; await syncPlayerToState(caseId); if (wasPlaying) await togglePlay(caseId, true); }
+async function switchVersion(caseId, key) { const video = activeVideo(caseId); const wasPlaying = video && !video.paused; const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId) - 1); if (video) video.pause(); state.frame[caseId] = frame; state.version[caseId] = key; localStorage.setItem(storageKey(`version_${caseId}`), key); persistFrame(caseId); const version = selectedVersion(caseId); if (video) setPlayerSource(video, version.path); const select = document.querySelector(`#case-${caseId} [data-action="version"]`); if (select) select.value = key; await syncPlayerToState(caseId); if (wasPlaying) await togglePlay(caseId, true); }
 async function syncPlayerToState(caseId) { const video = activeVideo(caseId); if (video) await seekToFrame(caseId, state.frame[caseId] || 0, { keepPaused: true }); }
 async function seekToFrame(caseId, frame, opts = {}) { const video = activeVideo(caseId); if (!video) return; const next = clamp(Math.round(frame), 0, caseFrameCount(caseId) - 1); const wasPlaying = !video.paused && !opts.keepPaused; video.pause(); state.frame[caseId] = next; persistFrame(caseId); await waitMetadata(video, 1600).catch(() => showMediaError(caseId, video.dataset.path, 'metadata')); await seekVideo(video, frameTime(caseId, next)); updatePlayerUi(caseId); if (wasPlaying) await togglePlay(caseId, true); }
 function stepFrame(delta) { const caseId = visibleCaseId(); if (!isPrimaryCase(caseId)) return; seekToFrame(caseId, (state.frame[caseId] || 0) + delta); }
@@ -2362,20 +2674,29 @@ function hideMediaError(caseId) { const el = document.querySelector(`#case-${cas
 function toggleFullscreen(wrapper) { if (!document.fullscreenElement) wrapper.requestFullscreen().catch(() => {}); else document.exitFullscreen().catch(() => {}); }
 
 function reviewPanelHtml(caseId) {
-  const tasks = filteredTasks(caseId); const all = allTasks(caseId); const remaining = all.filter(t => !decisionGreen(t.review_task_id) && t.blocking).length; const completed = all.filter(t => decisionGreen(t.review_task_id)).length; const selected = selectedTask(caseId);
-  return `<div class="task-summary"><div class="stat"><span>Remaining</span><strong>${remaining}</strong></div><div class="stat"><span>Completed</span><strong>${completed}</strong></div><div class="stat"><span>Current</span><strong>${currentTaskNumber(caseId)}</strong></div></div><div class="filter-row">${['All','Open','Completed'].map(f => `<button class="${state.filter[caseId] === f ? 'active' : ''}" data-action="filter" data-filter="${f}">${f}</button>`).join('')}</div><div class="task-list">${tasks.map(t => taskCardHtml(caseId, t)).join('') || '<p class="muted">No review items in this filter.</p>'}</div>${selected && requiresEditor(selected) ? '<button class="primary open-editor" data-action="open-editor">Open in editor</button>' : ''}`;
+  const tasks = filteredTasks(caseId); const counts = taskCounts(caseId); const selected = selectedTask(caseId);
+  const filters = ['Open','Needs correction','Unsure / Escalated','Completed','Resolved','All'];
+  return `<div class="workflow-stepper">${workflowStepperHtml(caseId)}</div>${workflowMessageHtml(caseId)}<div class="task-summary"><div class="stat"><span>Open</span><strong>${counts.open}</strong></div><div class="stat"><span>Needs correction</span><strong>${counts.needs_correction}</strong></div><div class="stat"><span>Unsure / Escalated</span><strong>${counts.unsure}</strong></div><div class="stat"><span>Completed</span><strong>${counts.correct}</strong></div><div class="stat"><span>Resolved</span><strong>${counts.resolved}</strong></div><div class="stat"><span>Current</span><strong>${currentTaskNumber(caseId)}</strong></div></div><div class="filter-row">${filters.map(f => `<button class="${state.filter[caseId] === f ? 'active' : ''}" data-action="filter" data-filter="${f}">${f}</button>`).join('')}</div><div class="task-list">${tasks.map(t => taskCardHtml(caseId, t)).join('') || '<p class="muted">No review items in this filter.</p>'}</div>${selected && requiresEditor(selected) ? '<button class="primary open-editor" data-action="open-editor">Open in editor</button>' : ''}`;
 }
 function allTasks(caseId) { return [...(DATA.tasks?.tasks || []), ...state.manualTasks].filter(t => t.case_id === caseId && !t.technical_only); }
-function filteredTasks(caseId) { const f = state.filter[caseId] || 'Open'; return allTasks(caseId).filter(t => f === 'All' || (f === 'Completed' ? decisionGreen(t.review_task_id) : !decisionGreen(t.review_task_id))); }
-function firstOpenTask(caseId) { return allTasks(caseId).find(t => !decisionGreen(t.review_task_id)); }
+function filteredTasks(caseId) { const f = state.filter[caseId] || 'Open'; return allTasks(caseId).filter(t => f === 'All' || filterMatchesTask(f, t)); }
+function filterMatchesTask(filter, task) { const stateName = taskState(task); if (filter === 'Open') return stateName === 'open'; if (filter === 'Needs correction') return stateName === 'needs_correction' || stateName === 'correction_pending_verification'; if (filter === 'Unsure / Escalated') return stateName === 'unsure'; if (filter === 'Completed') return stateName === 'correct'; if (filter === 'Resolved') return stateName === 'resolved'; return true; }
+function firstOpenTask(caseId) { return allTasks(caseId).find(t => taskState(t) === 'open'); }
 function currentTaskNumber(caseId) { const tasks = allTasks(caseId); const index = tasks.findIndex(t => t.review_task_id === state.selectedTask[caseId]); return index >= 0 ? `${index + 1}/${tasks.length}` : `0/${tasks.length}`; }
-function decisionGreen(taskId) { return ['looks_correct','not_sensitive','cosmetic_only'].includes(String(state.decisions[taskId]?.action || '')); }
-function taskCardHtml(caseId, task) { const selected = task.review_task_id === state.selectedTask[caseId]; const decision = state.decisions[task.review_task_id]; return `<article class="task-card ${selected ? 'selected' : ''}" data-task-id="${esc(task.review_task_id)}"><div class="task-title">${esc(cleanTaskTitle(task))}</div><div class="task-meta">${task.category} · source ${task.source_frame_start}${task.source_frame_end !== task.source_frame_start ? `-${task.source_frame_end}` : ''} · ${timeText((task.source_frame_start - caseData(caseId).source_frame_start)/fpsValue(caseId))}</div><p>${esc(task.what_to_inspect || 'Check this interval in the video.')}</p><span class="badge ${decisionGreen(task.review_task_id) ? 'done' : task.blocking ? 'open' : 'warn'}">${decision ? esc(actionLabel(decision.action)) : task.blocking ? 'Open required' : 'Open'}</span><div class="task-actions">${decisionButtons(task).map(a => `<button data-action="decision" data-task-id="${esc(task.review_task_id)}" data-decision="${a.action}" aria-pressed="${decision?.action === a.action ? 'true' : 'false'}" class="decision-choice decision-${a.tone}${decision?.action === a.action ? ' selected' : ''}">${esc(a.label)}</button>`).join('')}</div><div class="saved-note" data-saved-for="${esc(task.review_task_id)}">${state.savedFlash[task.review_task_id] ? 'Saved' : ''}</div></article>`; }
-function cleanTaskTitle(task) { if (task.issue_type === 'optional_spot_check') return 'Spot check this moment'; if (String(task.issue_type || '').includes('false')) return 'Check possible unnecessary redaction'; if (task.blocking && task.category === 'license_plate') return 'Plate may need correction'; if (task.blocking && task.category === 'face') return 'Face may need correction'; return task.title || 'Review this interval'; }
+function taskState(task) { const action = String(state.decisions[task.review_task_id]?.action || ''); if (!action) return 'open'; if (action === ACTIONS.looks) return 'correct'; if (action === ACTIONS.unsure) return 'unsure'; if ([ACTIONS.leak, ACTIONS.partial, ACTIONS.falseRedaction, ACTIONS.wrong].includes(action)) return 'needs_correction'; if ([ACTIONS.notSensitive, ACTIONS.cosmetic].includes(action)) return 'resolved'; return 'open'; }
+function taskCounts(caseId) { const counts = {open:0, needs_correction:0, unsure:0, correct:0, resolved:0}; for (const task of allTasks(caseId)) { const value = taskState(task); counts[value] = (counts[value] || 0) + 1; } return counts; }
+function decisionGreen(taskId) { const task = [...(DATA.tasks?.tasks || []), ...state.manualTasks].find(t => t.review_task_id === taskId); if (!task) return false; return ['correct','resolved'].includes(taskState(task)); }
+function taskCardHtml(caseId, task) { const selected = task.review_task_id === state.selectedTask[caseId]; const decision = state.decisions[task.review_task_id]; const stateName = taskState(task); return `<article class="task-card ${selected ? 'selected' : ''}" data-task-id="${esc(task.review_task_id)}" data-task-state="${esc(stateName)}"><div class="task-title">${esc(cleanTaskTitle(task))}</div><div class="task-meta">${task.category} · source ${task.source_frame_start}${task.source_frame_end !== task.source_frame_start ? `-${task.source_frame_end}` : ''} · ${timeText((task.source_frame_start - caseData(caseId).source_frame_start)/fpsValue(caseId))}</div><p>${esc(task.what_to_inspect || 'Check this interval in the video.')}</p><span class="badge ${badgeClassForTask(task)}">${decision ? esc(actionLabel(decision.action)) : task.optional ? 'Optional open' : task.blocking ? 'Open required' : 'Open'}</span><div class="task-actions">${decisionButtons(task).map(a => `<button data-action="decision" data-task-id="${esc(task.review_task_id)}" data-decision="${a.action}" aria-pressed="${decision?.action === a.action ? 'true' : 'false'}" class="decision-choice decision-${a.tone}${decision?.action === a.action ? ' selected' : ''}">${esc(a.label)}</button>`).join('')}</div><div class="saved-note" data-saved-for="${esc(task.review_task_id)}">${state.savedFlash[task.review_task_id] ? 'Saved' : ''}</div></article>`; }
+function badgeClassForTask(task) { const stateName = taskState(task); if (stateName === 'correct' || stateName === 'resolved') return 'done'; if (stateName === 'needs_correction' || stateName === 'unsure' || task.blocking) return 'open'; return 'warn'; }
+function cleanTaskTitle(task) { if (task.issue_type === 'spot_check' || task.issue_type === 'optional_spot_check') return 'Spot check this moment'; if (task.issue_type === 'possible_false_redaction' || String(task.issue_type || '').includes('false')) return 'Possible false redaction'; if (task.issue_type === 'possible_privacy_gap' && task.category === 'license_plate') return 'Possible plate privacy gap'; if (task.issue_type === 'possible_privacy_gap' && task.category === 'face') return 'Possible face privacy gap'; if (task.issue_type === 'manual_reviewer_issue' || task.issue_type === 'reviewer_created_issue') return 'Reviewer-created issue'; return task.title || 'Review this interval'; }
+function workflowStepperHtml(caseId) { const counts = taskCounts(caseId); const active = counts.open > 0 ? 'Review' : counts.needs_correction > 0 || counts.unsure > 0 ? 'Corrections' : 'Full-video sweep'; return ['Review','Corrections','Full-video sweep','Finalize','Final result'].map(step => `<span class="badge ${step === active ? 'warn' : 'done'}">${step}</span>`).join(' '); }
+function workflowMessageHtml(caseId) { const counts = taskCounts(caseId); if (counts.open === 0 && (counts.needs_correction > 0 || counts.unsure > 0)) return `<div class="stat"><strong>Review complete</strong><p>Corrections or escalations still require action.</p><button data-action="filter" data-filter="Needs correction">Open Corrections</button></div>`; if (counts.open === 0) return `<div class="stat"><strong>All review items are resolved</strong><p>Complete the full-video sweep before finalization.</p></div>`; return ''; }
 function decisionButtons(task) { return [{label:'Correct', action:ACTIONS.looks, tone:'correct'}, {label:'Needs correction', action:ACTIONS.leak, tone:'needs-correction'}, {label:'Unsure', action:ACTIONS.unsure, tone:'unsure'}]; }
-function bindReviewPanel(caseId) { const panel = document.getElementById(`case-${caseId}`); if (panel.dataset.reviewDelegated === 'true') return; panel.dataset.reviewDelegated = 'true'; panel.addEventListener('click', e => { const actionEl = closestElement(e.target, '[data-action]'); if (actionEl) { const action = actionEl.dataset.action; if (action === 'filter') { state.filter[caseId] = actionEl.dataset.filter; renderCase(caseId); return; } if (action === 'decision') { e.preventDefault(); e.stopPropagation(); recordDecision(caseId, actionEl.dataset.taskId, actionEl.dataset.decision, actionEl); return; } if (action === 'open-editor') { setMode(caseId, 'edit'); return; } } const card = closestElement(e.target, '.task-card'); if (card && !closestElement(e.target, 'button,input,select,textarea,a')) selectTask(caseId, card.dataset.taskId, {jump:true}); }); }
-function selectTask(caseId, taskId, opts = {}) { state.selectedTask[caseId] = taskId; const task = selectedTask(caseId); if (task && opts.jump) seekToFrame(caseId, task.source_frame_start - caseData(caseId).source_frame_start); renderCase(caseId); setTimeout(() => document.querySelector(`#case-${caseId} [data-task-id="${CSS.escape(taskId)}"]`)?.scrollIntoView({block:'nearest'}), 0); }
-async function recordDecision(caseId, taskId, action, button = null) { if (!state.session) return showSessionError('Start review before recording decisions.'); const task = allTasks(caseId).find(t => t.review_task_id === taskId); setDecisionPending(button); try { const event = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: decisionNote(action, task) }); state.decisions[taskId] = event.event.after_state; state.savedFlash[taskId] = true; if (action === ACTIONS.leak && task?.issue_type === 'optional_spot_check') await createManualIssue(caseId, task.source_frame_start, task.source_frame_end, 'Privacy issue from spot check'); setTimeout(() => { delete state.savedFlash[taskId]; renderCase(caseId); }, 1200); const next = firstOpenTask(caseId); if (next && next.review_task_id !== taskId) state.selectedTask[caseId] = next.review_task_id; renderCase(caseId); } catch (err) { setDecisionError(button, err.message); showSessionError(`Decision was not saved: ${err.message}`); } }
+function bindReviewPanel(caseId) { const panel = document.getElementById(`case-${caseId}`); if (panel.dataset.reviewDelegated === 'true') return; panel.dataset.reviewDelegated = 'true'; panel.addEventListener('click', e => { const actionEl = closestElement(e.target, '[data-action]'); if (actionEl) { const action = actionEl.dataset.action; if (action === 'filter') { state.filter[caseId] = actionEl.dataset.filter; refreshSidePanel(caseId, {preserveScroll:true}); return; } if (action === 'decision') { e.preventDefault(); e.stopPropagation(); recordDecision(caseId, actionEl.dataset.taskId, actionEl.dataset.decision, actionEl); return; } if (action === 'open-editor') { setMode(caseId, 'edit'); return; } } const card = closestElement(e.target, '.task-card'); if (card && !closestElement(e.target, 'button,input,select,textarea,a')) selectTask(caseId, card.dataset.taskId, {jump:true, preserveScroll:true}); }); }
+function refreshSidePanel(caseId, opts = {}) { const panel = document.getElementById(`case-${caseId}`); const side = panel?.querySelector('.side-panel'); if (!side) return; const scrollTop = side.scrollTop; side.innerHTML = state.mode[caseId] === 'edit' ? editPanelHtml(caseId) : reviewPanelHtml(caseId); if (state.mode[caseId] === 'edit') { bindEditPanel(caseId); bindEntityPanel(caseId); } bindTimeline(caseId); if (opts.preserveScroll) side.scrollTop = scrollTop; if (opts.scrollActive !== false) setTimeout(() => document.querySelector(`#case-${caseId} .side-panel [data-task-id="${CSS.escape(state.selectedTask[caseId] || '')}"]`)?.scrollIntoView({block:'nearest'}), 0); }
+async function selectTask(caseId, taskId, opts = {}) { state.selectedTask[caseId] = taskId; const task = selectedTask(caseId); if (task && opts.jump) { const targetFrame = task.source_frame_start - caseData(caseId).source_frame_start; await seekToFrame(caseId, targetFrame, { keepPaused: true }); assertActiveTaskFrame(caseId, task); } refreshSidePanel(caseId, {preserveScroll: Boolean(opts.preserveScroll)}); }
+function assertActiveTaskFrame(caseId, task) { const expected = task.source_frame_start - caseData(caseId).source_frame_start; if (state.frame[caseId] !== expected) showSessionError(`Frame navigation mismatch: expected case frame ${expected}, got ${state.frame[caseId]}.`); }
+async function recordDecision(caseId, taskId, action, button = null) { if (!state.session) return showSessionError('Start review before recording decisions.'); const task = allTasks(caseId).find(t => t.review_task_id === taskId); setDecisionPending(button); try { const event = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: decisionNote(action, task) }); state.decisions[taskId] = event.event.after_state; state.savedFlash[taskId] = true; if (action === ACTIONS.leak && task?.issue_type === 'spot_check') await createManualIssue(caseId, task.source_frame_start, task.source_frame_end, 'Privacy issue from spot check'); const next = firstOpenTask(caseId); if (next) { await selectTask(caseId, next.review_task_id, {jump:true, preserveScroll:true}); } else { refreshSidePanel(caseId, {preserveScroll:true}); } setTimeout(() => { delete state.savedFlash[taskId]; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); }, 1200); } catch (err) { setDecisionError(button, err.message); showSessionError(`Decision was not saved: ${err.message}`); } }
 function setDecisionPending(button) { const card = button?.closest('.task-card'); if (!card) return; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.classList.toggle('selected', choice === button); choice.setAttribute('aria-pressed', choice === button ? 'true' : 'false'); choice.disabled = true; }); const note = card.querySelector('.saved-note'); if (note) note.textContent = 'Saving...'; }
 function setDecisionError(button, message) { const card = button?.closest('.task-card'); if (!card) return; const savedAction = state.decisions[card.dataset.taskId]?.action || ''; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.disabled = false; choice.classList.toggle('selected', choice.dataset.decision === savedAction); choice.setAttribute('aria-pressed', choice.dataset.decision === savedAction ? 'true' : 'false'); }); const note = card.querySelector('.saved-note'); if (note) note.textContent = `Could not save: ${message}`; }
 function decisionNote(action, task) { if (action === ACTIONS.leak || action === ACTIONS.partial) return 'Reviewer marked this item for correction.'; if (action === ACTIONS.falseRedaction) return 'Reviewer requested bounded redaction removal.'; return `Reviewer selected ${actionLabel(action)} for ${task?.review_task_id || 'task'}.`; }
@@ -2390,16 +2711,19 @@ function defaultDraftBox(caseId) { const m = caseData(caseId); const w = Number(
 function drawEditorCanvas(caseId) { const canvas = document.getElementById(`editorCanvas-${caseId}`); if (!canvas) return; const ctx = canvas.getContext('2d'); ctx.fillStyle = '#020617'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.fillStyle = '#cbd5e1'; ctx.fillText('Draw and adjust correction geometry on Original media. Keyframes are reviewer-authored; interpolation is preview-only until verified.', 18, 32); ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 3; for (const k of (state.draft.keyframes || [])) { const [x1,y1,x2,y2] = k.bbox_xyxy; const m = caseData(caseId); const sx = canvas.width / (m.width || canvas.width), sy = canvas.height / (m.height || canvas.height); ctx.strokeRect(x1*sx, y1*sy, (x2-x1)*sx, (y2-y1)*sy); } }
 async function saveCorrection(caseId, opts = {}) { if (!state.session) return showSessionError('Start review before saving corrections.'); ensureDraft(caseId); const start = Math.min(state.draft.start ?? sourceFrame(caseId), state.draft.end ?? sourceFrame(caseId)); const end = Math.max(state.draft.start ?? sourceFrame(caseId), state.draft.end ?? sourceFrame(caseId)); const keyframes = (state.draft.keyframes || []).filter(k => !k.state); if (keyframes.length < 1) return showSessionError('Add at least one keyframe before saving a correction.'); if (start !== end && keyframes.length < 2) return showSessionError('Intervals longer than one frame require start and end keyframes.'); const task = selectedTask(caseId) || await createManualIssue(caseId, start, end, 'Reviewer-created correction'); const correction = { case_id: caseId, task_id: task.review_task_id, category: task.category || 'license_plate', operation: 'add_privacy_region', source_frame_start: start, source_frame_end: end, keyframe_boxes: keyframes, interpolation_method: keyframes.length > 1 ? 'linear' : 'none', reviewer_identity: currentActor(), reason: opts.previewOnly ? 'Preview correction draft' : 'Reviewed correction revision', source_video_hash: caseData(caseId).source_video_hash, configuration_freeze_hash: DATA.workspace.configuration_freeze_hash || 'package_freeze' }; try { const response = await postJson('/api/corrections', { session_id: state.session.session_id, actor: currentActor(), correction, reason: correction.reason }); state.corrections.push(response.event.after_state); if (response.preview?.latest_reviewed) { state.latestReviewed[caseId] = { path: response.preview.latest_reviewed, frame_start: response.preview.frame_start, frame_end: response.preview.frame_end }; state.version[caseId] = 'latest_reviewed'; localStorage.setItem(storageKey(`version_${caseId}`), 'latest_reviewed'); } else if (response.preview?.corrected_preview) { state.latestReviewed[caseId] = { path: response.preview.corrected_preview, frame_start: response.preview.frame_start, frame_end: response.preview.frame_end }; } state.savedFlash[task.review_task_id] = true; renderCase(caseId); } catch (err) { showSessionError(`Correction was not saved: ${err.message}`); } }
 async function verifyCorrection(caseId) { const task = selectedTask(caseId); if (!task) return; await recordDecision(caseId, task.review_task_id, ACTIONS.looks); }
-async function createManualIssue(caseId, startSource, endSource, reason) { const task = { blocking: true, case_id: caseId, category: 'license_plate', correction_required: true, decision_state: 'pending', issue_type: 'manual_reviewer_issue', raw_signal_ids: [], review_task_id: `manual_${caseId}_${Date.now()}`, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: startSource, source_frame_end: endSource, technical_only: false, title: 'Reviewer-added issue', what_happened: 'A reviewer added this issue during full-video review.', what_to_inspect: 'Open in editor, add a reviewed correction if privacy protection is needed.' }; if (state.session) await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'manual_issue_created', case_id: caseId, entity_id: null, payload: { after: { task } } } }); state.manualTasks.push(task); state.selectedTask[caseId] = task.review_task_id; renderCase(caseId); return task; }
+async function createManualIssue(caseId, startSource, endSource, reason) { const task = { blocking: true, case_id: caseId, category: 'license_plate', correction_required: true, decision_state: 'pending', issue_type: 'reviewer_created_issue', normal_task_class: 'reviewer_created_issue', raw_signal_ids: [], review_task_id: `manual_${caseId}_${Date.now()}`, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: startSource, source_frame_end: endSource, technical_only: false, title: 'Reviewer-created issue', what_happened: 'A reviewer added this issue during full-video review.', what_to_inspect: 'Open in editor, add a reviewed correction if privacy protection is needed.' }; if (state.session) await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'manual_issue_created', case_id: caseId, entity_id: null, payload: { after: { task } } } }); state.manualTasks.push(task); state.selectedTask[caseId] = task.review_task_id; refreshSidePanel(caseId, {preserveScroll:true}); return task; }
 
 function entityCardsHtml(caseId) { const entities = effectiveEntities(caseId).slice(0, 100); return entities.map(entity => `<article class="entity-card" data-entity-id="${esc(entity.entity_id)}"><img src="${esc(entity.representative_thumbnail_path || '')}" alt="${esc(entity.label)} thumbnail" data-action="jump-entity"><div><div class="task-title">${esc(entity.label)}</div><div class="task-meta">${entity.category === 'face' ? 'Person' : 'Plate'} · source ${entity.first_visible_source_frame ?? '?'}-${entity.last_visible_source_frame ?? '?'}</div><span class="badge ${entity.current_policy === 'review_required' ? 'open' : 'done'}">${policyLabel(entity.current_policy || entity.default_privacy_policy)}</span></div><div class="entity-actions"><button data-action="entity-redact">Redact</button><button data-action="entity-keep">Keep visible</button><button data-action="entity-invalid">${entity.category === 'face' ? 'Not a person' : 'Not a plate'}</button><button data-action="entity-merge">Merge with...</button></div><details><summary>Technical details</summary><pre>${esc(JSON.stringify({entity_id: entity.entity_id, tracks: entity.member_detector_tracker_ids || entity.automatic_source_track_ids, provenance: entity.created_provenance}, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No review objects available.</p>'; }
 function effectiveEntities(caseId) { const base = (DATA.entities?.cases?.[caseId] || []).map(e => ({...e, ...(state.entityOverrides[e.entity_id] || {})})); return base.filter(e => e.current_status !== 'merged'); }
-function bindEntityPanel(caseId) { const panel = document.getElementById(`case-${caseId}`); panel.querySelectorAll('[data-action="jump-entity"]').forEach(img => img.addEventListener('click', () => { const entity = findEntity(caseId, img.closest('.entity-card').dataset.entityId); if (entity?.representative_source_frame !== undefined) seekToFrame(caseId, entity.representative_source_frame - caseData(caseId).source_frame_start); })); panel.querySelectorAll('[data-action="entity-redact"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'redact'))); panel.querySelectorAll('[data-action="entity-keep"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'keep_visible'))); panel.querySelectorAll('[data-action="entity-invalid"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'not_sensitive'))); panel.querySelectorAll('[data-action="entity-merge"]').forEach(btn => btn.addEventListener('click', () => mergeEntityPrompt(caseId, btn.closest('.entity-card').dataset.entityId))); }
+function bindEntityPanel(caseId, root = document.getElementById(`case-${caseId}`)) { if (!root) return; root.querySelectorAll('[data-action="jump-entity"]').forEach(img => img.addEventListener('click', () => { const entity = findEntity(caseId, img.closest('.entity-card').dataset.entityId); if (entity?.representative_source_frame !== undefined) { closeEntities(); seekToFrame(caseId, entity.representative_source_frame - caseData(caseId).source_frame_start); } })); root.querySelectorAll('[data-action="entity-redact"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'redact'))); root.querySelectorAll('[data-action="entity-keep"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'keep_visible'))); root.querySelectorAll('[data-action="entity-invalid"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'not_sensitive'))); root.querySelectorAll('[data-action="entity-merge"]').forEach(btn => btn.addEventListener('click', () => mergeEntityPrompt(caseId, btn.closest('.entity-card').dataset.entityId))); }
+function openEntities(caseId) { const modal = document.getElementById('entitiesModal'); const content = document.getElementById('entitiesModalContent'); content.innerHTML = `<div class="inline-actions"><input id="entitySearch" placeholder="Search objects"><select id="entityFilter"><option value="all">All</option><option value="face">People</option><option value="license_plate">Plates</option></select></div><div class="object-list">${entityCardsHtml(caseId)}</div><details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; modal.dataset.caseId = caseId; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); bindEntityPanel(caseId, content); }
+function closeEntities() { const modal = document.getElementById('entitiesModal'); if (!modal) return; modal.classList.remove('open'); modal.setAttribute('aria-hidden', 'true'); }
+function possibleDuplicateSuggestions(caseId) { const entities = effectiveEntities(caseId); const suggestions = []; for (let i=0; i<entities.length; i++) for (let j=i+1; j<entities.length; j++) { const a=entities[i], b=entities[j]; if (a.category !== b.category || entitiesOverlap(a,b)) continue; const gap = Math.max(0, Math.max(a.first_visible_source_frame || 0, b.first_visible_source_frame || 0) - Math.min(a.last_visible_source_frame || 0, b.last_visible_source_frame || 0)); if (gap <= 30) suggestions.push({entity_ids:[a.entity_id,b.entity_id], labels:[a.label,b.label], reason:'nearby_non_overlapping_tracklets'}); } return suggestions.slice(0, 20); }
 function findEntity(caseId, id) { return effectiveEntities(caseId).find(e => e.entity_id === id); }
 function policyLabel(policy) { return {redact:'Redact', keep_visible:'Keep visible', not_sensitive:'Invalid / not sensitive', review_required:'Needs review'}[policy] || policy; }
-async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; let reason = 'Reviewer object policy update.'; if (policy !== 'redact') { reason = (window.prompt(`Reason for ${policyLabel(policy)}?`, '') || '').trim(); if (!reason) return; } const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; if (verificationTaskId) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after } }, reason }); renderCase(caseId); }
+async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; let reason = 'Reviewer object policy update.'; if (policy !== 'redact') { reason = (window.prompt(`Reason for ${policyLabel(policy)}?`, '') || '').trim(); if (!reason) return; } const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; if (verificationTaskId) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after } }, reason }); refreshSidePanel(caseId, {preserveScroll:true}); if (document.getElementById('entitiesModal')?.classList.contains('open')) openEntities(caseId); }
 function policyTask(caseId, entity, taskId) { return { blocking: true, case_id: caseId, category: entity.category, correction_required: false, decision_state: 'pending', issue_type: 'entity_policy_verification', raw_signal_ids: [], review_task_id: taskId, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: entity.first_visible_source_frame || caseData(caseId).source_frame_start, source_frame_end: entity.first_visible_source_frame || caseData(caseId).source_frame_start, technical_only: false, title: `Verify ${policyLabel(entity.current_policy)} for ${entity.label}`, what_to_inspect: 'Confirm this object policy is correct before finalization.' }; }
-async function mergeEntityPrompt(caseId, entityId) { if (!state.session) return showSessionError('Start review before merging objects.'); const source = findEntity(caseId, entityId); const candidates = effectiveEntities(caseId).filter(e => e.entity_id !== entityId && e.category === source.category); const targetId = (window.prompt(`Merge ${source.label} with which ID?\n${candidates.map(e => `${e.entity_id}: ${e.label}`).join('\n')}`, '') || '').trim(); const target = findEntity(caseId, targetId); if (!target) return; if (entitiesOverlap(source, target)) return showSessionError('Merge rejected: these objects are simultaneously visible.'); const reason = (window.prompt('Reason for merging these objects?', '') || '').trim(); if (!reason) return; const before = { source, target }; const merged = {...source, member_detector_tracker_ids: [...new Set([...(source.member_detector_tracker_ids || []), ...(target.member_detector_tracker_ids || [])])], merge_split_lineage: [...(source.merge_split_lineage || []), { operation:'merge', merged_entity_id: target.entity_id }]}; state.entityOverrides[source.entity_id] = merged; state.entityOverrides[target.entity_id] = {...target, current_status:'merged'}; await postJson('/api/entities/merge', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, before_state: before, after_state: { primary: merged, retired_entity_ids: [target.entity_id] }, reason }); renderCase(caseId); }
+async function mergeEntityPrompt(caseId, entityId) { if (!state.session) return showSessionError('Start review before merging objects.'); const source = findEntity(caseId, entityId); const candidates = effectiveEntities(caseId).filter(e => e.entity_id !== entityId && e.category === source.category); const targetId = (window.prompt(`Merge ${source.label} with which ID?\n${candidates.map(e => `${e.entity_id}: ${e.label}`).join('\n')}`, '') || '').trim(); const target = findEntity(caseId, targetId); if (!target) return; if (entitiesOverlap(source, target)) return showSessionError('Merge rejected: these objects are simultaneously visible.'); const reason = (window.prompt('Reason for merging these objects?', '') || '').trim(); if (!reason) return; const before = { source, target }; const merged = {...source, member_detector_tracker_ids: [...new Set([...(source.member_detector_tracker_ids || []), ...(target.member_detector_tracker_ids || [])])], merge_split_lineage: [...(source.merge_split_lineage || []), { operation:'merge', merged_entity_id: target.entity_id }]}; state.entityOverrides[source.entity_id] = merged; state.entityOverrides[target.entity_id] = {...target, current_status:'merged'}; await postJson('/api/entities/merge', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, before_state: before, after_state: { primary: merged, retired_entity_ids: [target.entity_id] }, reason }); refreshSidePanel(caseId, {preserveScroll:true}); if (document.getElementById('entitiesModal')?.classList.contains('open')) openEntities(caseId); }
 function entitiesOverlap(a,b) { const a1=a.first_visible_source_frame, a2=a.last_visible_source_frame, b1=b.first_visible_source_frame, b2=b.last_visible_source_frame; if ([a1,a2,b1,b2].some(v => v === null || v === undefined)) return false; return Math.max(a1,b1) <= Math.min(a2,b2); }
 
 async function restoreSession() { const sessionId = localStorage.getItem(storageKey('session_id')); if (!sessionId) return; try { await loadSessionState(sessionId); } catch { localStorage.removeItem(storageKey('session_id')); } }
@@ -2412,12 +2736,12 @@ function openAttributionModal() { document.getElementById('attributionModal').cl
 function closeAttributionModal() { document.getElementById('attributionModal').classList.remove('open'); document.getElementById('attributionModal').setAttribute('aria-hidden', 'true'); }
 async function submitAttribution() { if (!state.session) return showSessionError('Start review before setting attribution.'); const name = document.getElementById('reviewerName').value.trim(); if (!name) { document.getElementById('attributionError').textContent = 'Reviewer name is required.'; return; } try { const res = await postJson('/api/reviewer-attribution', { session_id: state.session.session_id, display_name: name, actor: currentActor(), note: 'Reviewer attribution set.' }); state.attribution = res.attribution; await loadSessionState(state.session.session_id); closeAttributionModal(); renderApp(); } catch (err) { document.getElementById('attributionError').textContent = err.message; } }
 function exportSession() { if (!state.session) return showSessionError('Start review before exporting.'); if (!state.attribution?.display_name) { openAttributionModal(); return; } window.open(`sessions/${state.session.session_id}/review_summary.json`, '_blank'); }
-function renderAudit() { const panel = document.getElementById('case-audit'); panel.innerHTML = `<h2>Audit Trail</h2><p class="case-subtitle">Append-only events with hash-chain validation.</p><div class="audit-list">${(state.events || []).map(e => `<article class="audit-card"><strong>${esc(e.event_type)}</strong><p class="task-meta">${esc(e.timestamp_utc)} · ${esc(e.case_id || 'workspace')}</p><p>${esc(e.note || '')}</p><details><summary>Technical JSON</summary><pre>${esc(JSON.stringify(e, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No events yet.</p>'}</div>`; }
+function renderAudit() { const panel = document.getElementById('case-audit'); panel.innerHTML = `<h2>Audit Trail</h2><p class="case-subtitle">Append-only events with hash-chain validation.</p><div class="audit-list">${(state.events || []).map(e => `<article class="audit-card"><strong>${esc(e.event_type)}</strong><p class="task-meta">${esc(e.timestamp_utc)} · ${esc(e.case_id || 'workspace')}</p><p>${esc(e.note || '')}</p><details><summary>Technical JSON</summary><pre>${esc(JSON.stringify(e, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No events yet.</p>'}</div><details class="technical"><summary>Raw audit signals preserved outside the normal queue (${(DATA.rawSignals?.raw_signals || []).length})</summary><pre>${esc(JSON.stringify(DATA.rawSignals, null, 2))}</pre></details>`; }
 function renderFinal() { const panel = document.getElementById('case-final'); panel.innerHTML = `<h2>Final Results</h2><p class="case-subtitle">Reviewed-final outputs remain unavailable until finalization gates pass.</p><div class="final-card"><p class="muted">Finalization is currently controlled by the same validated backend gates. Use Review/Edit to resolve blockers, then finalize from the supported workflow.</p><div class="button-row"><button data-action="finalize-day">Check Day finalization</button><button data-action="finalize-night">Check Night finalization</button></div><pre id="finalizeStatus"></pre></div>`; panel.querySelector('[data-action="finalize-day"]').addEventListener('click', () => finalizeCase('day')); panel.querySelector('[data-action="finalize-night"]').addEventListener('click', () => finalizeCase('night')); }
 async function finalizeCase(caseId) { if (!state.session) return showSessionError('Start review before finalizing.'); if (!state.attribution?.display_name) { openAttributionModal(); return; } const out = document.getElementById('finalizeStatus'); try { const res = await postJson('/api/finalize', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId }); out.textContent = JSON.stringify(res.result, null, 2); } catch (err) { out.textContent = `Finalization blocked: ${err.message}`; } }
 function actionLabel(action) { if (action === ACTIONS.looks) return 'Correct'; if ([ACTIONS.leak, ACTIONS.partial, ACTIONS.falseRedaction, ACTIONS.wrong].includes(action)) return 'Needs correction'; if (action === ACTIONS.unsure) return 'Unsure'; if (action === ACTIONS.notSensitive) return 'Not sensitive'; if (action === ACTIONS.cosmetic) return 'Cosmetic only'; const found = (DATA.tasks?.actions || []).find(a => a.action === action); return found ? found.label : action; }
-function installGlobalHandlers() { document.body.tabIndex = -1; document.body.focus(); document.getElementById('startSession').addEventListener('click', startSession); document.getElementById('changeAttribution').addEventListener('click', openAttributionModal); document.getElementById('exportSession').addEventListener('click', exportSession); document.getElementById('submitAttribution').addEventListener('click', submitAttribution); document.getElementById('cancelAttribution').addEventListener('click', closeAttributionModal); document.querySelectorAll('.case-tabs button').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab))); window.addEventListener('keydown', onKeyDown, { capture: true }); document.addEventListener('fullscreenchange', () => updatePlayerUi(visibleCaseId())); }
+function installGlobalHandlers() { document.body.tabIndex = -1; document.body.focus(); document.getElementById('startSession').addEventListener('click', startSession); document.getElementById('changeAttribution').addEventListener('click', openAttributionModal); document.getElementById('exportSession').addEventListener('click', exportSession); document.getElementById('submitAttribution').addEventListener('click', submitAttribution); document.getElementById('cancelAttribution').addEventListener('click', closeAttributionModal); document.getElementById('closeEntities')?.addEventListener('click', closeEntities); document.querySelectorAll('.case-tabs button').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab))); window.addEventListener('keydown', onKeyDown, { capture: true }); document.addEventListener('fullscreenchange', () => updatePlayerUi(visibleCaseId())); }
 function isTextEntryTarget(element) { const tag = element?.tagName?.toLowerCase(); if (!tag) return false; if (element.isContentEditable) return true; if (tag === 'textarea' || tag === 'select') return true; if (tag !== 'input') return false; const type = String(element.type || 'text').toLowerCase(); return !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes(type); }
-function onKeyDown(event) { if (isTextEntryTarget(document.activeElement)) return; if (event.key === 'ArrowRight' || event.key === 'Right') { event.preventDefault(); stepFrame(event.shiftKey ? 10 : 1); } else if (event.key === 'ArrowLeft' || event.key === 'Left') { event.preventDefault(); stepFrame(event.shiftKey ? -10 : -1); } else if (event.key === ' ') { event.preventDefault(); togglePlay(visibleCaseId()); } else if (event.key.toLowerCase() === 'f') { const wrapper = document.querySelector(`#case-${visibleCaseId()}.active .player-wrapper`); if (wrapper) toggleFullscreen(wrapper); } else if (event.key === 'Escape' && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); } }
+function onKeyDown(event) { if (isTextEntryTarget(document.activeElement)) return; if (event.key === 'ArrowRight' || event.key === 'Right') { event.preventDefault(); stepFrame(event.shiftKey ? 10 : 1); } else if (event.key === 'ArrowLeft' || event.key === 'Left') { event.preventDefault(); stepFrame(event.shiftKey ? -10 : -1); } else if (event.key === ' ') { event.preventDefault(); togglePlay(visibleCaseId()); } else if (event.key.toLowerCase() === 'f') { const wrapper = document.querySelector(`#case-${visibleCaseId()}.active .player-wrapper`); if (wrapper) toggleFullscreen(wrapper); } else if (event.key === 'Escape' && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); } else if (event.key === 'Escape') { closeEntities(); closeAttributionModal(); } }
 init().catch(err => { document.body.innerHTML = `<pre>${err.stack || err}</pre>`; });
 """
