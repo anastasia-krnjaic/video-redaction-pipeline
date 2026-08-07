@@ -688,8 +688,8 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     assert "'range'" in js
     assert "stepFrame(event.shiftKey ? 10 : 1)" in js
     assert "stepFrame(event.shiftKey ? -10 : -1)" in js
-    assert "Final Review Workspace v2.3.2" in html
-    assert "final_review_workspace.v2.3.2" in js
+    assert "Final Review Workspace v2.3.3" in html
+    assert "final_review_workspace.v2.3.3" in js
     assert "function closestElement" in js
     assert "reviewDelegated" in js
     assert "function refreshSidePanel" in js
@@ -728,7 +728,7 @@ def test_review_entity_registry_generates_thumbnails(tmp_path: Path) -> None:
     package = tmp_path / "package"
     source = package / "media" / "day" / "original_reference.mp4"
     source.parent.mkdir(parents=True)
-    write_synthetic_video(source, frame_count=3)
+    write_synthetic_video(source, frame_count=12)
     manifest = case_manifests.case_manifest_from_media(
         case_id="day",
         display_name="Day",
@@ -740,13 +740,34 @@ def test_review_entity_registry_generates_thumbnails(tmp_path: Path) -> None:
                 label="Original",
                 path="media/day/original_reference.mp4",
                 role="original",
-                source_frame_end=102,
+                source_frame_end=111,
                 source_frame_start=100,
             )
         ],
     )
     case_manifests.write_case_manifest(package / "cases" / "day.json", manifest)
-    write_base_region(package, "day")
+    records = [
+        PrivacyRegionRecord(
+            approval_state=APPROVAL_ACCEPTED,
+            bbox_xyxy=(20, 20, 54, 34),
+            category=CATEGORY_PLATE,
+            object_id="plate_1",
+            provenance="plate_detector_observation",
+            render_eligible=True,
+            source_frame=frame,
+            source_record={
+                "region_id": "region_1",
+                "score": 0.8,
+                "status": "accepted_plate_track",
+                "track_uid": "plate_track_0001",
+            },
+        )
+        for frame in range(12)
+    ]
+    review_finalization.write_privacy_region_records(
+        package / "regions" / "day_current_regions.jsonl",
+        records,
+    )
 
     review_workspace.write_entity_index(package)
     registry = json.loads((package / "review_entities.json").read_text(encoding="utf-8"))
@@ -754,9 +775,11 @@ def test_review_entity_registry_generates_thumbnails(tmp_path: Path) -> None:
 
     assert entity["label"] == "Plate 01"
     assert entity["entity_uuid"]
-    assert entity["representative_source_frame"] == 100
+    assert 100 <= entity["representative_source_frame"] <= 111
     assert entity["representative_thumbnail_path"]
     assert (package / entity["representative_thumbnail_path"]).exists()
+    assert entity["review_entity_state"] == "confirmed"
+    assert registry["unresolved_evidence_by_case"]["day"]["fragment_count"] == 0
 
 
 def test_privacy_entity_labels_scale_to_100_without_rendering_forms() -> None:

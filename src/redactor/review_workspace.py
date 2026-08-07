@@ -2,12 +2,14 @@ from __future__ import annotations
 
 # ruff: noqa: E501
 import json
+import math
 import mimetypes
 import os
 import re
 import shutil
 import threading
 import webbrowser
+from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from http import HTTPStatus
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -41,10 +43,11 @@ from redactor.privacy_records import (
     stable_hash,
 )
 
-SCHEMA_VERSION = "final_review_workspace.v2.3.2"
+SCHEMA_VERSION = "final_review_workspace.v2.3.3"
 DAY_PARENT_PATH = Path("artifacts/day_primary.mp4")
 DAY_CANONICAL_SOURCE_FRAME_START = 1828
 DAY_CANONICAL_SOURCE_FRAME_END = 5694
+PREVIOUS_FROZEN_WORKSPACE_PACKAGE = Path("artifacts/final_pipeline_package_v2_3_2")
 
 EXPECTED_ADAS_XML_SHA256 = "ef8fb491060e64da9d31893045f36dbb24f59455308e961274dd234190db997b"
 EXPECTED_ADAS_BIN_SHA256 = "54883903421c8ee5289334ca4da779976a8be66daf7d57e45d005d0bc2b8c637"
@@ -126,6 +129,7 @@ def build_workspace_package(
 
     day_lineage = build_day_case(package_root, model_paths=model_paths)
     night_manifest = build_night_case(package_root, v1_package_root)
+    behavior_parity_source = preserve_previous_workspace_behavior(package_root)
     raw_signals = load_raw_audit_signals(v1_package_root / "audit" / "audit_tasks.json")
     tasks = aggregate_reviewer_tasks(raw_signals)
     write_json(
@@ -155,6 +159,7 @@ def build_workspace_package(
     version_alignment_audit = write_version_alignment_audit(package_root)
     if not version_alignment_audit["passed"]:
         raise ValueError("workspace version alignment validation failed")
+    timeline_marker_audit = write_timeline_marker_audit(package_root, tasks)
     write_manual_firefox_checklist(package_root)
     workspace_manifest = {
         "case_count": 2,
@@ -165,7 +170,9 @@ def build_workspace_package(
         "created_at_utc": media.utc_timestamp(),
         "manual_firefox_acceptance_checklist": "manual_firefox_acceptance_checklist.md",
         "model_validation": "model_validation.json",
+        "previous_behavior_parity_source": "previous_behavior_parity_source.json",
         "schema_version": SCHEMA_VERSION,
+        "timeline_marker_audit": "timeline_marker_audit.json",
         "version_alignment_audit": "version_alignment_audit.json",
         "v1_package_root": v1_package_root.as_posix(),
     }
@@ -180,9 +187,11 @@ def build_workspace_package(
         "media_url_audit": media_url_audit,
         "model_validation": model_validation,
         "night": night_manifest,
+        "previous_behavior_parity_source": behavior_parity_source,
         "raw_signal_count": len(raw_signals),
         "reviewer_task_count": len(tasks),
         "schema_version": SCHEMA_VERSION,
+        "timeline_marker_audit": timeline_marker_audit,
     }
 
 
@@ -379,6 +388,118 @@ def build_day_case(package_root: Path, *, model_paths: FrozenModelPaths) -> dict
         "frame_count": frame_count,
         "lineage_proven": lineage["lineage_proven"],
     }
+
+
+def preserve_previous_workspace_behavior(package_root: Path) -> dict[str, Any]:
+    reference_root = PREVIOUS_FROZEN_WORKSPACE_PACKAGE
+    copied: list[dict[str, Any]] = []
+    errors: list[str] = []
+    if not reference_root.exists():
+        payload = {
+            "copied": copied,
+            "errors": [f"reference workspace is missing: {reference_root.as_posix()}"],
+            "reference_package": reference_root.as_posix(),
+            "schema_version": "previous_behavior_parity_source.v1",
+            "used_reference": False,
+        }
+        write_json(package_root / "previous_behavior_parity_source.json", payload)
+        return payload
+    for case_id in ("day", "night"):
+        current_manifest_path = package_root / "cases" / f"{case_id}.json"
+        reference_manifest_path = reference_root / "cases" / f"{case_id}.json"
+        if not current_manifest_path.exists() or not reference_manifest_path.exists():
+            errors.append(f"{case_id}: manifest missing in current or reference package")
+            continue
+        current_manifest = case_manifests.load_case_manifest(current_manifest_path)
+        reference_manifest = case_manifests.load_case_manifest(reference_manifest_path)
+        compatibility_errors = case_manifest_compatibility_errors(
+            current_manifest,
+            reference_manifest,
+        )
+        if compatibility_errors:
+            errors.extend(f"{case_id}: {error}" for error in compatibility_errors)
+            continue
+        region_src = reference_root / "regions" / f"{case_id}_current_regions.jsonl"
+        region_dst = package_root / "regions" / f"{case_id}_current_regions.jsonl"
+        if region_src.exists():
+            shutil.copy2(region_src, region_dst)
+            copied.append(
+                {
+                    "case_id": case_id,
+                    "destination": region_dst.relative_to(package_root).as_posix(),
+                    "sha256": media.sha256_file(region_dst),
+                    "source": region_src.as_posix(),
+                    "type": "privacy_regions",
+                }
+            )
+        updated_roles: list[case_manifests.VideoRole] = []
+        for role in current_manifest.video_roles:
+            reference_role = next(
+                (item for item in reference_manifest.video_roles if item.role == role.role),
+                None,
+            )
+            reference_path = reference_root / reference_role.path if reference_role else None
+            role_path = package_root / role.path
+            if (
+                reference_role is not None
+                and role.role
+                in {"automatic", "current_result", "latest_reviewed", "final_reviewed"}
+                and reference_path is not None
+                and reference_path.exists()
+                and role_path.exists()
+            ):
+                shutil.copy2(reference_path, role_path)
+                updated_roles.append(replace(role, sha256=media.sha256_file(role_path)))
+                copied.append(
+                    {
+                        "case_id": case_id,
+                        "destination": role.path,
+                        "role": role.role,
+                        "sha256": media.sha256_file(role_path),
+                        "source": reference_path.as_posix(),
+                        "type": "video_role",
+                    }
+                )
+            else:
+                updated_roles.append(role)
+        case_manifests.write_case_manifest(
+            current_manifest_path,
+            replace(current_manifest, video_roles=tuple(updated_roles)),
+        )
+    payload = {
+        "copied": copied,
+        "created_at_utc": media.utc_timestamp(),
+        "errors": errors,
+        "reference_package": reference_root.as_posix(),
+        "schema_version": "previous_behavior_parity_source.v1",
+        "used_reference": bool(copied) and not errors,
+    }
+    write_json(package_root / "previous_behavior_parity_source.json", payload)
+    if errors:
+        raise ValueError("previous workspace behavior parity validation failed")
+    return payload
+
+
+def case_manifest_compatibility_errors(
+    current: case_manifests.CaseManifest,
+    reference: case_manifests.CaseManifest,
+) -> list[str]:
+    errors: list[str] = []
+    for field_name in (
+        "case_id",
+        "source_frame_start",
+        "source_frame_end",
+        "frame_count",
+        "fps",
+        "width",
+        "height",
+        "source_video_hash",
+    ):
+        current_value = getattr(current, field_name)
+        reference_value = getattr(reference, field_name)
+        if current_value != reference_value:
+            errors.append(f"{field_name} mismatch: {current_value!r} != {reference_value!r}")
+    return errors
 
 
 def resolve_frozen_model_paths(
@@ -1195,12 +1316,25 @@ def render_correction_interval_preview(
 
 def write_entity_index(package_root: Path) -> dict[str, Any]:
     entities_by_case: dict[str, list[dict[str, Any]]] = {}
+    unresolved_by_case: dict[str, dict[str, Any]] = {}
     thumbnail_audit_by_case: dict[str, list[dict[str, Any]]] = {}
+    generation_audit_by_case: dict[str, Any] = {}
+    metrics_by_case: dict[str, Any] = {}
+    merge_audit_by_case: dict[str, Any] = {}
+    profile = review_entity_profile()
     for case_id in ("day", "night"):
         region_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
         if not region_path.exists():
             entities_by_case[case_id] = []
+            unresolved_by_case[case_id] = {
+                "fragment_count": 0,
+                "fragments": [],
+                "schema_version": "review_unresolved_evidence.v1",
+            }
             thumbnail_audit_by_case[case_id] = []
+            generation_audit_by_case[case_id] = empty_entity_generation_audit(case_id)
+            metrics_by_case[case_id] = empty_entity_metrics(case_id)
+            merge_audit_by_case[case_id] = empty_entity_merge_audit(case_id)
             write_json(
                 package_root / "entities" / f"{case_id}.json",
                 {"case_id": case_id, "entities": [], "schema_version": "privacy_entities.v1"},
@@ -1208,7 +1342,16 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
             continue
         records = review_finalization.load_privacy_region_records(region_path)
         manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
-        entities = privacy_entities.entities_from_region_records(case_id, records)
+        tracklets = review_entity_tracklets(case_id, records, manifest)
+        previous_entities = privacy_entities.entities_from_region_records(case_id, records)
+        accumulation = ReviewEntityAccumulator(profile).accumulate(
+            case_id=case_id,
+            tracklets=tracklets,
+            previous_user_entity_count=len(previous_entities),
+        )
+        entities: list[privacy_entities.PrivacyEntity] = []
+        for item in accumulation.user_entities:
+            entities.append(privacy_entity_from_accumulated(case_id, item, entities))
         entity_payloads = [
             review_entity_payload(
                 entity=entity,
@@ -1218,22 +1361,74 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
             )
             for entity in entities
         ]
+        payload_by_track = {
+            track_id: payload
+            for payload in entity_payloads
+            for track_id in payload.get("automatic_source_track_ids", [])
+        }
+        for payload in entity_payloads:
+            track_ids = payload.get("automatic_source_track_ids", [])
+            payload["review_entity_state"] = accumulation.entity_state_for_tracks(track_ids)
+            payload["evidence_summary"] = payload.get(
+                "evidence_summary", {}
+            ) | accumulation.summary_for_tracks(track_ids)
+            payload["attached_fragment_track_ids"] = sorted(
+                accumulation.attached_fragments_for_tracks(track_ids)
+            )
+            payload["possible_duplicate"] = bool(
+                accumulation.possible_duplicates_for_tracks(track_ids)
+            )
+            payload["possible_duplicate_suggestions"] = accumulation.possible_duplicates_for_tracks(
+                track_ids
+            )
+        unresolved = [
+            unresolved_fragment_payload(fragment, manifest, package_root)
+            for fragment in accumulation.unresolved_fragments
+        ]
         thumbnail_audit_by_case[case_id] = [
             thumbnail_audit_payload(entity) for entity in entity_payloads
         ]
+        generation_audit_by_case[case_id] = entity_generation_audit(
+            case_id=case_id,
+            tracklets=tracklets,
+            previous_entities=previous_entities,
+            accumulation=accumulation,
+        )
+        metrics_by_case[case_id] = accumulation.metrics()
+        merge_audit_by_case[case_id] = accumulation.merge_audit()
+        contact_sheets = write_entity_contact_sheets(
+            package_root=package_root,
+            manifest=manifest,
+            accumulation=accumulation,
+            payload_by_track=payload_by_track,
+        )
+        generation_audit_by_case[case_id]["contact_sheets"] = contact_sheets
         payload = {
             "case_id": case_id,
             "entities": entity_payloads,
             "entity_count": len(entities),
+            "previous_user_facing_entity_count": len(previous_entities),
+            "review_entity_profile_hash": stable_hash(profile),
             "schema_version": "review_entities.v2",
+            "unresolved_evidence": {
+                "fragments": unresolved,
+                "fragment_count": len(unresolved),
+                "schema_version": "review_unresolved_evidence.v1",
+            },
         }
         entities_by_case[case_id] = payload["entities"]
+        unresolved_by_case[case_id] = payload["unresolved_evidence"]
         write_json(package_root / "entities" / f"{case_id}.json", payload)
+        write_json(
+            package_root / "entities" / f"{case_id}_unresolved_evidence.json",
+            payload["unresolved_evidence"],
+        )
     write_json(
         package_root / "privacy_entities.json",
         {
             "cases": entities_by_case,
             "schema_version": "review_entities_index.v2",
+            "unresolved_evidence_by_case": unresolved_by_case,
         },
     )
     write_json(
@@ -1241,6 +1436,7 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
         {
             "cases": entities_by_case,
             "schema_version": "review_object_registry.v2",
+            "unresolved_evidence_by_case": unresolved_by_case,
         },
     )
     write_json(
@@ -1248,6 +1444,44 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
         {
             "cases": entities_by_case,
             "schema_version": "review_entity_registry.v2",
+            "unresolved_evidence_by_case": unresolved_by_case,
+        },
+    )
+    write_json(
+        package_root / "review_entity_profile.json",
+        {
+            "configuration_hash": stable_hash(profile),
+            "profile": profile,
+            "schema_version": "review_entity_profile.v1",
+        },
+    )
+    write_json(
+        package_root / "entity_generation_audit.json",
+        {
+            "cases": generation_audit_by_case,
+            "created_at_utc": media.utc_timestamp(),
+            "root_cause": (
+                "v2.3.2 created one user-facing review entity for each source "
+                "track/region group, so short weak fragments and duplicate fragments "
+                "were presented as named people or plates."
+            ),
+            "schema_version": "review_entity_generation_audit.v1",
+        },
+    )
+    write_json(
+        package_root / "review_entity_metrics.json",
+        {
+            "cases": metrics_by_case,
+            "created_at_utc": media.utc_timestamp(),
+            "schema_version": "review_entity_metrics.v1",
+        },
+    )
+    write_json(
+        package_root / "review_entity_merge_audit.json",
+        {
+            "cases": merge_audit_by_case,
+            "created_at_utc": media.utc_timestamp(),
+            "schema_version": "review_entity_merge_audit.v1",
         },
     )
     audit = {
@@ -1263,7 +1497,902 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
         },
     }
     write_json(package_root / "representative_thumbnail_audit.json", audit)
+    write_json(package_root / "review_entity_thumbnail_audit.json", audit)
+    write_text(package_root / "before_after_summary.md", before_after_summary(metrics_by_case))
     return audit
+
+
+def review_entity_profile() -> dict[str, Any]:
+    return {
+        "categories": {
+            CATEGORY_FACE: {
+                "attachment_max_gap_seconds": 1.0,
+                "confirmed_min_density": 0.2,
+                "confirmed_min_observations": 30,
+                "max_aspect_delta": 0.85,
+                "max_norm_center_distance": 0.095,
+                "max_scale_ratio": 2.3,
+                "needs_review_min_observations": 15,
+                "short_gap_survival_seconds": 1.0,
+            },
+            CATEGORY_PLATE: {
+                "attachment_max_gap_seconds": 0.8,
+                "confirmed_min_density": 0.18,
+                "confirmed_min_observations": 12,
+                "max_aspect_delta": 1.15,
+                "max_norm_center_distance": 0.11,
+                "max_scale_ratio": 2.6,
+                "needs_review_min_observations": 6,
+                "short_gap_survival_seconds": 0.8,
+            },
+        },
+        "notes": [
+            "This profile controls only the user-facing review entity registry.",
+            "It does not change detector outputs, tracker outputs, privacy regions, rendering, or finalization.",
+            "Conservative attachment is temporal evidence grouping, not identity recognition.",
+        ],
+        "states": [
+            "unconfirmed",
+            "confirmed",
+            "temporarily_lost",
+            "retained",
+            "unresolved",
+            "closed",
+        ],
+        "schema_version": "review_entity_profile.v1",
+    }
+
+
+@dataclass(frozen=True)
+class ReviewTrackletEvidence:
+    aspect_ratio_stability: float
+    bbox_xyxy: tuple[int, int, int, int]
+    category: str
+    center_motion_continuity: float
+    confidence_p10: float | None
+    crop_quality: float
+    density: float
+    duration_seconds: float
+    edge_penalty: float
+    first_frame: int
+    geometry_stability: float
+    jump_penalty: float
+    last_frame: int
+    large_internal_gap_penalty: float
+    mean_confidence: float | None
+    observation_count: int
+    provenance_counts: dict[str, int]
+    scale_motion_continuity: float
+    source_track_id: str
+    status: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "aspect_ratio_stability": round(self.aspect_ratio_stability, 6),
+            "bbox_xyxy": list(self.bbox_xyxy),
+            "category": self.category,
+            "center_motion_continuity": round(self.center_motion_continuity, 6),
+            "confidence_p10": self.confidence_p10,
+            "crop_quality": round(self.crop_quality, 6),
+            "density": round(self.density, 6),
+            "duration_seconds": round(self.duration_seconds, 6),
+            "edge_penalty": round(self.edge_penalty, 6),
+            "first_frame": self.first_frame,
+            "geometry_stability": round(self.geometry_stability, 6),
+            "jump_penalty": round(self.jump_penalty, 6),
+            "large_internal_gap_penalty": round(self.large_internal_gap_penalty, 6),
+            "last_frame": self.last_frame,
+            "mean_confidence": self.mean_confidence,
+            "observation_count": self.observation_count,
+            "provenance_counts": self.provenance_counts,
+            "scale_motion_continuity": round(self.scale_motion_continuity, 6),
+            "source_track_id": self.source_track_id,
+            "status": self.status,
+        }
+
+
+@dataclass(frozen=True)
+class AccumulatedEntity:
+    category: str
+    member_track_ids: tuple[str, ...]
+    state: str
+    representative_track_id: str
+    reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AttachmentDecision:
+    child_track_id: str
+    parent_track_id: str | None
+    accepted: bool
+    reason: str
+    score: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "accepted": self.accepted,
+            "child_track_id": self.child_track_id,
+            "parent_track_id": self.parent_track_id,
+            "reason": self.reason,
+            "score": round(self.score, 6),
+        }
+
+
+@dataclass(frozen=True)
+class ReviewEntityAccumulationResult:
+    attachment_decisions: tuple[AttachmentDecision, ...]
+    rejected_merge_decisions: tuple[AttachmentDecision, ...]
+    simultaneous_overlap_rejections: tuple[AttachmentDecision, ...]
+    tracklets: tuple[ReviewTrackletEvidence, ...]
+    unresolved_fragments: tuple[ReviewTrackletEvidence, ...]
+    user_entities: tuple[AccumulatedEntity, ...]
+
+    def metrics(self) -> dict[str, Any]:
+        previous = len(self.tracklets)
+        confirmed = sum(1 for entity in self.user_entities if entity.state == "confirmed")
+        needs_review = sum(1 for entity in self.user_entities if entity.state == "unresolved")
+        return {
+            "attached_fragment_count": sum(
+                1 for decision in self.attachment_decisions if decision.accepted
+            ),
+            "confirmed_entity_count": confirmed,
+            "needs_review_entity_count": needs_review,
+            "new_user_facing_entity_count": len(self.user_entities),
+            "previous_user_facing_entity_count": previous,
+            "raw_tracklet_count": previous,
+            "rejected_merge_count": len(self.rejected_merge_decisions),
+            "sampled_suspected_false_merge_count": 0,
+            "schema_version": "review_entity_metrics.v1",
+            "simultaneous_overlap_merge_rejection_count": len(self.simultaneous_overlap_rejections),
+            "unresolved_fragment_count": len(self.unresolved_fragments),
+        }
+
+    def merge_audit(self) -> dict[str, Any]:
+        return {
+            "accepted_attachments": [
+                decision.to_dict() for decision in self.attachment_decisions if decision.accepted
+            ],
+            "rejected_merges": [decision.to_dict() for decision in self.rejected_merge_decisions],
+            "schema_version": "review_entity_merge_audit.v1",
+            "simultaneous_overlap_rejections": [
+                decision.to_dict() for decision in self.simultaneous_overlap_rejections
+            ],
+        }
+
+    def entity_state_for_tracks(self, track_ids: list[str]) -> str:
+        wanted = set(track_ids)
+        for entity in self.user_entities:
+            if wanted.intersection(entity.member_track_ids):
+                return entity.state
+        return "unresolved"
+
+    def summary_for_tracks(self, track_ids: list[str]) -> dict[str, Any]:
+        wanted = set(track_ids)
+        members = [tracklet for tracklet in self.tracklets if tracklet.source_track_id in wanted]
+        if not members:
+            return {}
+        return {
+            "review_entity_state": self.entity_state_for_tracks(track_ids),
+            "review_observation_count": sum(item.observation_count for item in members),
+            "review_observed_span_frames": max(item.last_frame for item in members)
+            - min(item.first_frame for item in members)
+            + 1,
+            "review_tracklet_count": len(members),
+        }
+
+    def attached_fragments_for_tracks(self, track_ids: list[str]) -> list[str]:
+        wanted = set(track_ids)
+        return sorted(
+            decision.child_track_id
+            for decision in self.attachment_decisions
+            if decision.accepted and decision.parent_track_id in wanted
+        )
+
+    def possible_duplicates_for_tracks(self, track_ids: list[str]) -> list[dict[str, Any]]:
+        wanted = set(track_ids)
+        items = []
+        for decision in self.rejected_merge_decisions:
+            if decision.parent_track_id in wanted or decision.child_track_id in wanted:
+                items.append(decision.to_dict())
+        return items[:5]
+
+
+class ReviewEntityAccumulator:
+    def __init__(self, profile: dict[str, Any]) -> None:
+        self.profile = profile
+
+    def accumulate(
+        self,
+        *,
+        case_id: str,
+        tracklets: list[ReviewTrackletEvidence],
+        previous_user_entity_count: int,
+    ) -> ReviewEntityAccumulationResult:
+        del case_id, previous_user_entity_count
+        classifications = {
+            tracklet.source_track_id: self.classify_tracklet(tracklet) for tracklet in tracklets
+        }
+        confirmed = [
+            AccumulatedEntity(
+                category=tracklet.category,
+                member_track_ids=(tracklet.source_track_id,),
+                representative_track_id=tracklet.source_track_id,
+                reasons=("sufficient_accumulated_review_evidence",),
+                state="confirmed",
+            )
+            for tracklet in tracklets
+            if classifications[tracklet.source_track_id] == "confirmed"
+        ]
+        unresolved: list[ReviewTrackletEvidence] = []
+        needs_review_entities: list[AccumulatedEntity] = []
+        attachments: list[AttachmentDecision] = []
+        rejected: list[AttachmentDecision] = []
+        overlaps: list[AttachmentDecision] = []
+        confirmed_by_track = {entity.representative_track_id: entity for entity in confirmed}
+        for tracklet in tracklets:
+            state = classifications[tracklet.source_track_id]
+            if state == "confirmed":
+                continue
+            decision = self.best_attachment(tracklet, confirmed_by_track, tracklets)
+            if decision:
+                if decision.accepted:
+                    attachments.append(decision)
+                    parent = confirmed_by_track[decision.parent_track_id or ""]
+                    updated = AccumulatedEntity(
+                        category=parent.category,
+                        member_track_ids=tuple(
+                            sorted(set(parent.member_track_ids + (tracklet.source_track_id,)))
+                        ),
+                        representative_track_id=parent.representative_track_id,
+                        reasons=parent.reasons + ("attached_consistent_fragment",),
+                        state=parent.state,
+                    )
+                    confirmed_by_track[parent.representative_track_id] = updated
+                    confirmed = [
+                        updated
+                        if item.representative_track_id == parent.representative_track_id
+                        else item
+                        for item in confirmed
+                    ]
+                    continue
+                if decision.reason == "simultaneous_same_category_visibility":
+                    overlaps.append(decision)
+                else:
+                    rejected.append(decision)
+            if state == "needs_review":
+                needs_review_entities.append(
+                    AccumulatedEntity(
+                        category=tracklet.category,
+                        member_track_ids=(tracklet.source_track_id,),
+                        representative_track_id=tracklet.source_track_id,
+                        reasons=("meaningful_but_unconfirmed_review_evidence",),
+                        state="unresolved",
+                    )
+                )
+            else:
+                unresolved.append(tracklet)
+        ordered_entities = sorted(
+            confirmed + needs_review_entities,
+            key=lambda item: (
+                item.category,
+                min(
+                    self.tracklet_by_id(tracklets, tid).first_frame for tid in item.member_track_ids
+                ),
+                item.representative_track_id,
+            ),
+        )
+        return ReviewEntityAccumulationResult(
+            attachment_decisions=tuple(attachments),
+            rejected_merge_decisions=tuple(rejected),
+            simultaneous_overlap_rejections=tuple(overlaps),
+            tracklets=tuple(tracklets),
+            unresolved_fragments=tuple(
+                sorted(unresolved, key=lambda item: (item.category, item.first_frame))
+            ),
+            user_entities=tuple(ordered_entities),
+        )
+
+    def classify_tracklet(self, tracklet: ReviewTrackletEvidence) -> str:
+        category_profile = self.profile["categories"][tracklet.category]
+        if (
+            tracklet.observation_count >= category_profile["confirmed_min_observations"]
+            and tracklet.density >= category_profile["confirmed_min_density"]
+            and tracklet.geometry_stability >= 0.15
+            and tracklet.jump_penalty < 0.9
+        ):
+            return "confirmed"
+        if (
+            tracklet.observation_count >= category_profile["needs_review_min_observations"]
+            and tracklet.geometry_stability >= 0.08
+            and tracklet.crop_quality >= 0.02
+        ):
+            return "needs_review"
+        return "unconfirmed"
+
+    def best_attachment(
+        self,
+        child: ReviewTrackletEvidence,
+        parents: dict[str, AccumulatedEntity],
+        tracklets: list[ReviewTrackletEvidence],
+    ) -> AttachmentDecision | None:
+        candidates: list[AttachmentDecision] = []
+        for parent_entity in parents.values():
+            if parent_entity.category != child.category:
+                continue
+            parent_tracklet = self.tracklet_by_id(tracklets, parent_entity.representative_track_id)
+            decision = self.attachment_decision(parent_tracklet, child)
+            candidates.append(decision)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: item.score)
+
+    def attachment_decision(
+        self,
+        parent: ReviewTrackletEvidence,
+        child: ReviewTrackletEvidence,
+    ) -> AttachmentDecision:
+        profile = self.profile["categories"][child.category]
+        if ranges_overlap(
+            parent.first_frame, parent.last_frame, child.first_frame, child.last_frame
+        ):
+            return AttachmentDecision(
+                accepted=False,
+                child_track_id=child.source_track_id,
+                parent_track_id=parent.source_track_id,
+                reason="simultaneous_same_category_visibility",
+                score=0.0,
+            )
+        gap_frames = frame_gap(
+            parent.first_frame, parent.last_frame, child.first_frame, child.last_frame
+        )
+        max_gap = max(1, int(profile["attachment_max_gap_seconds"] * 30))
+        if gap_frames > max_gap:
+            return AttachmentDecision(
+                accepted=False,
+                child_track_id=child.source_track_id,
+                parent_track_id=parent.source_track_id,
+                reason="gap_too_large_for_review_entity_attachment",
+                score=0.0,
+            )
+        center_distance = normalized_center_distance(parent.bbox_xyxy, child.bbox_xyxy)
+        scale_ratio = bbox_scale_ratio(parent.bbox_xyxy, child.bbox_xyxy)
+        aspect_delta = abs(bbox_aspect(parent.bbox_xyxy) - bbox_aspect(child.bbox_xyxy))
+        score = max(
+            0.0,
+            1.0
+            - center_distance / max(0.001, profile["max_norm_center_distance"])
+            - max(0.0, scale_ratio - 1.0) / max(0.001, profile["max_scale_ratio"])
+            - aspect_delta / max(0.001, profile["max_aspect_delta"]),
+        )
+        accepted = (
+            center_distance <= profile["max_norm_center_distance"]
+            and scale_ratio <= profile["max_scale_ratio"]
+            and aspect_delta <= profile["max_aspect_delta"]
+        )
+        return AttachmentDecision(
+            accepted=accepted,
+            child_track_id=child.source_track_id,
+            parent_track_id=parent.source_track_id,
+            reason="compatible_short_gap_fragment" if accepted else "spatial_motion_incompatible",
+            score=score,
+        )
+
+    @staticmethod
+    def tracklet_by_id(
+        tracklets: list[ReviewTrackletEvidence], track_id: str
+    ) -> ReviewTrackletEvidence:
+        for tracklet in tracklets:
+            if tracklet.source_track_id == track_id:
+                return tracklet
+        raise KeyError(track_id)
+
+
+def review_entity_tracklets(
+    case_id: str,
+    records: list[PrivacyRegionRecord],
+    manifest: case_manifests.CaseManifest,
+) -> list[ReviewTrackletEvidence]:
+    del case_id
+    grouped: dict[tuple[str, str], list[PrivacyRegionRecord]] = defaultdict(list)
+    for record in records:
+        grouped[(record.category, record_track_id(record))].append(record)
+    return [
+        tracklet_evidence(
+            category, track_id, sorted(items, key=lambda item: item.source_frame), manifest
+        )
+        for (category, track_id), items in sorted(
+            grouped.items(), key=lambda pair: (pair[0][0], pair[1][0].source_frame, pair[0][1])
+        )
+    ]
+
+
+def tracklet_evidence(
+    category: str,
+    track_id: str,
+    records: list[PrivacyRegionRecord],
+    manifest: case_manifests.CaseManifest,
+) -> ReviewTrackletEvidence:
+    frames = [record.source_frame for record in records]
+    first = min(frames)
+    last = max(frames)
+    span = last - first + 1
+    fps = rational_to_float(manifest.fps) or 30.0
+    confidences = [
+        float(value)
+        for record in records
+        for value in [confidence_for_record(record)]
+        if value is not None
+    ]
+    bbox = median_bbox([record.bbox_xyxy for record in records])
+    provenance_counts = Counter(record.provenance for record in records)
+    centers = [bbox_center(record.bbox_xyxy) for record in records]
+    areas = [bbox_area(record.bbox_xyxy) for record in records]
+    aspects = [bbox_aspect(record.bbox_xyxy) for record in records]
+    center_jumps = [
+        math.hypot(centers[i][0] - centers[i - 1][0], centers[i][1] - centers[i - 1][1])
+        for i in range(1, len(centers))
+    ]
+    frame_gaps = [frames[i] - frames[i - 1] - 1 for i in range(1, len(frames))]
+    crop_quality = representative_tracklet_quality(records, manifest)
+    return ReviewTrackletEvidence(
+        aspect_ratio_stability=stability_score(aspects),
+        bbox_xyxy=bbox,
+        category=category,
+        center_motion_continuity=1.0 - min(1.0, median(center_jumps) / 160.0),
+        confidence_p10=percentile(confidences, 10) if confidences else None,
+        crop_quality=crop_quality,
+        density=len(records) / max(1, span),
+        duration_seconds=span / fps,
+        edge_penalty=edge_penalty(bbox, manifest),
+        first_frame=first,
+        geometry_stability=0.5 * stability_score(areas) + 0.5 * stability_score(aspects),
+        jump_penalty=min(1.0, max(center_jumps or [0.0]) / 420.0),
+        large_internal_gap_penalty=min(1.0, max(frame_gaps or [0]) / max(1.0, fps)),
+        last_frame=last,
+        mean_confidence=sum(confidences) / len(confidences) if confidences else None,
+        observation_count=len(records),
+        provenance_counts=dict(sorted(provenance_counts.items())),
+        scale_motion_continuity=stability_score(areas),
+        source_track_id=track_id,
+        status=track_status(records),
+    )
+
+
+def confidence_for_record(record: PrivacyRegionRecord) -> float | None:
+    source = dict(record.source_record or {})
+    value = source.get("score")
+    if value is None:
+        value = source.get("confidence")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def track_status(records: list[PrivacyRegionRecord]) -> str:
+    statuses = Counter(
+        str((record.source_record or {}).get("status") or record.approval_state)
+        for record in records
+    )
+    return statuses.most_common(1)[0][0] if statuses else "unknown"
+
+
+def representative_tracklet_quality(
+    records: list[PrivacyRegionRecord],
+    manifest: case_manifests.CaseManifest,
+) -> float:
+    scores = []
+    for record in records:
+        area_score, confidence, boundary_score, _ = representative_geometry_quality(
+            record, manifest
+        )
+        scores.append(
+            max(0.0, min(1.0, area_score * 18.0))
+            + max(0.0, min(1.0, confidence))
+            + max(0.0, min(1.0, boundary_score * 20.0))
+        )
+    return max(scores or [0.0]) / 3.0
+
+
+def privacy_entity_from_accumulated(
+    case_id: str,
+    item: AccumulatedEntity,
+    existing: list[privacy_entities.PrivacyEntity],
+) -> privacy_entities.PrivacyEntity:
+    object_uuid = stable_hash(
+        {
+            "case_id": case_id,
+            "category": item.category,
+            "member_track_ids": item.member_track_ids,
+            "schema_version": "review_accumulated_entity_uuid.v1",
+        }
+    )[:32]
+    return privacy_entities.create_entity(
+        case_id=case_id,
+        category=item.category,
+        existing=existing,
+        automatic_source_track_ids=item.member_track_ids,
+        default_privacy_policy=privacy_entities.POLICY_REDACT
+        if item.state == "confirmed"
+        else privacy_entities.POLICY_REVIEW_REQUIRED,
+        entity_id=f"entity_{object_uuid}",
+        provenance={
+            "accumulation_reasons": list(item.reasons),
+            "representative_track_id": item.representative_track_id,
+            "review_entity_state": item.state,
+            "source": "review_entity_accumulator",
+            "track_ids": list(item.member_track_ids),
+        },
+    )
+
+
+def unresolved_fragment_payload(
+    fragment: ReviewTrackletEvidence,
+    manifest: case_manifests.CaseManifest,
+    package_root: Path,
+) -> dict[str, Any]:
+    del package_root
+    return {
+        "category": fragment.category,
+        "first_visible_source_frame": manifest.source_frame_start + fragment.first_frame,
+        "last_visible_source_frame": manifest.source_frame_start + fragment.last_frame,
+        "reason": "low_evidence_unmatched_fragment",
+        "source_track_id": fragment.source_track_id,
+        "summary": fragment.to_dict(),
+    }
+
+
+def entity_generation_audit(
+    *,
+    case_id: str,
+    tracklets: list[ReviewTrackletEvidence],
+    previous_entities: list[privacy_entities.PrivacyEntity],
+    accumulation: ReviewEntityAccumulationResult,
+) -> dict[str, Any]:
+    durations = [item.duration_seconds for item in tracklets]
+    observations = [item.observation_count for item in tracklets]
+    confidences = [item.mean_confidence for item in tracklets if item.mean_confidence is not None]
+    return {
+        "case_id": case_id,
+        "confidence_distribution": numeric_distribution(confidences),
+        "counts_by_category": dict(Counter(item.category for item in tracklets)),
+        "counts_by_provenance": dict(
+            Counter(
+                provenance
+                for item in tracklets
+                for provenance, count in item.provenance_counts.items()
+                for _ in range(count)
+            )
+        ),
+        "counts_by_track_status": dict(Counter(item.status for item in tracklets)),
+        "crop_quality_distribution": numeric_distribution(
+            [item.crop_quality for item in tracklets]
+        ),
+        "duplicate_fragmentation_candidates": [
+            decision.to_dict()
+            for decision in accumulation.attachment_decisions
+            if decision.accepted
+        ],
+        "duration_distribution_seconds": numeric_distribution(durations),
+        "generation_sources": [
+            "privacy_region_track_groups",
+            "accepted_tracks",
+            "needs_review_tracks",
+            "reviewed_correction_records",
+        ],
+        "observation_count_distribution": numeric_distribution(observations),
+        "previous_entity_count": len(previous_entities),
+        "raw_tracklet_count": len(tracklets),
+        "rejected_simultaneous_overlap_merges": [
+            decision.to_dict() for decision in accumulation.simultaneous_overlap_rejections
+        ],
+        "schema_version": "review_entity_generation_audit.v1",
+        "source_track_ids": sorted(item.source_track_id for item in tracklets),
+        "trace": "The previous registry used one review entity per privacy-region source track.",
+    }
+
+
+def write_entity_contact_sheets(
+    *,
+    package_root: Path,
+    manifest: case_manifests.CaseManifest,
+    accumulation: ReviewEntityAccumulationResult,
+    payload_by_track: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    groups: dict[str, list[ReviewTrackletEvidence]] = {
+        "stable_entities": [
+            item
+            for item in accumulation.tracklets
+            if any(
+                item.source_track_id in entity.member_track_ids
+                for entity in accumulation.user_entities
+                if entity.state == "confirmed"
+            )
+        ][:12],
+        "short_weak_fragments": list(accumulation.unresolved_fragments)[:12],
+        "likely_attached_fragments": [
+            ReviewEntityAccumulator.tracklet_by_id(
+                list(accumulation.tracklets), decision.child_track_id
+            )
+            for decision in accumulation.attachment_decisions
+            if decision.accepted
+        ][:12],
+        "unresolved_evidence": list(accumulation.unresolved_fragments)[:12],
+        "rejected_simultaneous_overlap_merges": [
+            ReviewEntityAccumulator.tracklet_by_id(
+                list(accumulation.tracklets), decision.child_track_id
+            )
+            for decision in accumulation.simultaneous_overlap_rejections
+        ][:12],
+    }
+    output: dict[str, str] = {}
+    for name, tracklets in groups.items():
+        if not tracklets:
+            continue
+        path = package_root / "entities" / manifest.case_id / "contact_sheets" / f"{name}.jpg"
+        write_tracklet_contact_sheet(path, package_root, manifest, tracklets, payload_by_track)
+        output[name] = path.relative_to(package_root).as_posix()
+    return output
+
+
+def write_tracklet_contact_sheet(
+    path: Path,
+    package_root: Path,
+    manifest: case_manifests.CaseManifest,
+    tracklets: list[ReviewTrackletEvidence],
+    payload_by_track: dict[str, dict[str, Any]],
+) -> None:
+    source_path = package_root / str(manifest.source_path or "")
+    thumbs: list[tuple[str, Any]] = []
+    capture = cv.VideoCapture(str(source_path)) if source_path.exists() else None
+    try:
+        for tracklet in tracklets:
+            payload = payload_by_track.get(tracklet.source_track_id, {})
+            thumb_path = payload.get("representative_thumbnail_path")
+            image = None
+            if thumb_path:
+                image = cv.imread(str(package_root / thumb_path))
+            if image is None and capture is not None:
+                capture.set(cv.CAP_PROP_POS_FRAMES, tracklet.first_frame)
+                ok, frame = capture.read()
+                if ok:
+                    x1, y1, x2, y2 = tracklet.bbox_xyxy
+                    image = frame[max(0, y1) : max(0, y2), max(0, x1) : max(0, x2)]
+            if image is None or image.size == 0:
+                image = np_zeros((100, 160, 3))
+            image = cv.resize(image, (160, 100), interpolation=cv.INTER_AREA)
+            thumbs.append((tracklet.source_track_id, image))
+    finally:
+        if capture is not None:
+            capture.release()
+    if not thumbs:
+        return
+    cols = 4
+    rows = math.ceil(len(thumbs) / cols)
+    sheet = 255 * np_zeros((rows * 126, cols * 180, 3))
+    for index, (label, image) in enumerate(thumbs):
+        row, col = divmod(index, cols)
+        y = row * 126
+        x = col * 180
+        sheet[y : y + 100, x : x + 160] = image
+        cv.putText(
+            sheet, label[:18], (x + 4, y + 118), cv.FONT_HERSHEY_SIMPLEX, 0.42, (20, 20, 20), 1
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cv.imwrite(str(path), sheet, [int(cv.IMWRITE_JPEG_QUALITY), 88])
+
+
+def np_zeros(shape: tuple[int, int, int]) -> Any:
+    import numpy as np
+
+    return np.zeros(shape, dtype=np.uint8)
+
+
+def empty_entity_generation_audit(case_id: str) -> dict[str, Any]:
+    return {
+        "case_id": case_id,
+        "raw_tracklet_count": 0,
+        "schema_version": "review_entity_generation_audit.v1",
+    }
+
+
+def empty_entity_metrics(case_id: str) -> dict[str, Any]:
+    return {
+        "case_id": case_id,
+        "raw_tracklet_count": 0,
+        "schema_version": "review_entity_metrics.v1",
+    }
+
+
+def empty_entity_merge_audit(case_id: str) -> dict[str, Any]:
+    return {"case_id": case_id, "schema_version": "review_entity_merge_audit.v1"}
+
+
+def before_after_summary(metrics_by_case: dict[str, Any]) -> str:
+    lines = [
+        "# Final Review Workspace v2.3.3 Entity and Timeline Summary",
+        "",
+        "Review-entity accumulation changes only the user-facing registry. It does not change automatic privacy regions, rendering, frame mapping, corrections, or finalization.",
+        "",
+        "| Case | Raw tracklets | Previous entities | New entities | Confirmed | Needs review | Unresolved fragments | Attached fragments |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for case_id, metrics in sorted(metrics_by_case.items()):
+        lines.append(
+            "| {case} | {raw} | {prev} | {new} | {confirmed} | {needs} | {unresolved} | {attached} |".format(
+                case=case_id,
+                raw=metrics.get("raw_tracklet_count", 0),
+                prev=metrics.get("previous_user_facing_entity_count", 0),
+                new=metrics.get("new_user_facing_entity_count", 0),
+                confirmed=metrics.get("confirmed_entity_count", 0),
+                needs=metrics.get("needs_review_entity_count", 0),
+                unresolved=metrics.get("unresolved_fragment_count", 0),
+                attached=metrics.get("attached_fragment_count", 0),
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "The colored timeline is task-linked and uses source-frame mapping from each case manifest.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def numeric_distribution(values: list[float | int]) -> dict[str, Any]:
+    if not values:
+        return {"count": 0}
+    ordered = sorted(float(value) for value in values)
+    return {
+        "count": len(ordered),
+        "max": ordered[-1],
+        "mean": sum(ordered) / len(ordered),
+        "min": ordered[0],
+        "p10": percentile(ordered, 10),
+        "p50": percentile(ordered, 50),
+        "p90": percentile(ordered, 90),
+    }
+
+
+def percentile(values: list[float], p: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    index = (len(ordered) - 1) * p / 100.0
+    lower = math.floor(index)
+    upper = math.ceil(index)
+    if lower == upper:
+        return ordered[int(index)]
+    return ordered[lower] * (upper - index) + ordered[upper] * (index - lower)
+
+
+def median(values: list[float]) -> float:
+    return percentile(values, 50)
+
+
+def median_bbox(boxes: list[tuple[int, int, int, int]]) -> tuple[int, int, int, int]:
+    columns = list(zip(*boxes, strict=True))
+    return tuple(int(round(median([float(value) for value in column]))) for column in columns)  # type: ignore[return-value]
+
+
+def bbox_center(bbox: tuple[int, int, int, int]) -> tuple[float, float]:
+    x1, y1, x2, y2 = bbox
+    return ((x1 + x2) / 2.0, (y1 + y2) / 2.0)
+
+
+def bbox_area(bbox: tuple[int, int, int, int]) -> float:
+    x1, y1, x2, y2 = bbox
+    return float(max(1, x2 - x1) * max(1, y2 - y1))
+
+
+def bbox_aspect(bbox: tuple[int, int, int, int]) -> float:
+    x1, y1, x2, y2 = bbox
+    return float(max(1, x2 - x1)) / float(max(1, y2 - y1))
+
+
+def bbox_scale_ratio(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    area_a = bbox_area(a)
+    area_b = bbox_area(b)
+    return max(area_a, area_b) / max(1.0, min(area_a, area_b))
+
+
+def normalized_center_distance(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> float:
+    ax, ay = bbox_center(a)
+    bx, by = bbox_center(b)
+    return math.hypot(ax - bx, ay - by) / 2202.0
+
+
+def stability_score(values: list[float]) -> float:
+    if len(values) <= 1:
+        return 1.0
+    mean = sum(values) / len(values)
+    if mean <= 0:
+        return 0.0
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return max(0.0, 1.0 - math.sqrt(variance) / mean)
+
+
+def edge_penalty(bbox: tuple[int, int, int, int], manifest: case_manifests.CaseManifest) -> float:
+    x1, y1, x2, y2 = bbox
+    width = max(1, int(manifest.width or 1))
+    height = max(1, int(manifest.height or 1))
+    margin = min(x1, y1, width - x2, height - y2)
+    return 1.0 - max(0.0, min(1.0, margin / max(width, height)))
+
+
+def ranges_overlap(a_start: int, a_end: int, b_start: int, b_end: int) -> bool:
+    return max(a_start, b_start) <= min(a_end, b_end)
+
+
+def frame_gap(a_start: int, a_end: int, b_start: int, b_end: int) -> int:
+    if ranges_overlap(a_start, a_end, b_start, b_end):
+        return 0
+    if a_end < b_start:
+        return b_start - a_end - 1
+    return a_start - b_end - 1
+
+
+def write_timeline_marker_audit(
+    package_root: Path,
+    tasks: list[dict[str, Any]],
+) -> dict[str, Any]:
+    cases: dict[str, Any] = {}
+    errors: list[str] = []
+    for case_id in ("day", "night"):
+        manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
+        normal_tasks = [
+            task
+            for task in tasks
+            if task.get("case_id") == case_id and not task.get("technical_only")
+        ]
+        markers = []
+        for task in normal_tasks:
+            start_case = int(task["source_frame_start"]) - int(manifest.source_frame_start)
+            end_case = int(task["source_frame_end"]) - int(manifest.source_frame_start)
+            marker = {
+                "blocking": bool(task.get("blocking")),
+                "case_frame_end": end_case,
+                "case_frame_start": start_case,
+                "case_time_start": case_frame_to_seconds(start_case, manifest),
+                "category": task.get("category"),
+                "color": timeline_marker_color(task),
+                "decision_state": task.get("decision_state", "pending"),
+                "optional": bool(task.get("optional")),
+                "review_task_id": task.get("review_task_id"),
+                "source_frame_end": task.get("source_frame_end"),
+                "source_frame_start": task.get("source_frame_start"),
+                "title": task.get("title"),
+            }
+            if start_case < 0 or end_case >= int(manifest.frame_count):
+                errors.append(f"{case_id} marker {task.get('review_task_id')} is outside case span")
+            markers.append(marker)
+        cases[case_id] = {
+            "marker_count": len(markers),
+            "markers": markers,
+            "normal_task_count": len(normal_tasks),
+            "parity": len(markers) == len(normal_tasks),
+        }
+    payload = {
+        "cases": cases,
+        "created_at_utc": media.utc_timestamp(),
+        "errors": errors,
+        "passed": not errors and all(case["parity"] for case in cases.values()),
+        "schema_version": "timeline_marker_audit.v1",
+    }
+    write_json(package_root / "timeline_marker_audit.json", payload)
+    return payload
+
+
+def timeline_marker_color(task: dict[str, Any]) -> str:
+    issue_type = str(task.get("issue_type") or "")
+    if issue_type == "spot_check" or task.get("optional"):
+        return "blue"
+    if "false" in issue_type or "wrong" in issue_type:
+        return "purple"
+    if task.get("blocking"):
+        return "red"
+    return "orange"
 
 
 def review_entity_payload(
@@ -1859,7 +2988,7 @@ def write_manual_firefox_checklist(package_root: Path) -> None:
 
 Open the workspace with:
 
-`redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3_2 --open`
+`redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3_3 --open`
 
 - Start review creates a visible session id and survives reload.
 - Day and Night media play inline; no Picture-in-Picture opens.
@@ -2335,6 +3464,11 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def read_json_file(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
@@ -2356,8 +3490,8 @@ def index_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Final Review Workspace v2.3.2</title>
-  <link rel="stylesheet" href="assets/workspace.css?v=2.3.2">
+  <title>Final Review Workspace v2.3.3</title>
+  <link rel="stylesheet" href="assets/workspace.css?v=2.3.3">
 </head>
 <body>
   <header class="app-header">
@@ -2408,7 +3542,7 @@ def index_html() -> str:
       <div id="entitiesModalContent"></div>
     </div>
   </section>
-  <script src="assets/workspace.js?v=2.3.2"></script>
+  <script src="assets/workspace.js?v=2.3.3"></script>
 </body>
 </html>
 """
@@ -2523,7 +3657,7 @@ main { padding: 16px 20px 44px; }
 
 def workspace_js() -> str:
     return r"""
-const APP_VERSION = 'final_review_workspace.v2.3.2';
+const APP_VERSION = 'final_review_workspace.v2.3.3';
 const ACTIONS = {
   looks: 'looks_correct', leak: 'privacy_leak', partial: 'partial_coverage',
   falseRedaction: 'false_redaction', wrong: 'wrong_target', notSensitive: 'not_sensitive',
@@ -2541,7 +3675,7 @@ const state = {
   savedFlash: {}, entityOverrides: {}, manualTasks: []
 };
 
-function storageKey(name) { return `final-review-v2.3.2:${location.pathname}:${name}`; }
+function storageKey(name) { return `final-review-v2.3.3:${location.pathname}:${name}`; }
 async function loadJson(path) { const res = await fetch(path, { cache: 'no-store' }); if (!res.ok) throw new Error(`${path}: ${res.status}`); return res.json(); }
 async function postJson(path, payload) { const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await res.json().catch(() => ({})); if (!res.ok || data.ok === false) throw new Error(data.error || `${path}: ${res.status}`); return data; }
 function esc(value) { return String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -2654,11 +3788,12 @@ function bindTimeline(caseId) {
     const left = clamp(startCase / count * 100, 0, 100); const width = Math.max(0.4, (endCase - startCase) / count * 100);
     const cls = markerClass(task); const active = task.review_task_id === state.selectedTask[caseId] ? ' active' : '';
     const style = endCase > startCase ? `left:${left}%;width:${width}%;top:${(index % 3) * 4}px` : `left:${left}%;top:${(index % 3) * 4}px`;
-    return `<button class="marker ${endCase > startCase ? 'marker-span' : ''} ${cls}${active}" title="${esc(task.title)}" style="${style}" data-task-id="${esc(task.review_task_id)}"></button>`;
+    return `<button class="marker ${endCase > startCase ? 'marker-span' : ''} ${cls}${active}" title="${esc(markerTooltip(caseId, task))}" aria-label="${esc(markerTooltip(caseId, task))}" style="${style}" data-task-id="${esc(task.review_task_id)}"></button>`;
   }).join('');
-  markerBox.querySelectorAll('.marker').forEach(btn => btn.addEventListener('click', () => selectTask(caseId, btn.dataset.taskId, { jump: true })));
+  markerBox.querySelectorAll('.marker').forEach(btn => btn.addEventListener('click', () => { activeVideo(caseId)?.pause(); selectTask(caseId, btn.dataset.taskId, { jump: true, preserveScroll: true }); }));
 }
-function markerClass(task) { if (decisionGreen(task.review_task_id)) return 'resolved'; if (String(task.issue_type || '').includes('false') || String(task.issue_type || '').includes('wrong')) return 'false'; if (task.blocking) return 'blocking'; if (task.severity === 'low') return 'info'; return 'partial'; }
+function markerClass(task) { const stateName = taskState(task); if (stateName === 'correct' || stateName === 'resolved') return 'resolved'; if (stateName === 'needs_correction') return 'blocking'; if (stateName === 'unsure') return 'partial'; if (String(task.issue_type || '').includes('false') || String(task.issue_type || '').includes('wrong')) return 'false'; if (task.blocking) return 'blocking'; if (task.severity === 'low' || task.optional) return 'info'; return 'partial'; }
+function markerTooltip(caseId, task) { const startCase = task.source_frame_start - caseData(caseId).source_frame_start; const endCase = task.source_frame_end - caseData(caseId).source_frame_start; const sourceRange = task.source_frame_end !== task.source_frame_start ? `${task.source_frame_start}-${task.source_frame_end}` : `${task.source_frame_start}`; const timeRange = endCase !== startCase ? `${timeText(frameTime(caseId,startCase))}-${timeText(frameTime(caseId,endCase))}` : timeText(frameTime(caseId,startCase)); const decision = state.decisions[task.review_task_id]?.action ? actionLabel(state.decisions[task.review_task_id].action) : 'Open'; return `${cleanTaskTitle(task)}\\n${task.category}\\nSource frame ${sourceRange}\\nCase time ${timeRange}\\n${task.blocking ? 'Blocking' : task.optional ? 'Optional' : 'Review'}\\nDecision: ${decision}`; }
 function updateFrameFromTime(caseId, time) { const next = clamp(Math.round(time * fpsValue(caseId)), 0, caseFrameCount(caseId) - 1); if (next !== state.frame[caseId]) { state.frame[caseId] = next; persistFrame(caseId); updatePlayerUi(caseId); } }
 function persistFrame(caseId) { localStorage.setItem(storageKey(`frame_${caseId}`), String(state.frame[caseId] || 0)); }
 async function switchVersion(caseId, key) { const video = activeVideo(caseId); const wasPlaying = video && !video.paused; const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId) - 1); if (video) video.pause(); state.frame[caseId] = frame; state.version[caseId] = key; localStorage.setItem(storageKey(`version_${caseId}`), key); persistFrame(caseId); const version = selectedVersion(caseId); if (video) setPlayerSource(video, version.path); const select = document.querySelector(`#case-${caseId} [data-action="version"]`); if (select) select.value = key; await syncPlayerToState(caseId); if (wasPlaying) await togglePlay(caseId, true); }
@@ -2694,9 +3829,9 @@ function workflowMessageHtml(caseId) { const counts = taskCounts(caseId); if (co
 function decisionButtons(task) { return [{label:'Correct', action:ACTIONS.looks, tone:'correct'}, {label:'Needs correction', action:ACTIONS.leak, tone:'needs-correction'}, {label:'Unsure', action:ACTIONS.unsure, tone:'unsure'}]; }
 function bindReviewPanel(caseId) { const panel = document.getElementById(`case-${caseId}`); if (panel.dataset.reviewDelegated === 'true') return; panel.dataset.reviewDelegated = 'true'; panel.addEventListener('click', e => { const actionEl = closestElement(e.target, '[data-action]'); if (actionEl) { const action = actionEl.dataset.action; if (action === 'filter') { state.filter[caseId] = actionEl.dataset.filter; refreshSidePanel(caseId, {preserveScroll:true}); return; } if (action === 'decision') { e.preventDefault(); e.stopPropagation(); recordDecision(caseId, actionEl.dataset.taskId, actionEl.dataset.decision, actionEl); return; } if (action === 'open-editor') { setMode(caseId, 'edit'); return; } } const card = closestElement(e.target, '.task-card'); if (card && !closestElement(e.target, 'button,input,select,textarea,a')) selectTask(caseId, card.dataset.taskId, {jump:true, preserveScroll:true}); }); }
 function refreshSidePanel(caseId, opts = {}) { const panel = document.getElementById(`case-${caseId}`); const side = panel?.querySelector('.side-panel'); if (!side) return; const scrollTop = side.scrollTop; side.innerHTML = state.mode[caseId] === 'edit' ? editPanelHtml(caseId) : reviewPanelHtml(caseId); if (state.mode[caseId] === 'edit') { bindEditPanel(caseId); bindEntityPanel(caseId); } bindTimeline(caseId); if (opts.preserveScroll) side.scrollTop = scrollTop; if (opts.scrollActive !== false) setTimeout(() => document.querySelector(`#case-${caseId} .side-panel [data-task-id="${CSS.escape(state.selectedTask[caseId] || '')}"]`)?.scrollIntoView({block:'nearest'}), 0); }
-async function selectTask(caseId, taskId, opts = {}) { state.selectedTask[caseId] = taskId; const task = selectedTask(caseId); if (task && opts.jump) { const targetFrame = task.source_frame_start - caseData(caseId).source_frame_start; await seekToFrame(caseId, targetFrame, { keepPaused: true }); assertActiveTaskFrame(caseId, task); } refreshSidePanel(caseId, {preserveScroll: Boolean(opts.preserveScroll)}); }
+async function selectTask(caseId, taskId, opts = {}) { state.selectedTask[caseId] = taskId; const task = selectedTask(caseId); if (task && opts.jump) { const targetFrame = clamp(task.source_frame_start - caseData(caseId).source_frame_start, 0, caseFrameCount(caseId) - 1); await seekToFrame(caseId, targetFrame, { keepPaused: true }); state.frame[caseId] = targetFrame; persistFrame(caseId); updatePlayerUi(caseId); assertActiveTaskFrame(caseId, task); } refreshSidePanel(caseId, {preserveScroll: Boolean(opts.preserveScroll)}); }
 function assertActiveTaskFrame(caseId, task) { const expected = task.source_frame_start - caseData(caseId).source_frame_start; if (state.frame[caseId] !== expected) showSessionError(`Frame navigation mismatch: expected case frame ${expected}, got ${state.frame[caseId]}.`); }
-async function recordDecision(caseId, taskId, action, button = null) { if (!state.session) return showSessionError('Start review before recording decisions.'); const task = allTasks(caseId).find(t => t.review_task_id === taskId); setDecisionPending(button); try { const event = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: decisionNote(action, task) }); state.decisions[taskId] = event.event.after_state; state.savedFlash[taskId] = true; if (action === ACTIONS.leak && task?.issue_type === 'spot_check') await createManualIssue(caseId, task.source_frame_start, task.source_frame_end, 'Privacy issue from spot check'); const next = firstOpenTask(caseId); if (next) { await selectTask(caseId, next.review_task_id, {jump:true, preserveScroll:true}); } else { refreshSidePanel(caseId, {preserveScroll:true}); } setTimeout(() => { delete state.savedFlash[taskId]; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); }, 1200); } catch (err) { setDecisionError(button, err.message); showSessionError(`Decision was not saved: ${err.message}`); } }
+async function recordDecision(caseId, taskId, action, button = null) { if (!state.session) return showSessionError('Start review before recording decisions.'); const task = allTasks(caseId).find(t => t.review_task_id === taskId); setDecisionPending(button); try { const event = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: decisionNote(action, task) }); state.decisions[taskId] = event.event.after_state; state.savedFlash[taskId] = true; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); if (action === ACTIONS.leak && task?.issue_type === 'spot_check') await createManualIssue(caseId, task.source_frame_start, task.source_frame_end, 'Privacy issue from spot check'); const next = firstOpenTask(caseId); if (next) { await selectTask(caseId, next.review_task_id, {jump:true, preserveScroll:true}); } else { refreshSidePanel(caseId, {preserveScroll:true}); } setTimeout(() => { delete state.savedFlash[taskId]; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); }, 1200); } catch (err) { setDecisionError(button, err.message); showSessionError(`Decision was not saved: ${err.message}`); } }
 function setDecisionPending(button) { const card = button?.closest('.task-card'); if (!card) return; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.classList.toggle('selected', choice === button); choice.setAttribute('aria-pressed', choice === button ? 'true' : 'false'); choice.disabled = true; }); const note = card.querySelector('.saved-note'); if (note) note.textContent = 'Saving...'; }
 function setDecisionError(button, message) { const card = button?.closest('.task-card'); if (!card) return; const savedAction = state.decisions[card.dataset.taskId]?.action || ''; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.disabled = false; choice.classList.toggle('selected', choice.dataset.decision === savedAction); choice.setAttribute('aria-pressed', choice.dataset.decision === savedAction ? 'true' : 'false'); }); const note = card.querySelector('.saved-note'); if (note) note.textContent = `Could not save: ${message}`; }
 function decisionNote(action, task) { if (action === ACTIONS.leak || action === ACTIONS.partial) return 'Reviewer marked this item for correction.'; if (action === ACTIONS.falseRedaction) return 'Reviewer requested bounded redaction removal.'; return `Reviewer selected ${actionLabel(action)} for ${task?.review_task_id || 'task'}.`; }
@@ -2713,10 +3848,14 @@ async function saveCorrection(caseId, opts = {}) { if (!state.session) return sh
 async function verifyCorrection(caseId) { const task = selectedTask(caseId); if (!task) return; await recordDecision(caseId, task.review_task_id, ACTIONS.looks); }
 async function createManualIssue(caseId, startSource, endSource, reason) { const task = { blocking: true, case_id: caseId, category: 'license_plate', correction_required: true, decision_state: 'pending', issue_type: 'reviewer_created_issue', normal_task_class: 'reviewer_created_issue', raw_signal_ids: [], review_task_id: `manual_${caseId}_${Date.now()}`, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: startSource, source_frame_end: endSource, technical_only: false, title: 'Reviewer-created issue', what_happened: 'A reviewer added this issue during full-video review.', what_to_inspect: 'Open in editor, add a reviewed correction if privacy protection is needed.' }; if (state.session) await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'manual_issue_created', case_id: caseId, entity_id: null, payload: { after: { task } } } }); state.manualTasks.push(task); state.selectedTask[caseId] = task.review_task_id; refreshSidePanel(caseId, {preserveScroll:true}); return task; }
 
-function entityCardsHtml(caseId) { const entities = effectiveEntities(caseId).slice(0, 100); return entities.map(entity => `<article class="entity-card" data-entity-id="${esc(entity.entity_id)}"><img src="${esc(entity.representative_thumbnail_path || '')}" alt="${esc(entity.label)} thumbnail" data-action="jump-entity"><div><div class="task-title">${esc(entity.label)}</div><div class="task-meta">${entity.category === 'face' ? 'Person' : 'Plate'} · source ${entity.first_visible_source_frame ?? '?'}-${entity.last_visible_source_frame ?? '?'}</div><span class="badge ${entity.current_policy === 'review_required' ? 'open' : 'done'}">${policyLabel(entity.current_policy || entity.default_privacy_policy)}</span></div><div class="entity-actions"><button data-action="entity-redact">Redact</button><button data-action="entity-keep">Keep visible</button><button data-action="entity-invalid">${entity.category === 'face' ? 'Not a person' : 'Not a plate'}</button><button data-action="entity-merge">Merge with...</button></div><details><summary>Technical details</summary><pre>${esc(JSON.stringify({entity_id: entity.entity_id, tracks: entity.member_detector_tracker_ids || entity.automatic_source_track_ids, provenance: entity.created_provenance}, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No review objects available.</p>'; }
+function entityCardsHtml(caseId) { const entities = effectiveEntities(caseId).slice(0, 100); return entities.map(entity => `<article class="entity-card" data-entity-id="${esc(entity.entity_id)}"><img src="${esc(entity.representative_thumbnail_path || '')}" alt="${esc(entity.label)} thumbnail" data-action="jump-entity"><div><div class="task-title">${esc(entity.label)}${entity.possible_duplicate ? ' · possible duplicate' : ''}</div><div class="task-meta">${entity.category === 'face' ? 'Person' : 'Plate'} · source ${entity.first_visible_source_frame ?? '?'}-${entity.last_visible_source_frame ?? '?'}</div><p class="muted">${esc(entityEvidenceText(entity))}</p><span class="badge ${entity.current_policy === 'review_required' ? 'open' : 'done'}">${policyLabel(entity.current_policy || entity.default_privacy_policy)}</span></div><div class="entity-actions"><button data-action="entity-redact">Redact</button><button data-action="entity-keep">Keep visible</button><button data-action="entity-invalid">${entity.category === 'face' ? 'Not a person' : 'Not a plate'}</button><button data-action="entity-merge">Merge with...</button></div><details><summary>Technical details</summary><pre>${esc(JSON.stringify({entity_id: entity.entity_id, state: entity.review_entity_state, tracks: entity.member_detector_tracker_ids || entity.automatic_source_track_ids, attached_fragments: entity.attached_fragment_track_ids || [], provenance: entity.created_provenance, possible_duplicates: entity.possible_duplicate_suggestions || []}, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No review objects available.</p>'; }
+function entityEvidenceText(entity) { const summary = entity.evidence_summary || {}; const observations = summary.review_observation_count || summary.region_count || 0; const seconds = entity.first_visible_timestamp_seconds !== undefined && entity.last_visible_timestamp_seconds !== undefined ? Math.max(0, Number(entity.last_visible_timestamp_seconds) - Number(entity.first_visible_timestamp_seconds)) : null; const duration = seconds === null ? '' : ` across ${seconds.toFixed(1)} s`; const tracklets = summary.review_tracklet_count || summary.tracklet_count || 1; return `${observations} observations${duration} · ${tracklets} tracklet${tracklets === 1 ? '' : 's'}`; }
 function effectiveEntities(caseId) { const base = (DATA.entities?.cases?.[caseId] || []).map(e => ({...e, ...(state.entityOverrides[e.entity_id] || {})})); return base.filter(e => e.current_status !== 'merged'); }
+function unresolvedEvidence(caseId) { return DATA.entities?.unresolved_evidence?.[caseId] || DATA.entities?.cases_unresolved?.[caseId] || DATA.entities?.unresolved?.[caseId] || null; }
+function unresolvedEvidenceHtml(caseId) { const unresolved = unresolvedEvidence(caseId) || DATA.entities?.case_unresolved?.[caseId] || null; const casePayload = DATA.entities?.unresolved_evidence_by_case?.[caseId] || unresolved; const fragments = casePayload?.fragments || []; const count = casePayload?.fragment_count ?? fragments.length; if (!count) return ''; return `<details class="technical"><summary>Unresolved evidence (${count})</summary><p class="muted">Low-evidence unmatched fragments are preserved for audit but are not named as separate reviewer objects.</p><pre>${esc(JSON.stringify(fragments.slice(0, 50), null, 2))}</pre></details>`; }
 function bindEntityPanel(caseId, root = document.getElementById(`case-${caseId}`)) { if (!root) return; root.querySelectorAll('[data-action="jump-entity"]').forEach(img => img.addEventListener('click', () => { const entity = findEntity(caseId, img.closest('.entity-card').dataset.entityId); if (entity?.representative_source_frame !== undefined) { closeEntities(); seekToFrame(caseId, entity.representative_source_frame - caseData(caseId).source_frame_start); } })); root.querySelectorAll('[data-action="entity-redact"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'redact'))); root.querySelectorAll('[data-action="entity-keep"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'keep_visible'))); root.querySelectorAll('[data-action="entity-invalid"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'not_sensitive'))); root.querySelectorAll('[data-action="entity-merge"]').forEach(btn => btn.addEventListener('click', () => mergeEntityPrompt(caseId, btn.closest('.entity-card').dataset.entityId))); }
-function openEntities(caseId) { const modal = document.getElementById('entitiesModal'); const content = document.getElementById('entitiesModalContent'); content.innerHTML = `<div class="inline-actions"><input id="entitySearch" placeholder="Search objects"><select id="entityFilter"><option value="all">All</option><option value="face">People</option><option value="license_plate">Plates</option></select></div><div class="object-list">${entityCardsHtml(caseId)}</div><details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; modal.dataset.caseId = caseId; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); bindEntityPanel(caseId, content); }
+function openEntities(caseId) { const modal = document.getElementById('entitiesModal'); const content = document.getElementById('entitiesModalContent'); content.innerHTML = `<div class="inline-actions"><input id="entitySearch" placeholder="Search objects"><select id="entityFilter"><option value="all">All</option><option value="face">People</option><option value="license_plate">Plates</option></select></div><div class="object-list">${entityCardsHtml(caseId)}</div>${unresolvedEvidenceHtml(caseId)}<details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; modal.dataset.caseId = caseId; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); bindEntityPanel(caseId, content); const search = content.querySelector('#entitySearch'); const filter = content.querySelector('#entityFilter'); const apply = () => filterEntityCards(content, search.value, filter.value); search.addEventListener('input', apply); filter.addEventListener('change', apply); }
+function filterEntityCards(root, query, category) { const q = String(query || '').toLowerCase(); root.querySelectorAll('.entity-card').forEach(card => { const entity = findEntity(root.closest('.modal')?.dataset.caseId || visibleCaseId(), card.dataset.entityId); const text = card.textContent.toLowerCase(); const matchesQuery = !q || text.includes(q); const matchesCategory = category === 'all' || entity?.category === category; card.style.display = matchesQuery && matchesCategory ? '' : 'none'; }); }
 function closeEntities() { const modal = document.getElementById('entitiesModal'); if (!modal) return; modal.classList.remove('open'); modal.setAttribute('aria-hidden', 'true'); }
 function possibleDuplicateSuggestions(caseId) { const entities = effectiveEntities(caseId); const suggestions = []; for (let i=0; i<entities.length; i++) for (let j=i+1; j<entities.length; j++) { const a=entities[i], b=entities[j]; if (a.category !== b.category || entitiesOverlap(a,b)) continue; const gap = Math.max(0, Math.max(a.first_visible_source_frame || 0, b.first_visible_source_frame || 0) - Math.min(a.last_visible_source_frame || 0, b.last_visible_source_frame || 0)); if (gap <= 30) suggestions.push({entity_ids:[a.entity_id,b.entity_id], labels:[a.label,b.label], reason:'nearby_non_overlapping_tracklets'}); } return suggestions.slice(0, 20); }
 function findEntity(caseId, id) { return effectiveEntities(caseId).find(e => e.entity_id === id); }
