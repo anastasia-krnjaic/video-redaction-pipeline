@@ -664,6 +664,90 @@ def test_workspace_server_creates_anonymous_session_and_late_attribution(
         server.server_close()
 
 
+def test_workspace_server_exposes_versioned_api_contract(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    write_json(
+        package / "workspace_manifest.json",
+        {
+            "case_count": 1,
+            "cases": {"synthetic": "cases/synthetic.json"},
+            "schema_version": review_workspace.SCHEMA_VERSION,
+        },
+    )
+    write_json(package / "reviewer_tasks.json", {"actions": [], "task_count": 0, "tasks": []})
+    write_json(package / "review_entities.json", {"cases": {"synthetic": []}})
+    write_json(package / "raw_audit_signals.json", {"raw_signals": []})
+    write_json(package / "version_alignment_audit.json", {"passed": True})
+    write_json(package / "timeline_marker_audit.json", {"passed": True})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/v1/schema", timeout=5) as response:
+            schema = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(f"{base_url}/api/v1/workspace/summary", timeout=5) as response:
+            summary = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(
+            f"{base_url}/api/v1/cases/{manifest.case_id}", timeout=5
+        ) as response:
+            case_payload = json.loads(response.read().decode("utf-8"))
+
+        assert schema["x-api-schema-version"] == "final_review_workspace_api.v1"
+        assert summary["api_schema_version"] == "final_review_workspace_api.v1"
+        assert summary["cases"]["synthetic"]["case_id"] == "synthetic"
+        assert case_payload["source_frame_start"] == manifest.source_frame_start
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_react_workspace_assets_copy_app_and_legacy_fallback(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    frontend = tmp_path / "frontend"
+    (frontend / "dist" / "assets").mkdir(parents=True)
+    (frontend / "dist" / "index.html").write_text(
+        '<script type="module" src="/app/assets/index.js"></script>',
+        encoding="utf-8",
+    )
+    (frontend / "dist" / "assets" / "index.js").write_text("console.log('ok')", encoding="utf-8")
+    (frontend / "package-lock.json").write_text('{"lockfileVersion":3}\n', encoding="utf-8")
+    (frontend / "package.json").write_text('{"name":"test"}\n', encoding="utf-8")
+
+    review_workspace.write_react_workspace_assets(
+        package,
+        build_frontend=False,
+        frontend_root=frontend,
+    )
+
+    assert (package / "app" / "index.html").exists()
+    assert (package / "app" / "assets" / "index.js").exists()
+    assert "legacy.html" in (package / "index.html").read_text(encoding="utf-8")
+    assert "Final Review Workspace v2.3.4" in (package / "legacy.html").read_text(encoding="utf-8")
+    manifest = json.loads((package / "frontend_build_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["api_schema_version"] == "final_review_workspace_api.v1"
+    assert manifest["selected_frontend"] == "react"
+
+
+def test_backend_parity_audit_detects_hash_drift(tmp_path: Path) -> None:
+    reference = tmp_path / "reference"
+    candidate = tmp_path / "candidate"
+    for root in (reference, candidate):
+        write_json(root / "cases" / "day.json", {"case_id": "day", "value": 1})
+        write_json(root / "reviewer_tasks.json", {"tasks": []})
+        (root / "regions").mkdir(parents=True, exist_ok=True)
+        (root / "regions" / "day_current_regions.jsonl").write_text("same\n", encoding="utf-8")
+
+    passed = review_workspace.backend_parity_audit(reference, candidate)
+    (candidate / "regions" / "day_current_regions.jsonl").write_text("changed\n", encoding="utf-8")
+    failed = review_workspace.backend_parity_audit(reference, candidate)
+
+    assert passed["passed"] is True
+    assert failed["passed"] is False
+    assert any("day_current_regions" in error for error in failed["errors"])
+
+
 def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_picture() -> None:
     html = review_workspace.index_html()
     css = review_workspace.workspace_css()

@@ -7,6 +7,7 @@ import mimetypes
 import os
 import re
 import shutil
+import subprocess
 import threading
 import webbrowser
 from collections import Counter, defaultdict
@@ -31,6 +32,7 @@ from redactor import (
     privacy_entities,
     privacy_rendering,
     rendering,
+    review_api_contract,
     review_finalization,
     review_sessions,
 )
@@ -48,6 +50,7 @@ DAY_PARENT_PATH = Path("artifacts/day_primary.mp4")
 DAY_CANONICAL_SOURCE_FRAME_START = 1828
 DAY_CANONICAL_SOURCE_FRAME_END = 5694
 PREVIOUS_FROZEN_WORKSPACE_PACKAGE = Path("artifacts/final_pipeline_package_v2_3_3")
+FROZEN_V2_3_4_WORKSPACE_PACKAGE = Path("artifacts/final_pipeline_package_v2_3_4")
 
 EXPECTED_ADAS_XML_SHA256 = "ef8fb491060e64da9d31893045f36dbb24f59455308e961274dd234190db997b"
 EXPECTED_ADAS_BIN_SHA256 = "54883903421c8ee5289334ca4da779976a8be66daf7d57e45d005d0bc2b8c637"
@@ -93,6 +96,8 @@ def build_workspace_package(
     adas_xml_path: Path | None = None,
     adas_bin_path: Path | None = None,
     plate_model_path: Path | None = None,
+    frontend: str = "legacy",
+    build_frontend: bool = True,
     overwrite: bool = False,
 ) -> dict[str, Any]:
     if package_root.exists() and any(package_root.iterdir()) and not overwrite:
@@ -155,7 +160,7 @@ def build_workspace_package(
         {"decisions": [], "schema_version": "case_review_decisions_export.v1"},
     )
     entity_audit = write_entity_index(package_root)
-    write_workspace_assets(package_root)
+    write_workspace_assets(package_root, frontend=frontend, build_frontend=build_frontend)
     version_alignment_audit = write_version_alignment_audit(package_root)
     if not version_alignment_audit["passed"]:
         raise ValueError("workspace version alignment validation failed")
@@ -172,6 +177,7 @@ def build_workspace_package(
         "model_validation": "model_validation.json",
         "previous_behavior_parity_source": "previous_behavior_parity_source.json",
         "schema_version": SCHEMA_VERSION,
+        "selected_frontend": frontend,
         "timeline_marker_audit": "timeline_marker_audit.json",
         "version_alignment_audit": "version_alignment_audit.json",
         "v1_package_root": v1_package_root.as_posix(),
@@ -192,6 +198,50 @@ def build_workspace_package(
         "reviewer_task_count": len(tasks),
         "schema_version": SCHEMA_VERSION,
         "timeline_marker_audit": timeline_marker_audit,
+        "frontend": frontend,
+    }
+
+
+def build_react_workspace_package_from_reference(
+    *,
+    package_root: Path,
+    reference_root: Path = FROZEN_V2_3_4_WORKSPACE_PACKAGE,
+    build_frontend: bool = True,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    reference_root = reference_root.resolve()
+    package_root = package_root.resolve()
+    if not reference_root.exists():
+        raise FileNotFoundError(f"frozen reference package does not exist: {reference_root}")
+    if package_root == reference_root:
+        raise ValueError("React frontend package cannot overwrite the frozen reference package")
+    if package_root.exists() and any(package_root.iterdir()) and not overwrite:
+        raise FileExistsError(f"{package_root} already exists; pass overwrite=True to rebuild it")
+    if package_root.exists() and overwrite:
+        shutil.rmtree(package_root)
+    shutil.copytree(reference_root, package_root)
+    write_react_workspace_assets(package_root, build_frontend=build_frontend)
+    workspace_manifest_path = package_root / "workspace_manifest.json"
+    workspace_manifest = read_json_file(workspace_manifest_path)
+    workspace_manifest.update(
+        {
+            "api_schema_version": review_api_contract.API_SCHEMA_VERSION,
+            "frontend_build_manifest": "frontend_build_manifest.json",
+            "legacy_fallback": "legacy.html",
+            "react_app_root": "app/",
+            "selected_frontend": "react",
+        }
+    )
+    write_json(workspace_manifest_path, workspace_manifest)
+    media_url_audit = validate_workspace_media_urls(package_root)
+    write_json(package_root / "media_url_audit.json", media_url_audit)
+    if not media_url_audit["passed"]:
+        raise ValueError("workspace media URL validation failed")
+    return {
+        "frontend": "react",
+        "media_url_audit": media_url_audit,
+        "reference_root": reference_root.as_posix(),
+        "schema_version": SCHEMA_VERSION,
     }
 
 
@@ -3211,10 +3261,120 @@ def task_language(category: str, root: str, blocking: bool) -> tuple[str, str, s
     )
 
 
-def write_workspace_assets(package_root: Path) -> None:
+def write_workspace_assets(
+    package_root: Path,
+    *,
+    frontend: str = "legacy",
+    build_frontend: bool = True,
+) -> None:
+    if frontend not in {"legacy", "react"}:
+        raise ValueError(f"unsupported final review frontend: {frontend}")
+    if frontend == "legacy":
+        write_legacy_workspace_assets(package_root)
+        return
+    write_react_workspace_assets(package_root, build_frontend=build_frontend)
+
+
+def write_legacy_workspace_assets(package_root: Path) -> None:
+    (package_root / "assets").mkdir(parents=True, exist_ok=True)
     (package_root / "index.html").write_text(index_html(), encoding="utf-8")
     (package_root / "assets" / "workspace.css").write_text(workspace_css(), encoding="utf-8")
     (package_root / "assets" / "workspace.js").write_text(workspace_js(), encoding="utf-8")
+
+
+def write_react_workspace_assets(
+    package_root: Path,
+    *,
+    build_frontend: bool = True,
+    frontend_root: Path | None = None,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    frontend_root = frontend_root or repo_root / "frontend"
+    dist_root = frontend_root / "dist"
+    if build_frontend:
+        run_frontend_command(frontend_root, ["npm", "ci"])
+        run_frontend_command(frontend_root, ["npm", "run", "build"])
+    if not dist_root.exists():
+        raise FileNotFoundError(
+            "React frontend build output is missing; run npm ci && npm run build in frontend/"
+        )
+    app_root = package_root / "app"
+    if app_root.exists():
+        shutil.rmtree(app_root)
+    shutil.copytree(dist_root, app_root)
+    write_legacy_workspace_assets(package_root)
+    legacy_html = (package_root / "index.html").read_text(encoding="utf-8")
+    (package_root / "legacy.html").write_text(legacy_html, encoding="utf-8")
+    (package_root / "index.html").write_text(react_redirect_html(), encoding="utf-8")
+    write_json(
+        package_root / "frontend_build_manifest.json",
+        frontend_build_manifest(frontend_root=frontend_root, package_root=package_root),
+    )
+
+
+def run_frontend_command(frontend_root: Path, args: list[str]) -> None:
+    subprocess.run(args, cwd=frontend_root, check=True)
+
+
+def react_redirect_html() -> str:
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Final Review Workspace</title>
+  <script>window.location.replace('/app/day');</script>
+</head>
+<body>
+  <p><a href="app/index.html">Open Final Review Workspace</a></p>
+  <p><a href="legacy.html">Open legacy workspace</a></p>
+</body>
+</html>
+"""
+
+
+def frontend_build_manifest(*, frontend_root: Path, package_root: Path) -> dict[str, Any]:
+    return {
+        "api_schema_version": review_api_contract.API_SCHEMA_VERSION,
+        "backend_package_version": SCHEMA_VERSION,
+        "build_timestamp_utc": media.utc_timestamp(),
+        "frontend_git_tree_hash": frontend_source_tree_hash(frontend_root),
+        "node_version": command_text(["node", "--version"], cwd=frontend_root),
+        "npm_version": command_text(["npm", "--version"], cwd=frontend_root),
+        "package_lock_sha256": media.sha256_file(frontend_root / "package-lock.json")
+        if (frontend_root / "package-lock.json").exists()
+        else None,
+        "package_root": ".",
+        "schema_version": "final_review_frontend_build_manifest.v1",
+        "selected_frontend": "react",
+        "served_app_path": "app/",
+        "legacy_fallback": "legacy.html",
+    }
+
+
+def command_text(args: list[str], *, cwd: Path) -> str:
+    try:
+        return subprocess.check_output(args, cwd=cwd, text=True).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return "not_available"
+
+
+def frontend_source_tree_hash(frontend_root: Path) -> str:
+    import hashlib
+
+    digest = hashlib.sha256()
+    ignored_dirs = {"dist", "node_modules", "test-results", "playwright-report"}
+    for path in sorted(frontend_root.rglob("*")):
+        if not path.is_file():
+            continue
+        if any(part in ignored_dirs for part in path.relative_to(frontend_root).parts):
+            continue
+        relative = path.relative_to(frontend_root).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def write_version_alignment_audit(package_root: Path) -> dict[str, Any]:
@@ -3450,11 +3610,34 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         if self.headers.get("Range"):
             self.serve_range_request()
             return
+        if self.should_serve_spa():
+            self.path = "/app/index.html"
         super().do_GET()
 
     def _do_api_get(self) -> bool:
         parsed = urlparse(self.path)
         path = parsed.path
+        if path == "/api/v1/schema":
+            self.send_json(review_api_contract.final_review_workspace_schema())
+            return True
+        if path in {"/api/v1/workspace", "/api/v1/workspace/summary"}:
+            self.send_json(review_api_contract.workspace_summary(self.server.package_root))
+            return True
+        if path.startswith("/api/v1/cases/"):
+            case_id = path.rsplit("/", 1)[-1]
+            case_path = self.server.package_root / "cases" / f"{case_id}.json"
+            if not case_path.exists():
+                self.send_json(
+                    {"error": "case not found", "ok": False},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return True
+            self.send_json(read_json_file(case_path))
+            return True
+        if path == "/api/v1/entities":
+            self.send_json(read_json_file(self.server.package_root / "review_entities.json"))
+            return True
+        path = legacy_api_path(path)
         if path == "/api/workspace":
             self.send_json(
                 {
@@ -3500,7 +3683,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
 
     def _do_post(self) -> None:
         payload = self.read_json_body()
-        path = urlparse(self.path).path
+        path = legacy_api_path(urlparse(self.path).path)
         if path == "/api/sessions":
             freeze_hash = stable_hash(
                 json.loads(
@@ -3626,7 +3809,29 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 actor=actor,
                 overwrite=bool(payload.get("overwrite")),
             )
-            self.send_json({"ok": result.get("finalized", False), "result": result})
+            attempt_event = None
+            if result.get("finalized", False):
+                events = review_sessions.load_events(session_dir)
+                attempt_event = events[-1] if events else None
+            else:
+                attempt_event = review_sessions.append_event(
+                    session_dir,
+                    event_type="finalization_attempt_blocked",
+                    actor=actor,
+                    case_id=str(payload["case_id"]),
+                    task_id=None,
+                    before_state=None,
+                    after_state=result,
+                    note="Finalization blocked by backend gates.",
+                    application_hashes={},
+                )
+            self.send_json(
+                {
+                    "event": attempt_event,
+                    "ok": result.get("finalized", False),
+                    "result": result,
+                }
+            )
             return
         self.send_json({"error": "unknown endpoint", "ok": False}, status=HTTPStatus.NOT_FOUND)
 
@@ -3675,6 +3880,20 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 return
 
+    def should_serve_spa(self) -> bool:
+        parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/"):
+            return False
+        if parsed.path in {"/day", "/night", "/final", "/audit"}:
+            return (self.server.package_root / "app" / "index.html").exists()
+        if not parsed.path.startswith("/app/"):
+            return False
+        requested = Path(self.translate_path(self.path))
+        if requested.exists():
+            return False
+        suffix = Path(parsed.path).suffix
+        return suffix == "" and (self.server.package_root / "app" / "index.html").exists()
+
 
 def serve_workspace(
     package_root: Path,
@@ -3689,6 +3908,14 @@ def serve_workspace(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     return server
+
+
+def legacy_api_path(path: str) -> str:
+    if path == "/api/v1":
+        return "/api"
+    if path.startswith("/api/v1/"):
+        return "/api/" + path.removeprefix("/api/v1/")
+    return path
 
 
 def copy_if_exists(src: Path, dst: Path) -> None:
@@ -3836,6 +4063,70 @@ def validate_workspace_media_urls(package_root: Path) -> dict[str, Any]:
         "items": items,
         "passed": not errors,
         "schema_version": "media_url_audit.v1",
+    }
+
+
+def backend_parity_audit(reference_root: Path, candidate_root: Path) -> dict[str, Any]:
+    reference_root = reference_root.resolve()
+    candidate_root = candidate_root.resolve()
+    compared: list[dict[str, Any]] = []
+    errors: list[str] = []
+    patterns = (
+        "cases/*.json",
+        "entities/*.json",
+        "regions/*.jsonl",
+        "media/*/*.mp4",
+        "configuration_freeze.json",
+        "reviewer_tasks.json",
+        "review_entities.json",
+        "privacy_entities.json",
+        "raw_audit_signals.json",
+        "timeline_marker_audit.json",
+        "version_alignment_audit.json",
+        "model_validation.json",
+    )
+    relative_paths = sorted(
+        {
+            path.relative_to(reference_root).as_posix()
+            for pattern in patterns
+            for path in reference_root.glob(pattern)
+            if path.is_file()
+        }
+    )
+    for relative_path in relative_paths:
+        reference_path = reference_root / relative_path
+        candidate_path = candidate_root / relative_path
+        reference_hash = media.sha256_file(reference_path)
+        candidate_hash = media.sha256_file(candidate_path) if candidate_path.exists() else None
+        passed = reference_hash == candidate_hash
+        if not candidate_path.exists():
+            errors.append(f"missing candidate artifact: {relative_path}")
+        elif not passed:
+            errors.append(f"artifact hash mismatch: {relative_path}")
+        compared.append(
+            {
+                "candidate_sha256": candidate_hash,
+                "path": relative_path,
+                "passed": passed,
+                "reference_sha256": reference_hash,
+            }
+        )
+    rendered_media = [item for item in compared if item["path"].startswith("media/")]
+    privacy_regions = [item for item in compared if item["path"].startswith("regions/")]
+    return {
+        "candidate_root": candidate_root.as_posix(),
+        "compared_count": len(compared),
+        "detector_tracker_evidence_render_hashes_preserved": not errors,
+        "error_count": len(errors),
+        "errors": errors,
+        "items": compared,
+        "media_hash_count": len(rendered_media),
+        "media_hashes_preserved": all(item["passed"] for item in rendered_media),
+        "privacy_region_hash_count": len(privacy_regions),
+        "privacy_regions_preserved": all(item["passed"] for item in privacy_regions),
+        "reference_root": reference_root.as_posix(),
+        "schema_version": "final_review_backend_parity_audit.v1",
+        "passed": not errors,
     }
 
 

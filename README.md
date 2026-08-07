@@ -2,7 +2,7 @@
 
 Video Redaction Pipeline is a local Python project for building and auditing video-redaction workflows on short evaluation clips. The current Face Pipeline v1 uses one active face detector: OpenVINO `face-detection-adas-0001` (`openvino_face_adas_0001`). The prototype plate work uses one selected detector, Open Image Models YOLOv9-S-608 (`oim_yolov9_s_608`), followed by bounded temporal plate tracking and automatic preview rendering from accepted tracks.
 
-The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support currently covers detection, shared accumulated-evidence track confirmation, short defensible interpolation, non-final automatic plate previews, and review tasks for unresolved or uncertain plate intervals. The Final Review Workspace v2.3 provides a local review web app with anonymous session start, stable Person/Plate review objects, representative thumbnails, one versioned frame-aware player, timeline-linked review items, append-only provenance, correction records, and finalization gates without changing frozen detector or tracking behavior.
+The face pipeline can inspect media, run ADAS face detection, connect detections into temporal face tracks, recover or flag privacy gaps after tracking, render face-redacted preview or approved final MP4s from accepted privacy regions, evaluate those outputs against machine-readable face ground truth, and build compact local review bundles. Plate support currently covers detection, shared accumulated-evidence track confirmation, short defensible interpolation, non-final automatic plate previews, and review tasks for unresolved or uncertain plate intervals. The Final Review Workspace v2.3.4 backend is frozen for review behavior, and Frontend Foundation v1 adds a React + TypeScript review app with the same Python-owned sessions, entities, corrections, audit trail, media serving, source-frame mapping, and finalization gates.
 
 Faces and plates keep separate detector adapters and thresholds, but the post-detection foundation now shares the record contracts for observations, temporal regions, gap decisions, privacy regions, frame spans, rendering, and review tasks. The architecture decision is documented in `docs/PRIVACY_PIPELINE_ARCHITECTURE.md`.
 
@@ -34,6 +34,42 @@ You can also pass `--adas-xml` and `--adas-bin`, or set `REDACTOR_ADAS_XML` and 
 The active plate detector uses an ONNX model from Open Image Models. Model
 weights are local inputs and are not tracked in Git. Pass the model path with
 `--model` or set `REDACTOR_OIM_PLATE_MODEL`.
+
+## Final Review React Frontend
+
+The frozen backend reference package is:
+
+```text
+artifacts/final_pipeline_package_v2_3_4/
+```
+
+Generate the React frontend package without changing backend/privacy artifacts:
+
+```bash
+cd frontend
+npm ci
+npm run build
+cd ..
+PYTHONPATH=src .venv/bin/python -m redactor.cli build-final-review-workspace \
+  --output-dir artifacts/final_pipeline_package_frontend_v1 \
+  --frontend react \
+  --skip-frontend-build \
+  --overwrite
+```
+
+Serve it locally:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m redactor.cli serve-final-review-workspace \
+  artifacts/final_pipeline_package_frontend_v1 --open
+```
+
+React assets are served from `/app/`; the legacy generated workspace remains available at `/legacy.html`. The stable API contract is checked in at `docs/api/final_review_workspace_v1.schema.json` and served at `/api/v1/schema`.
+
+Frontend details:
+
+- architecture: `docs/FRONTEND_ARCHITECTURE.md`;
+- development and test commands: `docs/FRONTEND_DEVELOPMENT.md`.
 
 ## Supported Face Workflow
 

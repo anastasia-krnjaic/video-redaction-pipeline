@@ -8,10 +8,16 @@ It is generated under:
 artifacts/final_pipeline_package_v2/
 ```
 
-The current v2.3 package is generated under:
+The frozen v2.3.4 backend reference package is generated under:
 
 ```text
-artifacts/final_pipeline_package_v2_3/
+artifacts/final_pipeline_package_v2_3_4/
+```
+
+Frontend Foundation v1 generates a React + TypeScript package under:
+
+```text
+artifacts/final_pipeline_package_frontend_v1/
 ```
 
 It does not change detectors, thresholds, tracking, evidence accumulation, recovery, or rendering configuration. It gives a reviewer one case at a time, a single versioned source-frame-aware player, timeline-linked tasks, local correction records, stable Person/Plate review objects with representative thumbnails, an append-only audit trail, and finalization gates.
@@ -21,7 +27,8 @@ It does not change detectors, thresholds, tracking, evidence accumulation, recov
 Serve the package locally:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3 --open
+PYTHONPATH=src .venv/bin/python -m redactor.cli serve-final-review-workspace \
+  artifacts/final_pipeline_package_frontend_v1 --open
 ```
 
 The server binds to `127.0.0.1`, serves only files under the package root, supports MP4 range requests for seeking, and writes review sessions only under the package `sessions/` directory.
@@ -33,6 +40,31 @@ requests so Firefox and Chromium can seek reliably. Review videos use inline
 playback with Picture-in-Picture disabled. Fullscreen actions open the custom
 player wrapper, not the raw MP4, so the source-frame HUD, timeline, and
 keyboard frame stepping remain available.
+
+React assets are served from `/app/`. The legacy generated v2.3.4 workspace is
+retained as a fallback at `/legacy.html`.
+
+## React Frontend And API v1
+
+Frontend Foundation v1 moves presentation into `frontend/` with React,
+TypeScript, Vite, a committed npm lockfile, and Playwright E2E for Chromium and
+Firefox. Python remains the backend and source of truth for manifests, media,
+source-frame mapping, review tasks, entities, sessions, decisions, corrections,
+correction previews, audit events, finalization, and Range serving.
+
+The stable contract prefix is:
+
+```text
+/api/v1/
+```
+
+The checked-in schema is:
+
+```text
+docs/api/final_review_workspace_v1.schema.json
+```
+
+Legacy `/api/...` endpoints remain available during this milestone.
 
 ## Case Tabs
 
@@ -77,9 +109,10 @@ The workspace indexes automatic and reviewed region tracks into simple reviewer-
 - Merge with another object
 
 These actions are separate from technical overlay and geometry state. Keep and
-Not-a-person/Not-a-plate require a reviewer reason, append an event, create a
-verification item, and block finalization until verified. Merge is same-category
-only and is rejected when entities are simultaneously visible.
+Not-a-person/Not-a-plate append an event, create a verification item, and block
+finalization until verified. They do not require a browser prompt or mandatory
+reason field. Merge is same-category only and is rejected when entities are
+simultaneously visible.
 
 ## Review Sessions
 

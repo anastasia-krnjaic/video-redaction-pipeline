@@ -15,7 +15,7 @@ It gives the simplest visual walkthrough: what the system does, what the current
 For review, serve:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_frontend_v1 --open
 ```
 
 The workspace shows one case at a time:
@@ -27,6 +27,11 @@ The workspace shows one case at a time:
 - Full-video sweep controls
 - Compact object list with representative Person/Plate thumbnails
 - Audit trail and local session export
+
+The React app loads under `/app/day`; the frozen generated v2.3.4 workspace is
+available at `/legacy.html` as a fallback. Both use the same Python-owned
+backend package data, media Range serving, sessions, corrections, audit trail,
+and finalization gates.
 
 The Day and Night cases each show only Original and Current result by default. The Day case uses a canonical interval from `artifacts/day_primary.mp4`; its Current result is rendered from lineage-proven frozen face and plate evidence rather than concatenated old clips.
 

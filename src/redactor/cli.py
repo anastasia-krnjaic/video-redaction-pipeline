@@ -1836,6 +1836,31 @@ def summarize_final_audit(
     default=None,
     help="Frozen OIM YOLOv9-S-608 ONNX path. REDACTOR_OIM_PLATE_MODEL is honored.",
 )
+@click.option(
+    "--frontend",
+    type=click.Choice(["react", "legacy"]),
+    default="react",
+    show_default=True,
+    help="Workspace frontend to place at the package entry point.",
+)
+@click.option(
+    "--skip-frontend-build",
+    is_flag=True,
+    help="Copy an existing frontend/dist build instead of running npm ci and npm run build.",
+)
+@click.option(
+    "--react-reference-package",
+    "react_reference_package",
+    default=Path("artifacts/final_pipeline_package_v2_3_4"),
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Frozen package to use as the backend base for React frontend packages.",
+)
+@click.option(
+    "--regenerate-backend",
+    is_flag=True,
+    help="Regenerate backend package artifacts instead of copying the frozen v2.3.4 backend base.",
+)
 @click.option("--overwrite", is_flag=True, help="Replace an existing v2 package directory.")
 def build_final_review_workspace(
     output_dir: Path,
@@ -1843,20 +1868,34 @@ def build_final_review_workspace(
     adas_xml_path: Path | None,
     adas_bin_path: Path | None,
     plate_model_path: Path | None,
+    frontend: str,
+    skip_frontend_build: bool,
+    react_reference_package: Path,
+    regenerate_backend: bool,
     overwrite: bool,
 ) -> None:
     """Build the local case-based final review workspace package."""
     from redactor import review_workspace
 
     try:
-        summary = review_workspace.build_workspace_package(
-            package_root=output_dir,
-            v1_package_root=v1_package_root,
-            adas_xml_path=adas_xml_path,
-            adas_bin_path=adas_bin_path,
-            plate_model_path=plate_model_path,
-            overwrite=overwrite,
-        )
+        if frontend == "react" and not regenerate_backend:
+            summary = review_workspace.build_react_workspace_package_from_reference(
+                package_root=output_dir,
+                reference_root=react_reference_package,
+                build_frontend=not skip_frontend_build,
+                overwrite=overwrite,
+            )
+        else:
+            summary = review_workspace.build_workspace_package(
+                package_root=output_dir,
+                v1_package_root=v1_package_root,
+                adas_xml_path=adas_xml_path,
+                adas_bin_path=adas_bin_path,
+                plate_model_path=plate_model_path,
+                frontend=frontend,
+                build_frontend=not skip_frontend_build,
+                overwrite=overwrite,
+            )
     except (
         FileExistsError,
         FileNotFoundError,
@@ -1868,14 +1907,76 @@ def build_final_review_workspace(
             _subprocess_message(exc) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         ) from exc
     click.echo(f"Built final review workspace: {output_dir}")
-    click.echo(f"Raw audit signals: {summary['raw_signal_count']}")
-    click.echo(f"Reviewer tasks: {summary['reviewer_task_count']}")
-    click.echo(f"Day lineage proven: {summary['day']['lineage_proven']}")
-    if summary["day"]["blockers"]:
+    if "raw_signal_count" in summary:
+        click.echo(f"Raw audit signals: {summary['raw_signal_count']}")
+    if "reviewer_task_count" in summary:
+        click.echo(f"Reviewer tasks: {summary['reviewer_task_count']}")
+    if "day" in summary:
+        click.echo(f"Day lineage proven: {summary['day']['lineage_proven']}")
+    click.echo(f"Frontend: {summary['frontend']}")
+    if "day" in summary and summary["day"]["blockers"]:
         click.echo("Day case blockers:")
         for blocker in summary["day"]["blockers"]:
             click.echo(f"- {blocker}")
     click.echo(f"Open with: redactor serve-final-review-workspace {output_dir} --open")
+
+
+@main.command("generate-final-review-api-schema")
+@click.option(
+    "--output",
+    "output_path",
+    default=Path("docs/api/final_review_workspace_v1.schema.json"),
+    show_default=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+)
+def generate_final_review_api_schema(output_path: Path) -> None:
+    """Write the machine-readable Final Review Workspace API v1 contract."""
+    from redactor import review_api_contract
+
+    review_api_contract.write_schema(output_path)
+    click.echo(f"Wrote API schema: {output_path}")
+
+
+@main.command("audit-final-review-backend-parity")
+@click.option(
+    "--reference",
+    "reference_root",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Frozen reference final review package root.",
+)
+@click.option(
+    "--candidate",
+    "candidate_root",
+    required=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Candidate final review package root.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional JSON audit output path.",
+)
+def audit_final_review_backend_parity(
+    reference_root: Path,
+    candidate_root: Path,
+    output_path: Path | None,
+) -> None:
+    """Compare backend/privacy artifacts between two final review packages."""
+    from redactor import review_workspace
+
+    audit = review_workspace.backend_parity_audit(reference_root, candidate_root)
+    if output_path is not None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps(audit, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        click.echo(f"Wrote backend parity audit: {output_path}")
+    click.echo(
+        f"Compared {audit['compared_count']} backend artifacts; errors: {audit['error_count']}"
+    )
+    if not audit["passed"]:
+        raise click.ClickException("; ".join(audit["errors"][:10]))
 
 
 @main.command("serve-final-review-workspace")

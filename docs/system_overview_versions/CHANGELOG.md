@@ -1,5 +1,14 @@
 # System Overview Changelog
 
+## v030 — 2026-08-07
+
+Implemented Final Review Frontend Foundation v1:
+
+- documented `artifacts/final_pipeline_package_frontend_v1/` as the React frontend package over the frozen v2.3.4 backend reference;
+- added React + TypeScript, Vite, checked-in npm lockfile, generated TypeScript API contract, and Playwright Chromium/Firefox E2E coverage;
+- recorded `/api/v1/` as the stable workspace API prefix while preserving legacy `/api/...` endpoints;
+- clarified that Python owns manifests, media, review sessions, entities, corrections, audit hash-chain, Range serving, and finalization, while React owns presentation and draft interaction state.
+
 ## v029 — 2026-08-06
 
 Implemented Final Review Workspace v2.3 as a focused UX redesign:
