@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -150,6 +151,99 @@ def test_relative_media_url_validation_rejects_missing_case_media(tmp_path: Path
 
     assert audit["passed"] is False
     assert any("missing.mp4" in error for error in audit["errors"])
+
+
+def test_version_alignment_audit_accepts_matching_case_versions(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    source = package / "media" / "day" / "original_reference.mp4"
+    current = package / "media" / "day" / "current_combined_result.mp4"
+    source.parent.mkdir(parents=True)
+    write_synthetic_video(source, frame_count=7)
+    shutil.copy2(source, current)
+    info = review_workspace.media.probe_media(source)
+    manifest = case_manifests.CaseManifest(
+        case_id="day",
+        display_name="Day",
+        duration_seconds=info.duration_seconds,
+        fps=info.video_stream.nominal_frame_rate or "10/1",
+        frame_count=7,
+        height=64,
+        source_frame_end=106,
+        source_frame_start=100,
+        source_path="media/day/original_reference.mp4",
+        source_video_hash=info.sha256,
+        status=case_manifests.CASE_STATUS_READY,
+        video_roles=(
+            case_manifests.VideoRole(
+                label="Original",
+                path="media/day/original_reference.mp4",
+                role="original",
+                source_frame_end=106,
+                source_frame_start=100,
+            ),
+            case_manifests.VideoRole(
+                label="Current result",
+                path="media/day/current_combined_result.mp4",
+                role="current_result",
+                source_frame_end=106,
+                source_frame_start=100,
+            ),
+        ),
+        width=96,
+    )
+    case_manifests.write_case_manifest(package / "cases" / "day.json", manifest)
+
+    audit = review_workspace.write_version_alignment_audit(package)
+
+    assert audit["passed"] is True
+    assert audit["cases"]["day"]["roles"][0]["case_to_source_mapping"]["3"] == 103
+    assert audit["cases"]["day"]["roles"][1]["decoded_frame_evidence"]["6"]["decoded"] is True
+
+
+def test_version_alignment_audit_rejects_mismatched_role_mapping(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    source = package / "media" / "day" / "original_reference.mp4"
+    current = package / "media" / "day" / "current_combined_result.mp4"
+    source.parent.mkdir(parents=True)
+    write_synthetic_video(source, frame_count=5)
+    shutil.copy2(source, current)
+    info = review_workspace.media.probe_media(source)
+    manifest = case_manifests.CaseManifest(
+        case_id="day",
+        display_name="Day",
+        duration_seconds=info.duration_seconds,
+        fps=info.video_stream.nominal_frame_rate or "10/1",
+        frame_count=5,
+        height=64,
+        source_frame_end=204,
+        source_frame_start=200,
+        source_path="media/day/original_reference.mp4",
+        source_video_hash=info.sha256,
+        status=case_manifests.CASE_STATUS_READY,
+        video_roles=(
+            case_manifests.VideoRole(
+                label="Original",
+                path="media/day/original_reference.mp4",
+                role="original",
+                source_frame_end=204,
+                source_frame_start=200,
+            ),
+            case_manifests.VideoRole(
+                label="Current result",
+                path="media/day/current_combined_result.mp4",
+                role="current_result",
+                source_frame_end=205,
+                source_frame_start=201,
+            ),
+        ),
+        width=96,
+    )
+    case_manifests.write_case_manifest(package / "cases" / "day.json", manifest)
+
+    audit = review_workspace.write_version_alignment_audit(package)
+
+    assert audit["passed"] is False
+    assert any("role source start" in error for error in audit["errors"])
 
 
 def test_day_audit_frames_map_to_parent_source_frames() -> None:
@@ -380,6 +474,87 @@ def test_synthetic_successful_finalization(tmp_path: Path) -> None:
     assert (package / result["final_video"]).exists()
 
 
+def test_finalization_blocks_reviewer_added_manual_issue(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_base_region(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    review_sessions.append_sweep_acknowledgement(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        viewed_ranges=[{"start": 0, "end": 4}],
+    )
+    review_sessions.append_event(
+        session_dir,
+        event_type="manual_issue_created",
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state=None,
+        after_state={
+            "task": {
+                "blocking": True,
+                "case_id": manifest.case_id,
+                "review_task_id": "manual_issue_1",
+            }
+        },
+        note="manual issue",
+        application_hashes={},
+    )
+
+    result = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+
+    assert result["finalized"] is False
+    assert any("reviewer-added issue has no decision" in blocker for blocker in result["blockers"])
+
+
+def test_finalization_blocks_not_sensitive_entity_policy_until_verified(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_base_region(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    review_sessions.append_sweep_acknowledgement(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        viewed_ranges=[{"start": 0, "end": 4}],
+    )
+    review_sessions.append_event(
+        session_dir,
+        event_type="entity_policy_changed",
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state=None,
+        after_state={
+            "entity_id": "entity_plate_1",
+            "label": "Plate 01",
+            "policy": privacy_entities.POLICY_NOT_SENSITIVE,
+            "verification_task_id": "object_policy_verify_synthetic_plate_1_not_sensitive",
+        },
+        note="not a plate",
+        application_hashes={},
+    )
+
+    result = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+
+    assert result["finalized"] is False
+    assert any(
+        "Not sensitive policy has not been verified" in blocker for blocker in result["blockers"]
+    )
+
+
 def test_workspace_server_serves_mp4_range_and_rejects_traversal(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest = synthetic_case_manifest(package)
@@ -450,7 +625,7 @@ def test_workspace_server_creates_anonymous_session_and_late_attribution(
         server.server_close()
 
 
-def test_workspace_markup_uses_custom_drawers_and_disables_picture_in_picture() -> None:
+def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_picture() -> None:
     html = review_workspace.index_html()
     css = review_workspace.workspace_css()
     js = review_workspace.workspace_js()
@@ -461,10 +636,40 @@ def test_workspace_markup_uses_custom_drawers_and_disables_picture_in_picture() 
     assert "disablepictureinpicture" in js.lower()
     assert "disablePictureInPicture = true" in js
     assert "requestFullscreen" in js
-    assert ".drawer" in css
-    assert ".layout" not in css
+    assert ".workspace-layout" in css
+    assert ".drawer" not in css
+    assert "one active video" not in html.lower()
+    assert "Play together" not in html + css + js
+    assert "Ready" not in html + css + js
     assert "Could not start local review session" in js
     assert "Playback error" in js
+    assert "Latest reviewed" in js
+    assert "timeline-markers" in js
+    assert "function isTextEntryTarget" in js
+    assert "'range'" in js
+    assert "stepFrame(event.shiftKey ? 10 : 1)" in js
+    assert "stepFrame(event.shiftKey ? -10 : -1)" in js
+    assert "Final Review Workspace v2.3.1" in html
+    assert "final_review_workspace.v2.3.1" in js
+    assert "function closestElement" in js
+    assert "reviewDelegated" in js
+    assert "video.addEventListener('click'" in js
+    assert "togglePlay(caseId)" in js
+    assert ".decision-correct" in css
+    assert ".decision-needs-correction" in css
+    assert ".decision-unsure" in css
+    assert "Correct', action:ACTIONS.looks" in js
+    assert "Needs correction', action:ACTIONS.leak" in js
+    assert "Unsure', action:ACTIONS.unsure" in js
+    assert 'data-action="filter"' in js
+    assert "Saving..." in js
+    assert "Could not save:" in js
+    assert ".toFixed(3)" not in js
+    assert "padStart(2, '0')" in js
+    decision_buttons = js[
+        js.index("function decisionButtons") : js.index("function bindReviewPanel")
+    ]
+    assert "Not sensitive" not in decision_buttons
 
 
 def test_review_entity_registry_generates_thumbnails(tmp_path: Path) -> None:

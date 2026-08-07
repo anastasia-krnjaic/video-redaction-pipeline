@@ -94,7 +94,7 @@ roles, and lineage explicit. It aggregates raw audit signals into reviewer tasks
 without deleting raw provenance. Decisions and corrections are append-only local
 events, and finalization uses the same validation library as the CLI.
 
-Final Review Workspace v2.2 exposes category-independent review entities and
+Final Review Workspace v2.3 exposes category-independent review entities and
 multi-keyframe correction records through a local review web app. Entities use
 reviewer-facing labels such as `Person 01` and `Plate 01`, with representative
 thumbnails, while raw detector/track IDs stay in Technical details. Corrections

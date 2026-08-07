@@ -73,6 +73,21 @@ def finalization_blockers(
         if task.get("correction_required") and action not in GREEN_ACTIONS:
             blockers.append(f"{task_id}: correction has not been verified")
 
+    for event in events:
+        if event.get("case_id") != case_id or event.get("event_type") != "manual_issue_created":
+            continue
+        task = dict((event.get("after_state") or {}).get("task") or {})
+        task_id = str(task.get("review_task_id") or "")
+        if not task_id:
+            blockers.append(f"{case_id}: manual issue is missing a task id")
+            continue
+        decision = decisions.get(task_id)
+        if decision is None:
+            blockers.append(f"{task_id}: reviewer-added issue has no decision")
+            continue
+        if str(decision.get("action")) not in GREEN_ACTIONS:
+            blockers.append(f"{task_id}: reviewer-added issue remains unresolved")
+
     if not has_sweep_acknowledgement(session_dir, case_id):
         blockers.append(f"{case_id}: full-video sweep has not been acknowledged")
 
@@ -159,16 +174,18 @@ def object_policy_blockers(
         if policy == "review_required":
             blockers.append(f"{label}: object policy remains Needs review")
             continue
-        if policy == "keep_visible":
+        if policy in {"keep_visible", "not_sensitive"}:
             task_id = str(
                 after.get("verification_task_id") or f"object_policy_verify_{case_id}_{entity_id}"
             )
             decision = decisions.get(task_id)
             if decision is None:
-                blockers.append(f"{label}: Keep policy has not been verified")
+                action_label = "Keep" if policy == "keep_visible" else "Not sensitive"
+                blockers.append(f"{label}: {action_label} policy has not been verified")
                 continue
             if str(decision.get("action")) not in GREEN_ACTIONS:
-                blockers.append(f"{label}: Keep policy verification is not green")
+                action_label = "Keep" if policy == "keep_visible" else "Not sensitive"
+                blockers.append(f"{label}: {action_label} policy verification is not green")
     return blockers
 
 

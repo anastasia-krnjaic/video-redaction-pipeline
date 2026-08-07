@@ -8,20 +8,20 @@ It is generated under:
 artifacts/final_pipeline_package_v2/
 ```
 
-The current v2.2 package is generated under:
+The current v2.3 package is generated under:
 
 ```text
-artifacts/final_pipeline_package_v2_2/
+artifacts/final_pipeline_package_v2_3/
 ```
 
-It does not change detectors, thresholds, tracking, evidence accumulation, recovery, or rendering configuration. It gives a reviewer one case at a time, clear tasks, local correction records, stable Person/Plate review objects with representative thumbnails, an append-only audit trail, and finalization gates.
+It does not change detectors, thresholds, tracking, evidence accumulation, recovery, or rendering configuration. It gives a reviewer one case at a time, a single versioned source-frame-aware player, timeline-linked tasks, local correction records, stable Person/Plate review objects with representative thumbnails, an append-only audit trail, and finalization gates.
 
 ## Launch
 
 Serve the package locally:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_2 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3 --open
 ```
 
 The server binds to `127.0.0.1`, serves only files under the package root, supports MP4 range requests for seeking, and writes review sessions only under the package `sessions/` directory.
@@ -31,40 +31,55 @@ Opening `index.html` directly may load static files, but the local server is the
 The review app serves MP4 files with `video/mp4` MIME type and HTTP range
 requests so Firefox and Chromium can seek reliably. Review videos use inline
 playback with Picture-in-Picture disabled. Fullscreen actions open the custom
-player wrapper, not the raw MP4, so source-frame, case-frame, timestamp, case
-name, role, and frame-step controls remain visible.
+player wrapper, not the raw MP4, so the source-frame HUD, timeline, and
+keyboard frame stepping remain available.
 
 ## Case Tabs
 
 The workspace has four top-level tabs:
 
-- Day case
-- Night case
-- Final results
-- Audit trail
+- Day
+- Night
+- Final Results
+- Audit Trail
 
-Each primary case shows at most two default video panes:
+Each primary case has two modes:
+
+- Review
+- Edit
+
+Review mode shows one large video player with a version selector:
 
 - Original
-- Current result
+- Automatic
+- Latest reviewed
 
-After successful finalization, Current result becomes Final reviewed.
+After successful finalization, Final reviewed is also available. Switching
+versions preserves the active source frame, and a package build fails if the
+displayed versions do not share source-frame mapping, frame count, FPS,
+resolution, and decoded-frame evidence at the audited sample frames.
 
 Diagnostic face-only, plate-only, provenance, and raw-signal details stay behind technical sections instead of cluttering the default review view.
 
 ## Current Day Boundary
 
-The previous day face and day plate outputs came from different extracted clips. Their metadata now maps both clips to a common parent source, `artifacts/day_primary.mp4`, and the v2.2 package extracts one canonical Day original interval from that parent source.
+The previous day face and day plate outputs came from different extracted clips. Their metadata now maps both clips to a common parent source, `artifacts/day_primary.mp4`, and the v2.3 package extracts one canonical Day original interval from that parent source.
 
 The combined Day current result is not fabricated from incompatible encoded clips. It is rendered from lineage-proven frozen evidence mapped into the canonical Day source-frame interval. The build validates the local ADAS XML/BIN and OIM ONNX hashes before packaging.
 
 ## Review Objects
 
-The workspace indexes automatic and reviewed region tracks into simple reviewer-facing objects such as `Person 01` and `Plate 01`. Raw detector track IDs remain in Technical details. Each object has a deterministic representative thumbnail, first-seen frame, status badge, and separate controls for editor overlay visibility, privacy action, and geometry lock state.
+The workspace indexes automatic and reviewed region tracks into simple reviewer-facing objects such as `Person 01` and `Plate 01`. Raw detector track IDs remain in Technical details. Each object has a deterministic representative thumbnail, first-seen frame, status badge, and compact reviewer actions:
 
-Overlay visibility only changes what the editor draws. It never changes final rendering. Privacy actions are separate: Redact, Keep, and Needs review. Keep requires a reviewer note, creates an append-only event, and remains blocked until verified.
+- Redact
+- Keep visible
+- Not a person / Not a plate
+- Merge with another object
 
-Entities and review tasks open in drawers instead of a fixed sidebar. Opening a drawer does not resize or restart the active video comparison.
+These actions are separate from technical overlay and geometry state. Keep and
+Not-a-person/Not-a-plate require a reviewer reason, append an event, create a
+verification item, and block finalization until verified. Merge is same-category
+only and is rejected when entities are simultaneously visible.
 
 ## Review Sessions
 
@@ -97,6 +112,12 @@ redactor summarize-review-session --session-dir SESSION_DIR
 ```
 
 ## Decisions
+
+Review mode uses task-specific action sets instead of one generic button list.
+Coverage-risk tasks offer actions such as Looks correct, Needs correction, Not
+sensitive, and Unsure. Possible false-redaction tasks offer actions such as
+Redaction is correct, Remove redaction, Wrong target, and Unsure. A decision is
+saved to the local server before auto-advance.
 
 Reviewer-facing actions are plain-language:
 
@@ -146,7 +167,7 @@ Finalize with:
 
 ```bash
 redactor finalize-reviewed-case \
-  --package-root artifacts/final_pipeline_package_v2_2 \
+  --package-root artifacts/final_pipeline_package_v2_3 \
   --case-id CASE_ID \
   --session-dir SESSION_DIR
 ```

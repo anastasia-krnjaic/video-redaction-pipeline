@@ -110,7 +110,7 @@ def create_review_session(
     include_hostname: bool = False,
 ) -> ReviewSession:
     session = ReviewSession(
-        application_version="final_review_workspace.v2.2",
+        application_version="final_review_workspace.v2.3.1",
         case_manifest_hashes=dict(sorted(case_manifest_hashes.items())),
         configuration_freeze_hash=configuration_freeze_hash,
         hostname=socket.gethostname() if include_hostname else None,

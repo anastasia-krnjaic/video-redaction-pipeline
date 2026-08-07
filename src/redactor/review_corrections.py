@@ -99,7 +99,7 @@ class ReviewCorrection:
     revision_id: str = field(default_factory=lambda: f"corr_rev_{uuid.uuid4().hex}")
     previous_revision_id: str | None = None
     created_at_utc: str = field(default_factory=media.utc_timestamp)
-    application_version: str = "final_review_workspace.v2.2"
+    application_version: str = "final_review_workspace.v2.3.1"
     schema_version: str = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
@@ -154,7 +154,7 @@ class ReviewCorrection:
 def correction_from_dict(payload: dict[str, Any]) -> ReviewCorrection:
     return ReviewCorrection(
         application_version=str(
-            payload.get("application_version") or "final_review_workspace.v2.2"
+            payload.get("application_version") or "final_review_workspace.v2.3.1"
         ),
         case_id=str(payload["case_id"]),
         category=str(payload["category"]),

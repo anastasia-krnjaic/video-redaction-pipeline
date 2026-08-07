@@ -1,5 +1,14 @@
 # System Overview Changelog
 
+## v029 — 2026-08-06
+
+Implemented Final Review Workspace v2.3 as a focused UX redesign:
+
+- documented `artifacts/final_pipeline_package_v2_3/` as the current generated review package;
+- replaced the default two-video review surface with one versioned player using Original / Automatic / Latest reviewed;
+- added timeline-linked review items, task-specific decisions, and a separate Edit mode for temporal corrections;
+- documented version-alignment and representative-thumbnail audits plus the manual Firefox acceptance checklist.
+
 ## v028 — 2026-08-06
 
 Implemented Final Review Workspace v2.2 as a local review web application:

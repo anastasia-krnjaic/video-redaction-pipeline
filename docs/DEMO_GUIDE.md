@@ -15,16 +15,17 @@ It gives the simplest visual walkthrough: what the system does, what the current
 For review, serve:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_2 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3 --open
 ```
 
 The workspace shows one case at a time:
 
 - Original video context
 - Current combined result where source-compatible
-- Guided risk-review tasks
+- One large versioned player with Original / Automatic / Latest reviewed
+- Timeline-linked guided risk-review tasks
 - Full-video sweep controls
-- Entity drawer with representative Person/Plate thumbnails
+- Compact object list with representative Person/Plate thumbnails
 - Audit trail and local session export
 
 The Day and Night cases each show only Original and Current result by default. The Day case uses a canonical interval from `artifacts/day_primary.mp4`; its Current result is rendered from lineage-proven frozen face and plate evidence rather than concatenated old clips.

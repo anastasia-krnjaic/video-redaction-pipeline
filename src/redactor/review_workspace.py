@@ -39,7 +39,7 @@ from redactor.privacy_records import (
     stable_hash,
 )
 
-SCHEMA_VERSION = "final_review_workspace.v2.2"
+SCHEMA_VERSION = "final_review_workspace.v2.3.1"
 DAY_PARENT_PATH = Path("artifacts/day_primary.mp4")
 DAY_CANONICAL_SOURCE_FRAME_START = 1828
 DAY_CANONICAL_SOURCE_FRAME_END = 5694
@@ -148,8 +148,12 @@ def build_workspace_package(
         package_root / "audit_decisions.template.json",
         {"decisions": [], "schema_version": "case_review_decisions_export.v1"},
     )
-    write_entity_index(package_root)
+    entity_audit = write_entity_index(package_root)
     write_workspace_assets(package_root)
+    version_alignment_audit = write_version_alignment_audit(package_root)
+    if not version_alignment_audit["passed"]:
+        raise ValueError("workspace version alignment validation failed")
+    write_manual_firefox_checklist(package_root)
     workspace_manifest = {
         "case_count": 2,
         "cases": {
@@ -157,8 +161,10 @@ def build_workspace_package(
             "night": night_manifest["case_manifest_path"],
         },
         "created_at_utc": media.utc_timestamp(),
+        "manual_firefox_acceptance_checklist": "manual_firefox_acceptance_checklist.md",
         "model_validation": "model_validation.json",
         "schema_version": SCHEMA_VERSION,
+        "version_alignment_audit": "version_alignment_audit.json",
         "v1_package_root": v1_package_root.as_posix(),
     }
     write_json(package_root / "workspace_manifest.json", workspace_manifest)
@@ -168,6 +174,7 @@ def build_workspace_package(
         raise ValueError("workspace media URL validation failed")
     return {
         "day": day_lineage,
+        "entity_audit": entity_audit,
         "media_url_audit": media_url_audit,
         "model_validation": model_validation,
         "night": night_manifest,
@@ -913,11 +920,25 @@ def render_correction_interval_preview(
         source_has_audio=source_info.audio_stream is not None,
         overwrite=True,
     )
+    latest_reviewed = preview_dir.parent / "latest_reviewed.mp4"
+    full_source_info = media.probe_media(source_path)
+    privacy_rendering.render_privacy_video(
+        source_path,
+        latest_reviewed,
+        privacy_rendering.regions_by_frame(final_regions),
+        settings=settings,
+        fps=fps,
+        width=full_source_info.video_stream.width,
+        height=full_source_info.video_stream.height,
+        source_has_audio=full_source_info.audio_stream is not None,
+        overwrite=True,
+    )
     return {
         "audio_handling": audio_handling,
         "corrected_preview": corrected_preview.relative_to(package_root).as_posix(),
         "frame_end": correction.source_frame_end,
         "frame_start": correction.source_frame_start,
+        "latest_reviewed": latest_reviewed.relative_to(package_root).as_posix(),
         "ok": True,
         "original_preview": original_preview.relative_to(package_root).as_posix(),
         "rendered_frames": rendered_frames,
@@ -926,12 +947,14 @@ def render_correction_interval_preview(
     }
 
 
-def write_entity_index(package_root: Path) -> None:
+def write_entity_index(package_root: Path) -> dict[str, Any]:
     entities_by_case: dict[str, list[dict[str, Any]]] = {}
+    thumbnail_audit_by_case: dict[str, list[dict[str, Any]]] = {}
     for case_id in ("day", "night"):
         region_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
         if not region_path.exists():
             entities_by_case[case_id] = []
+            thumbnail_audit_by_case[case_id] = []
             write_json(
                 package_root / "entities" / f"{case_id}.json",
                 {"case_id": case_id, "entities": [], "schema_version": "privacy_entities.v1"},
@@ -948,6 +971,9 @@ def write_entity_index(package_root: Path) -> None:
                 package_root=package_root,
             )
             for entity in entities
+        ]
+        thumbnail_audit_by_case[case_id] = [
+            thumbnail_audit_payload(entity) for entity in entity_payloads
         ]
         payload = {
             "case_id": case_id,
@@ -978,6 +1004,20 @@ def write_entity_index(package_root: Path) -> None:
             "schema_version": "review_entity_registry.v2",
         },
     )
+    audit = {
+        "cases": thumbnail_audit_by_case,
+        "created_at_utc": media.utc_timestamp(),
+        "schema_version": "representative_thumbnail_audit.v1",
+        "summary": {
+            case_id: {
+                "entity_count": len(items),
+                "warning_count": sum(1 for item in items if item.get("warnings")),
+            }
+            for case_id, items in thumbnail_audit_by_case.items()
+        },
+    }
+    write_json(package_root / "representative_thumbnail_audit.json", audit)
+    return audit
 
 
 def review_entity_payload(
@@ -1025,9 +1065,30 @@ def review_entity_payload(
         "first_visible_timestamp_seconds": case_frame_to_seconds(first_case_frame, manifest),
         "last_visible_source_frame": last_source_frame,
         "last_visible_timestamp_seconds": case_frame_to_seconds(last_case_frame, manifest),
+        "representative_quality": representative_quality_summary(selected, manifest),
         "representative_case_frame": rep_case_frame,
         "representative_source_frame": rep_source_frame,
         "representative_thumbnail_path": thumbnail_path,
+    }
+
+
+def thumbnail_audit_payload(entity: dict[str, Any]) -> dict[str, Any]:
+    quality = dict(entity.get("representative_quality") or {})
+    warnings: list[str] = []
+    if not entity.get("representative_thumbnail_path"):
+        warnings.append("thumbnail_missing")
+    if float(quality.get("relative_area") or 0.0) < 0.0001:
+        warnings.append("small_region")
+    if float(quality.get("boundary_margin") or 0.0) < 0.005:
+        warnings.append("near_frame_edge")
+    return {
+        "category": entity.get("category"),
+        "entity_id": entity.get("entity_id"),
+        "label": entity.get("label") or entity.get("display_name"),
+        "quality": quality,
+        "representative_source_frame": entity.get("representative_source_frame"),
+        "thumbnail_path": entity.get("representative_thumbnail_path"),
+        "warnings": warnings,
     }
 
 
@@ -1099,6 +1160,21 @@ def representative_quality(
     return (area_score, confidence, boundary_score + sharpness, negative_frame)
 
 
+def representative_quality_summary(
+    record: PrivacyRegionRecord,
+    manifest: case_manifests.CaseManifest,
+) -> dict[str, Any]:
+    area_score, confidence, boundary_score, _ = representative_geometry_quality(record, manifest)
+    x1, y1, x2, y2 = record.bbox_xyxy
+    return {
+        "bbox_xyxy": [x1, y1, x2, y2],
+        "boundary_margin": boundary_score,
+        "confidence": confidence,
+        "relative_area": area_score,
+        "schema_version": "representative_quality.v1",
+    }
+
+
 def thumbnail_sharpness(
     capture: cv.VideoCapture | None,
     frame_index: int,
@@ -1137,7 +1213,8 @@ def write_entity_thumbnail(
         x1, y1, x2, y2 = record.bbox_xyxy
         width = frame.shape[1]
         height = frame.shape[0]
-        pad = max(12, int(max(x2 - x1, y2 - y1) * 0.65))
+        pad_fraction = 0.42 if entity.category == CATEGORY_FACE else 0.55
+        pad = max(10, int(max(x2 - x1, y2 - y1) * pad_fraction))
         left = max(0, x1 - pad)
         top = max(0, y1 - pad)
         right = min(width, x2 + pad)
@@ -1322,6 +1399,196 @@ def write_workspace_assets(package_root: Path) -> None:
     (package_root / "index.html").write_text(index_html(), encoding="utf-8")
     (package_root / "assets" / "workspace.css").write_text(workspace_css(), encoding="utf-8")
     (package_root / "assets" / "workspace.js").write_text(workspace_js(), encoding="utf-8")
+
+
+def write_version_alignment_audit(package_root: Path) -> dict[str, Any]:
+    cases: dict[str, Any] = {}
+    errors: list[str] = []
+    for case_path in sorted((package_root / "cases").glob("*.json")):
+        manifest = case_manifests.load_case_manifest(case_path)
+        if manifest.case_id not in {"day", "night"}:
+            continue
+        case_errors: list[str] = []
+        role_records: list[dict[str, Any]] = []
+        sampled_frames = (0, max(0, manifest.frame_count // 2), max(0, manifest.frame_count - 1))
+        for role in manifest.video_roles:
+            record = version_role_alignment_record(
+                package_root=package_root,
+                manifest=manifest,
+                role=role,
+                sampled_case_frames=sampled_frames,
+            )
+            role_records.append(record)
+            case_errors.extend(record["errors"])
+        for frame_index in sampled_frames:
+            mapped = {
+                role_record["role"]: role_record["case_to_source_mapping"].get(str(frame_index))
+                for role_record in role_records
+            }
+            mapped_values = {value for value in mapped.values() if value is not None}
+            if len(mapped_values) > 1:
+                case_errors.append(
+                    f"{manifest.case_id}: case frame {frame_index} maps differently: {mapped}"
+                )
+        if case_errors:
+            errors.extend(case_errors)
+        cases[manifest.case_id] = {
+            "case_frame_count": manifest.frame_count,
+            "display_name": manifest.display_name,
+            "errors": case_errors,
+            "fps": manifest.fps,
+            "height": manifest.height,
+            "roles": role_records,
+            "schema_version": "case_version_alignment.v1",
+            "source_frame_end": manifest.source_frame_end,
+            "source_frame_start": manifest.source_frame_start,
+            "source_video_hash": manifest.source_video_hash,
+            "width": manifest.width,
+        }
+    audit = {
+        "cases": cases,
+        "created_at_utc": media.utc_timestamp(),
+        "error_count": len(errors),
+        "errors": errors,
+        "passed": not errors,
+        "schema_version": "version_alignment_audit.v1",
+    }
+    write_json(package_root / "version_alignment_audit.json", audit)
+    return audit
+
+
+def version_role_alignment_record(
+    *,
+    package_root: Path,
+    manifest: case_manifests.CaseManifest,
+    role: case_manifests.VideoRole,
+    sampled_case_frames: tuple[int, ...],
+) -> dict[str, Any]:
+    errors: list[str] = []
+    media_path = package_root / role.path
+    info = media.probe_media(media_path) if media_path.exists() else None
+    actual_frame_count = int(info.video_stream.frame_count or 0) if info is not None else 0
+    actual_fps = (
+        rational_to_float(info.video_stream.nominal_frame_rate) if info is not None else None
+    )
+    expected_fps = rational_to_float(manifest.fps)
+    if not media_path.exists():
+        errors.append(f"{manifest.case_id}/{role.role}: media missing: {role.path}")
+    if role.source_frame_start != manifest.source_frame_start:
+        errors.append(
+            f"{manifest.case_id}/{role.role}: role source start "
+            f"{role.source_frame_start} != manifest {manifest.source_frame_start}"
+        )
+    if role.source_frame_end != manifest.source_frame_end:
+        errors.append(
+            f"{manifest.case_id}/{role.role}: role source end "
+            f"{role.source_frame_end} != manifest {manifest.source_frame_end}"
+        )
+    if actual_frame_count and actual_frame_count != manifest.frame_count:
+        errors.append(
+            f"{manifest.case_id}/{role.role}: frame count {actual_frame_count} "
+            f"!= manifest {manifest.frame_count}"
+        )
+    if info is not None and manifest.width and info.video_stream.width != manifest.width:
+        errors.append(
+            f"{manifest.case_id}/{role.role}: width {info.video_stream.width} "
+            f"!= manifest {manifest.width}"
+        )
+    if info is not None and manifest.height and info.video_stream.height != manifest.height:
+        errors.append(
+            f"{manifest.case_id}/{role.role}: height {info.video_stream.height} "
+            f"!= manifest {manifest.height}"
+        )
+    if (
+        actual_fps is not None
+        and expected_fps is not None
+        and abs(actual_fps - expected_fps) > 0.02
+    ):
+        errors.append(
+            f"{manifest.case_id}/{role.role}: fps {actual_fps:.6f} != manifest {expected_fps:.6f}"
+        )
+    mapping: dict[str, int] = {}
+    decoded_evidence: dict[str, Any] = {}
+    for case_frame in sampled_case_frames:
+        if case_frame >= manifest.frame_count:
+            continue
+        source_frame = role.source_frame_start + case_frame
+        mapping[str(case_frame)] = source_frame
+        if source_frame != manifest.source_frame_start + case_frame:
+            errors.append(
+                f"{manifest.case_id}/{role.role}: case frame {case_frame} maps to "
+                f"{source_frame}, expected {manifest.source_frame_start + case_frame}"
+            )
+        decoded_evidence[str(case_frame)] = decoded_frame_evidence(media_path, case_frame)
+    return {
+        "actual_duration_seconds": info.duration_seconds if info is not None else None,
+        "actual_fps": actual_fps,
+        "actual_frame_count": actual_frame_count,
+        "actual_height": info.video_stream.height if info is not None else None,
+        "actual_width": info.video_stream.width if info is not None else None,
+        "case_to_source_mapping": mapping,
+        "decoded_frame_evidence": decoded_evidence,
+        "errors": errors,
+        "media_path": role.path,
+        "media_sha256": media.sha256_file(media_path) if media_path.exists() else None,
+        "role": role.role,
+        "role_label": role.label,
+        "schema_version": "version_role_alignment.v1",
+        "source_frame_end": role.source_frame_end,
+        "source_frame_start": role.source_frame_start,
+        "source_video_hash": manifest.source_video_hash,
+    }
+
+
+def decoded_frame_evidence(media_path: Path, case_frame: int) -> dict[str, Any]:
+    if not media_path.exists():
+        return {"decoded": False, "reason": "media_missing"}
+    capture = cv.VideoCapture(str(media_path))
+    try:
+        capture.set(cv.CAP_PROP_POS_FRAMES, case_frame)
+        ok, frame = capture.read()
+        if not ok or frame is None:
+            return {"decoded": False, "reason": "frame_unavailable"}
+        gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+        return {
+            "decoded": True,
+            "frame_hash": stable_hash(
+                {
+                    "case_frame": case_frame,
+                    "mean": round(float(gray.mean()), 6),
+                    "shape": list(gray.shape),
+                    "std": round(float(gray.std()), 6),
+                }
+            ),
+            "mean_luma": round(float(gray.mean()), 3),
+            "std_luma": round(float(gray.std()), 3),
+        }
+    finally:
+        capture.release()
+
+
+def write_manual_firefox_checklist(package_root: Path) -> None:
+    text = """# Manual Firefox Acceptance Checklist
+
+Open the workspace with:
+
+`redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3_1 --open`
+
+- Start review creates a visible session id and survives reload.
+- Day and Night media play inline; no Picture-in-Picture opens.
+- Healthy videos show no Ready/Retry badge; media failures show a compact error and Retry.
+- Fullscreen uses the application player wrapper and keeps the source-frame HUD visible.
+- ArrowRight advances exactly one frame; ArrowLeft returns exactly one frame.
+- Shift+ArrowRight and Shift+ArrowLeft move ten frames.
+- Ten rapid frame steps do not leave the player black.
+- Switching Original / Automatic / Latest reviewed preserves the active frame.
+- Timeline markers select the matching review item, and review items highlight markers.
+- Review decisions persist before auto-advance.
+- Edit mode can add an ad hoc issue and save a correction preview.
+- Entity cards show useful Person/Plate thumbnails and compact reviewer actions.
+- Finalization remains blocked while unresolved items, unverified corrections, or unverified Keep/Not-sensitive actions remain.
+"""
+    (package_root / "manual_firefox_acceptance_checklist.md").write_text(text, encoding="utf-8")
 
 
 class FinalReviewWorkspaceServer(ThreadingHTTPServer):
@@ -1801,14 +2068,14 @@ def index_html() -> str:
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Final Review Workspace v2.2</title>
-  <link rel="stylesheet" href="assets/workspace.css?v=2.2">
+  <title>Final Review Workspace v2.3.1</title>
+  <link rel="stylesheet" href="assets/workspace.css?v=2.3.1">
 </head>
 <body>
-  <header class="topbar">
+  <header class="app-header">
     <div>
       <h1>Final Review Workspace</h1>
-      <p>Local case review for Original and Current result media. Reviewer attribution is required only when exporting or finalizing.</p>
+      <p>Local review for source-frame accurate redaction decisions and corrections.</p>
     </div>
     <div class="header-actions">
       <button id="startSession" class="primary">Start review</button>
@@ -1817,48 +2084,31 @@ def index_html() -> str:
     </div>
   </header>
   <div id="sessionBanner" class="session-banner">No local review session yet. Start review to enable decisions and corrections.</div>
-  <nav class="tabs" aria-label="Workspace tabs">
-    <button data-tab="day">Day case</button>
-    <button data-tab="night">Night case</button>
-    <button data-tab="final">Final results</button>
-    <button data-tab="audit">Audit trail</button>
+  <nav class="case-tabs" aria-label="Workspace tabs">
+    <button data-tab="day">Day</button>
+    <button data-tab="night">Night</button>
+    <button data-tab="final">Final Results</button>
+    <button data-tab="audit">Audit Trail</button>
   </nav>
-  <main>
+  <main id="appRoot">
     <section id="case-day" class="case-panel" data-case-id="day"></section>
     <section id="case-night" class="case-panel" data-case-id="night"></section>
-    <section id="case-final" class="case-panel">
-      <h2>Final results</h2>
-      <p id="finalStatus">Reviewed-final outputs appear here after a case passes all gates.</p>
-      <div id="finalResults"></div>
-    </section>
-    <section id="case-audit" class="case-panel">
-      <h2>Audit trail</h2>
-      <p>Events are append-only and hash chained. Technical JSON is available on each entry.</p>
-      <ol id="auditTrail"></ol>
-    </section>
+    <section id="case-final" class="case-panel"></section>
+    <section id="case-audit" class="case-panel"></section>
   </main>
-  <section id="drawer" class="drawer" aria-hidden="true">
-    <div class="drawer-card">
-      <header>
-        <h2 id="drawerTitle">Drawer</h2>
-        <button id="closeDrawer">Close</button>
-      </header>
-      <div id="drawerBody"></div>
-    </div>
-  </section>
   <section id="attributionModal" class="modal" aria-hidden="true">
     <div class="modal-card">
       <h2>Reviewer attribution</h2>
       <p>This local prototype records a declared reviewer name. It is not enterprise authentication.</p>
       <label>Reviewer name <input id="reviewerName" autocomplete="name"></label>
-      <p id="attributionError" class="status-red"></p>
-      <div class="controls">
+      <p id="attributionError" class="error-text"></p>
+      <div class="button-row">
         <button id="submitAttribution" class="primary">Save attribution</button>
         <button id="cancelAttribution">Cancel</button>
       </div>
     </div>
   </section>
-  <script src="assets/workspace.js?v=2.2"></script>
+  <script src="assets/workspace.js?v=2.3.1"></script>
 </body>
 </html>
 """
@@ -1866,1224 +2116,308 @@ def index_html() -> str:
 
 def workspace_css() -> str:
     return """
-:root { color-scheme: light; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-body { margin: 0; background: #f3f5f7; color: #18202b; }
-h1, h2, h3 { margin: 0 0 8px; letter-spacing: 0; }
-p { line-height: 1.45; margin: 0 0 10px; }
-button { border: 1px solid #9aa4b2; background: #fff; border-radius: 6px; padding: 8px 11px; cursor: pointer; font: inherit; }
+:root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+* { box-sizing: border-box; }
+body { margin: 0; background: #eef1f5; color: #172033; }
+h1, h2, h3, h4 { margin: 0; letter-spacing: 0; }
+p { margin: 0; line-height: 1.45; }
+button, input, textarea, select { font: inherit; }
+button { border: 1px solid #aeb7c4; background: #fff; color: #172033; border-radius: 6px; padding: 7px 10px; cursor: pointer; }
+button:hover:not(:disabled) { border-color: #64748b; }
+button:disabled { cursor: not-allowed; opacity: .55; }
 button.primary { background: #0f766e; border-color: #0f766e; color: #fff; }
 button.danger { background: #b91c1c; border-color: #b91c1c; color: #fff; }
-button.selected { outline: 3px solid #2dd4bf; }
-button:disabled { opacity: .55; cursor: not-allowed; }
-input, textarea, select { width: 100%; box-sizing: border-box; padding: 8px; border: 1px solid #aab3c0; border-radius: 6px; font: inherit; }
-.topbar { display: flex; justify-content: space-between; align-items: center; gap: 20px; padding: 14px 22px; background: #111827; color: #fff; }
-.topbar p { color: #d1d5db; max-width: 80ch; }
-.header-actions { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
-.session-banner { padding: 9px 22px; background: #fff7ed; border-bottom: 1px solid #fed7aa; color: #7c2d12; }
+button.selected, .segmented button.active { background: #172033; border-color: #172033; color: #fff; }
+input, textarea, select { width: 100%; border: 1px solid #b8c2d0; border-radius: 6px; padding: 7px 8px; background: #fff; color: #172033; }
+.app-header { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 20px; background: #111827; color: #fff; }
+.app-header p { color: #cbd5e1; margin-top: 3px; }
+.header-actions, .button-row, .segmented, .inline-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.session-banner { padding: 8px 20px; background: #fff7ed; border-bottom: 1px solid #fed7aa; color: #7c2d12; }
 .session-banner.ready { background: #ecfdf5; border-bottom-color: #a7f3d0; color: #065f46; }
-.tabs { display: flex; gap: 8px; padding: 10px 22px; background: #fff; border-bottom: 1px solid #d8dee7; position: sticky; top: 0; z-index: 20; }
-.tabs button.active { background: #111827; color: #fff; }
-main { padding: 18px 22px 52px; }
+.session-banner.error { background: #fef2f2; border-bottom-color: #fecaca; color: #991b1b; }
+.case-tabs { display: flex; gap: 6px; padding: 9px 20px; background: #fff; border-bottom: 1px solid #d8dee8; position: sticky; top: 0; z-index: 20; }
+.case-tabs button.active { background: #172033; color: #fff; border-color: #172033; }
+main { padding: 16px 20px 44px; }
 .case-panel { display: none; }
 .case-panel.active { display: block; }
-.case-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 12px; }
-.case-summary { color: #4b5563; }
-.case-tools { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
-.video-shell { background: #0b1220; color: #fff; padding: 12px; border-radius: 8px; }
-.video-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.video-card { position: relative; min-width: 0; border: 1px solid #1f2937; border-radius: 8px; overflow: hidden; background: #050812; }
-.video-card h3 { padding: 8px 10px; margin: 0; font-size: 15px; background: #111827; }
-.video-card video { display: block; width: 100%; background: #000; aspect-ratio: 16 / 9; }
-.frame-overlay { position: absolute; left: 8px; bottom: 8px; padding: 5px 7px; background: rgba(0,0,0,.76); color: #fff; border-radius: 4px; font-size: 13px; pointer-events: none; }
-.media-state { position: absolute; right: 8px; bottom: 8px; padding: 5px 7px; background: rgba(17,24,39,.82); color: #fff; border-radius: 4px; font-size: 13px; }
-.controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; align-items: center; }
-.status-green { color: #047857; font-weight: 700; }
-.status-amber { color: #b45309; font-weight: 700; }
-.status-red { color: #b91c1c; font-weight: 700; }
-.panel, .sweep-panel, .technical, .blocker { background: #fff; border: 1px solid #d8dee7; border-radius: 8px; padding: 14px; margin-top: 14px; }
-.timeline { height: 12px; background: #e5e7eb; border-radius: 999px; overflow: hidden; margin: 10px 0; }
-.timeline div { height: 100%; background: #0f766e; width: 0%; }
-.drawer { display: none; position: fixed; inset: 0; background: rgba(15, 23, 42, .34); z-index: 60; align-items: flex-end; }
-.drawer.open { display: flex; }
-.drawer-card { background: #fff; border-radius: 10px 10px 0 0; width: 100%; max-height: 76vh; overflow: hidden; box-shadow: 0 -20px 55px rgba(15,23,42,.25); }
-.drawer-card > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid #e5e7eb; }
-#drawerBody { padding: 14px 18px 24px; overflow: auto; max-height: calc(76vh - 64px); }
-.entity-toolbar, .task-toolbar { display: grid; grid-template-columns: minmax(220px, 2fr) minmax(130px, 1fr) minmax(130px, 1fr) auto; gap: 8px; align-items: end; margin-bottom: 12px; }
-.entity-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.entity-card { border: 1px solid #d8dee7; border-radius: 8px; padding: 10px; display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 10px; align-items: start; background: #fff; }
-.entity-card img { width: 96px; height: 72px; object-fit: cover; background: #111827; border-radius: 6px; cursor: pointer; }
-.entity-card .placeholder-thumb { width: 96px; height: 72px; display: grid; place-items: center; background: #e5e7eb; border-radius: 6px; color: #4b5563; }
-.entity-card.selected { outline: 3px solid #2dd4bf; }
-.entity-card header { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
-.badge { border-radius: 999px; padding: 3px 8px; font-size: 12px; background: #e5e7eb; color: #374151; display: inline-block; }
-.badge.redact { background: #dbeafe; color: #1e40af; }
-.badge.keep_visible { background: #fef3c7; color: #92400e; }
-.badge.review_required { background: #fee2e2; color: #991b1b; }
-.entity-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.task-list { display: grid; gap: 10px; }
-.task-card { border-left: 6px solid #f59e0b; background: #fff; border-top: 1px solid #e5e7eb; border-right: 1px solid #e5e7eb; border-bottom: 1px solid #e5e7eb; border-radius: 8px; padding: 12px; }
-.task-card.blocking { border-left-color: #b91c1c; }
-.decision-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 12px; }
-.correction-canvas-wrap { position: relative; background: #111827; aspect-ratio: 16 / 9; margin-top: 10px; border-radius: 8px; overflow: hidden; }
-.correction-canvas-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
-.correction-tools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin-top: 8px; }
-.correction-tools textarea, .correction-tools .wide { grid-column: 1 / -1; }
-.keyframe-list { font-size: 13px; color: #3f4b5d; grid-column: 1 / -1; }
-.modal { display: none; position: fixed; inset: 0; z-index: 80; background: rgba(15,23,42,.48); place-items: center; }
-.modal.open { display: grid; }
-.modal-card { background: #fff; border-radius: 8px; width: min(440px, calc(100vw - 32px)); padding: 18px; box-shadow: 0 25px 80px rgba(15,23,42,.35); }
-details { margin-top: 12px; }
-:fullscreen .frame-overlay, :fullscreen .media-state { font-size: 16px; }
-@media (max-width: 900px) {
-  .topbar, .case-header { flex-direction: column; align-items: stretch; }
-  .video-grid, .correction-tools, .decision-grid, .entity-toolbar, .task-toolbar { grid-template-columns: 1fr; }
-  .drawer-card { max-height: 86vh; }
-  #drawerBody { max-height: calc(86vh - 64px); }
-}
+.case-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 10px; }
+.case-subtitle { color: #516070; margin-top: 4px; }
+.mode-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.workspace-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 380px); gap: 14px; align-items: start; }
+.player-column { min-width: 0; }
+.side-panel { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; min-height: 0; max-height: calc(100vh - 175px); overflow: auto; padding: 12px; }
+.version-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; }
+.version-row label { display: flex; align-items: center; gap: 8px; min-width: 260px; }
+.player-wrapper { background: #060b14; color: #fff; border-radius: 8px; overflow: hidden; position: relative; box-shadow: 0 12px 30px rgba(15,23,42,.18); }
+.player-wrapper:fullscreen { display: flex; flex-direction: column; width: 100vw; height: 100vh; border-radius: 0; }
+.player-wrapper:fullscreen .video-stage { flex: 1; min-height: 0; }
+.video-stage { position: relative; background: #000; }
+.video-stage video { display: block; width: 100%; background: #000; aspect-ratio: 16 / 9; max-height: calc(100vh - 245px); object-fit: contain; }
+.player-wrapper:fullscreen video { height: 100%; max-height: none; }
+.frame-hud { position: absolute; left: 10px; top: 10px; padding: 5px 8px; border-radius: 5px; background: rgba(0,0,0,.72); color: #fff; font-size: 13px; pointer-events: none; z-index: 4; }
+.media-error { display: none; position: absolute; left: 10px; right: 10px; bottom: 10px; background: rgba(127, 29, 29, .94); color: #fff; padding: 8px 10px; border-radius: 6px; z-index: 5; font-size: 13px; }
+.media-error.visible { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.media-error button { padding: 4px 7px; }
+.player-controls { padding: 9px 10px 10px; background: #0b1220; }
+.controls-top { display: grid; grid-template-columns: auto minmax(0,1fr) auto auto; gap: 9px; align-items: center; }
+.time-readout { color: #cbd5e1; font-size: 13px; min-width: 92px; text-align: center; }
+.volume { max-width: 96px; }
+.timeline-wrap { position: relative; height: 30px; display: flex; align-items: center; }
+.timeline-range { width: 100%; accent-color: #0f766e; }
+.timeline-markers { position: absolute; left: 0; right: 0; top: 2px; height: 12px; pointer-events: none; }
+.marker { position: absolute; top: 0; height: 8px; min-width: 8px; border-radius: 999px; border: 1px solid #fff; pointer-events: auto; cursor: pointer; transform: translateX(-50%); }
+.marker-span { border-radius: 999px; transform: none; min-width: 3px; }
+.marker.blocking { background: #dc2626; }
+.marker.partial { background: #f97316; }
+.marker.info { background: #2563eb; }
+.marker.false { background: #7c3aed; }
+.marker.resolved { background: #16a34a; }
+.marker.active { outline: 2px solid #fff; height: 12px; top: -2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: #d8dee8; font-size: 12px; }
+.legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 4px; vertical-align: 1px; }
+.legend .red::before { background: #dc2626; } .legend .orange::before { background: #f97316; } .legend .blue::before { background: #2563eb; } .legend .purple::before { background: #7c3aed; } .legend .green::before { background: #16a34a; }
+.task-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-bottom: 10px; }
+.stat { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 7px; padding: 8px; }
+.stat strong { display: block; font-size: 19px; }
+.filter-row { display: flex; gap: 7px; margin: 8px 0 10px; }
+.filter-row button.active { background: #172033; color: #fff; }
+.task-list { display: grid; gap: 8px; }
+.task-card, .entity-card, .edit-card, .audit-card { border: 1px solid #d8dee8; border-radius: 8px; background: #fff; padding: 10px; }
+.task-card.selected { border-color: #0f766e; box-shadow: 0 0 0 2px rgba(15,118,110,.16); }
+.task-title { font-weight: 700; margin-bottom: 4px; }
+.task-meta, .muted { color: #607080; font-size: 13px; }
+.task-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+.decision-choice { border-width: 1px; font-weight: 700; min-width: 112px; }
+.decision-correct { background: #ecfdf3; border-color: #86efac; color: #166534; }
+.decision-needs-correction { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+.decision-unsure { background: #f3f4f6; border-color: #cbd5e1; color: #374151; }
+.decision-choice.selected { outline: 2px solid currentColor; outline-offset: 1px; box-shadow: 0 0 0 3px rgba(15,23,42,.08); }
+.decision-choice:disabled { opacity: .75; }
+.saved-note { color: #047857; font-size: 13px; margin-top: 6px; }
+.open-editor { margin-top: 8px; }
+.edit-section { display: grid; gap: 10px; }
+.edit-card h3 { margin-bottom: 8px; }
+.object-list { display: grid; gap: 8px; margin-top: 8px; }
+.entity-card { display: grid; grid-template-columns: 76px minmax(0,1fr); gap: 9px; align-items: start; }
+.entity-card img { width: 76px; height: 56px; object-fit: cover; border-radius: 5px; background: #e5e7eb; cursor: pointer; }
+.entity-card .entity-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 6px; }
+.badge { display: inline-block; border-radius: 999px; padding: 2px 7px; font-size: 12px; background: #e2e8f0; color: #334155; }
+.badge.open { background: #fef2f2; color: #991b1b; } .badge.done { background: #ecfdf5; color: #047857; } .badge.warn { background: #fff7ed; color: #9a3412; }
+.editor-canvas-wrap { position: relative; background: #020617; border-radius: 6px; overflow: hidden; }
+.editor-canvas-wrap canvas { width: 100%; min-height: 180px; display: block; }
+.keyframe-list { display: grid; gap: 6px; margin-top: 8px; }
+.keyframe-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; border: 1px solid #e2e8f0; border-radius: 6px; padding: 6px; }
+.technical { margin-top: 12px; background: #fff; border: 1px solid #d8dee8; border-radius: 8px; padding: 10px; }
+.technical pre { white-space: pre-wrap; overflow: auto; max-height: 220px; font-size: 12px; }
+.modal { display: none; position: fixed; inset: 0; background: rgba(15,23,42,.45); z-index: 80; align-items: center; justify-content: center; padding: 20px; }
+.modal.open { display: flex; }
+.modal-card { width: min(460px, 100%); background: #fff; border-radius: 9px; padding: 18px; box-shadow: 0 24px 80px rgba(15,23,42,.32); }
+.modal-card label { display: grid; gap: 6px; margin: 12px 0; }
+.error-text { color: #b91c1c; }
+.audit-list { display: grid; gap: 8px; }
+.final-card { background: #fff; border: 1px solid #d8dee8; border-radius: 8px; padding: 12px; }
+@media (max-width: 980px) { .workspace-layout { grid-template-columns: 1fr; } .side-panel { max-height: none; } .video-stage video { max-height: none; } .app-header { align-items: flex-start; flex-direction: column; } }
 """
 
 
 def workspace_js() -> str:
     return r"""
-const state = {
-  activeTab: 'night',
-  activeTask: {},
-  attribution: null,
-  correctionDrafts: {},
-  decisions: {},
-  drawer: null,
-  drawing: null,
-  entityFilters: {},
-  entityHistory: [],
-  entityPage: {},
-  entitySelection: {},
-  entityVisibility: {},
-  frame: {},
-  mediaReady: {},
-  session: null,
-  tasks: [],
-  viewed: {}
+const APP_VERSION = 'final_review_workspace.v2.3.1';
+const ACTIONS = {
+  looks: 'looks_correct', leak: 'privacy_leak', partial: 'partial_coverage',
+  falseRedaction: 'false_redaction', wrong: 'wrong_target', notSensitive: 'not_sensitive',
+  cosmetic: 'cosmetic_only', unsure: 'uncertain_escalate'
 };
-const DATA = {};
-const ENTITY_PAGE_SIZE = 24;
-let pendingAttributionAction = null;
+const DATA = { workspace: null, tasks: null, entities: null, alignment: null, cases: {} };
+const state = {
+  tab: localStorage.getItem(storageKey('active_tab')) || 'day',
+  mode: { day: localStorage.getItem(storageKey('mode_day')) || 'review', night: localStorage.getItem(storageKey('mode_night')) || 'review' },
+  frame: { day: Number(localStorage.getItem(storageKey('frame_day')) || 0), night: Number(localStorage.getItem(storageKey('frame_night')) || 0) },
+  version: { day: localStorage.getItem(storageKey('version_day')) || '', night: localStorage.getItem(storageKey('version_night')) || '' },
+  filter: { day: 'Open', night: 'Open' }, selectedTask: { day: null, night: null },
+  session: null, attribution: null, decisions: {}, events: [], corrections: [], latestReviewed: {},
+  draft: { caseId: null, start: null, end: null, keyframes: [], selectedEntityId: null, selectedTaskId: null },
+  savedFlash: {}, entityOverrides: {}, manualTasks: []
+};
 
-async function loadJson(path) { const res = await fetch(path); if (!res.ok) throw new Error(path); return await res.json(); }
+function storageKey(name) { return `final-review-v2.3.1:${location.pathname}:${name}`; }
+async function loadJson(path) { const res = await fetch(path, { cache: 'no-store' }); if (!res.ok) throw new Error(`${path}: ${res.status}`); return res.json(); }
+async function postJson(path, payload) { const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await res.json().catch(() => ({})); if (!res.ok || data.ok === false) throw new Error(data.error || `${path}: ${res.status}`); return data; }
+function esc(value) { return String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function clamp(n, min, max) { return Math.min(max, Math.max(min, n)); }
+function isPrimaryCase(id) { return id === 'day' || id === 'night'; }
+function caseData(caseId) { return DATA.cases[caseId]; }
+function fpsValue(caseId) { const fps = String(caseData(caseId)?.fps || '30/1').split('/').map(Number); return fps.length === 2 && fps[1] ? fps[0] / fps[1] : Number(fps[0] || 30); }
+function caseFrameCount(caseId) { return Number(caseData(caseId)?.frame_count || 1); }
+function sourceFrame(caseId, caseFrame = state.frame[caseId]) { return Number(caseData(caseId)?.source_frame_start || 0) + clamp(caseFrame, 0, caseFrameCount(caseId) - 1); }
+function frameTime(caseId, caseFrame = state.frame[caseId]) { return clamp(caseFrame, 0, caseFrameCount(caseId) - 1) / fpsValue(caseId); }
+function timeText(seconds) { const total = Math.max(0, Math.floor(Number(seconds) || 0)); const h = Math.floor(total / 3600); const m = Math.floor((total % 3600) / 60); const s = total % 60; return [h,m,s].map(v => String(v).padStart(2, '0')).join(':'); }
+function hudText(caseId) { const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId) - 1); return `Source frame ${sourceFrame(caseId, frame)} · Case frame ${frame} · ${timeText(frameTime(caseId, frame))}`; }
+function currentActor() { return state.attribution || { display_name: null, application_version: APP_VERSION }; }
+function visibleCaseId() { return state.tab === 'night' ? 'night' : 'day'; }
+function activeVideo(caseId = visibleCaseId()) { return document.querySelector(`#case-${caseId}.active video[data-case="${caseId}"]`); }
+function selectedTask(caseId) { return allTasks(caseId).find(t => t.review_task_id === state.selectedTask[caseId]) || null; }
+function closestElement(target, selector) { const element = target?.nodeType === Node.ELEMENT_NODE ? target : target?.parentElement; return element ? element.closest(selector) : null; }
 
 async function init() {
   DATA.workspace = await loadJson('workspace_manifest.json');
   DATA.tasks = await loadJson('reviewer_tasks.json');
-  DATA.freeze = await loadJson('configuration_freeze.json');
-  DATA.entities = await loadJson('review_entities.json').catch(() => loadJson('privacy_entities.json'));
-  for (const id of ['day','night']) DATA[id] = await loadJson(`cases/${id}.json`);
-  state.tasks = DATA.tasks.tasks.filter(t => !t.technical_only);
-  state.frame.day = 0; state.frame.night = 0;
-  renderCase('day'); renderCase('night'); renderFinal(); bindGlobalControls();
+  DATA.entities = await loadJson('review_entities.json');
+  DATA.alignment = await loadJson('version_alignment_audit.json').catch(() => null);
+  for (const [caseId, path] of Object.entries(DATA.workspace.cases || {})) DATA.cases[caseId] = await loadJson(path);
   await restoreSession();
-  setTab(location.hash.replace('#','') || 'night');
-  window.addEventListener('hashchange', () => setTab(location.hash.replace('#','') || 'night'));
-  document.addEventListener('keydown', handleKeys, true);
-  updateSessionBanner();
+  renderApp();
+  installGlobalHandlers();
 }
-
-function setTab(tab) {
-  if (!['day','night','final','audit'].includes(tab)) tab = 'night';
-  pauseInactiveCases(tab);
-  state.activeTab = tab;
-  document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
-  document.querySelectorAll('.case-panel').forEach(p => p.classList.remove('active'));
-  const panel = document.getElementById(`case-${tab}`); if (panel) panel.classList.add('active');
-  if (location.hash.replace('#','') !== tab) location.hash = tab;
-  updateControls();
-  updateFrameOverlay(tab);
+function renderApp() {
+  renderTabs(); renderSessionBanner();
+  renderCase('day'); renderCase('night'); renderFinal(); renderAudit();
+  switchTab(state.tab);
 }
+function renderTabs() { document.querySelectorAll('.case-tabs button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === state.tab)); }
+function switchTab(tab) { state.tab = tab; localStorage.setItem(storageKey('active_tab'), tab); document.querySelectorAll('.case-panel').forEach(p => p.classList.remove('active')); document.getElementById(`case-${tab}`)?.classList.add('active'); renderTabs(); pauseHiddenVideos(); setTimeout(() => syncPlayerToState(visibleCaseId()), 0); }
+function pauseHiddenVideos() { document.querySelectorAll('video').forEach(v => { if (!v.closest('.case-panel.active')) v.pause(); }); }
+function setMode(caseId, mode) { state.mode[caseId] = mode; localStorage.setItem(storageKey(`mode_${caseId}`), mode); renderCase(caseId); setTimeout(() => syncPlayerToState(caseId), 0); }
 
 function renderCase(caseId) {
-  const c = DATA[caseId]; const panel = document.getElementById(`case-${caseId}`);
-  const tasks = state.tasks.filter(t => t.case_id === caseId);
-  const roles = c.video_roles || [];
-  panel.innerHTML = `<div class="case-header"><div><h2>${escapeHtml(c.display_name)}</h2>${caseStatus(c)}
-    <p class="case-summary">${c.frame_count} case frames · source frames ${c.source_frame_start}-${c.source_frame_end}</p></div>
-    <div class="case-tools">
-      <button data-action="open-drawer" data-drawer="entities" data-case="${caseId}">Entities</button>
-      <button data-action="open-drawer" data-drawer="tasks" data-case="${caseId}">Review queue</button>
-      <button data-action="open-drawer" data-drawer="corrections" data-case="${caseId}">Corrections</button>
-    </div></div>
-    <div class="video-shell" id="player-${caseId}" data-player-wrapper="${caseId}">${videoGrid(c, roles)}${playerControls(caseId)}</div>
-    <section class="sweep-panel"><h3>Full-video sweep</h3><p>Use the player to review the complete case. Coverage records where playback has been visited; it does not prove the absence of misses.</p>
-      <div class="timeline"><div id="sweep-${caseId}"></div></div>
-      <button data-action="add-issue" data-case="${caseId}">Add issue at current frame</button>
-      <button data-action="ack-sweep" data-case="${caseId}">Acknowledge sweep complete</button>
-      <textarea id="sweep-note-${caseId}" placeholder="Override reason or sweep notes"></textarea>
-    </section>
-    <details class="technical"><summary>Technical details</summary><pre>${escapeHtml(JSON.stringify(c.lineage || {}, null, 2))}</pre></details>`;
-  state.activeTask[caseId] = state.activeTask[caseId] || 0;
-  bindCaseMedia(panel);
-  updateTask(caseId);
+  const panel = document.getElementById(`case-${caseId}`); if (!panel || !DATA.cases[caseId]) return;
+  const manifest = DATA.cases[caseId]; const mode = state.mode[caseId] || 'review';
+  if (!state.selectedTask[caseId]) state.selectedTask[caseId] = firstOpenTask(caseId)?.review_task_id || allTasks(caseId)[0]?.review_task_id || null;
+  panel.innerHTML = `
+    <div class="case-header"><div><h2>${esc(manifest.display_name || caseId)}</h2><p class="case-subtitle">${esc(caseSubtitle(caseId))}</p></div><div class="segmented"><button class="${mode === 'review' ? 'active' : ''}" data-mode="review">Review</button><button class="${mode === 'edit' ? 'active' : ''}" data-mode="edit">Edit</button></div></div>
+    <div class="workspace-layout">
+      <div class="player-column">${playerHtml(caseId)}<details class="technical"><summary>Technical details</summary><pre>${esc(JSON.stringify(technicalSummary(caseId), null, 2))}</pre></details></div>
+      <aside class="side-panel">${mode === 'edit' ? editPanelHtml(caseId) : reviewPanelHtml(caseId)}</aside>
+    </div>`;
+  panel.querySelectorAll('[data-mode]').forEach(btn => btn.addEventListener('click', () => setMode(caseId, btn.dataset.mode)));
+  bindPlayer(caseId); bindTimeline(caseId); bindReviewPanel(caseId); bindEditPanel(caseId); bindEntityPanel(caseId);
 }
+function caseSubtitle(caseId) { const m = caseData(caseId); return `${m.frame_count} frames · Source ${m.source_frame_start}-${m.source_frame_end}`; }
+function technicalSummary(caseId) { return { case_manifest: DATA.cases[caseId], alignment: DATA.alignment?.cases?.[caseId] || null }; }
+function playerHtml(caseId) {
+  const versions = availableVersions(caseId); const selected = selectedVersion(caseId);
+  const options = versions.map(v => `<option value="${esc(v.key)}" ${v.key === selected.key ? 'selected' : ''}>${esc(v.label)}</option>`).join('');
+  return `<div class="version-row"><label>Version <select data-action="version">${options}</select></label><span class="badge ${selected.key === 'latest_reviewed' ? 'warn' : ''}">${esc(selected.note || 'Frame-aligned')}</span></div>
+    <section id="player-${caseId}" class="player-wrapper" data-case="${caseId}">
+      <div class="video-stage"><video data-case="${caseId}" preload="metadata" playsinline disablePictureInPicture controlslist="nodownload noremoteplayback"></video><div class="frame-hud" data-role="hud">${esc(hudText(caseId))}</div><div class="media-error" data-role="media-error"><span></span><button data-action="retry-media">Retry</button></div></div>
+      <div class="player-controls"><div class="controls-top"><button data-action="toggle-play">Play</button><div class="timeline-wrap"><input class="timeline-range" type="range" min="0" max="${caseFrameCount(caseId) - 1}" value="${state.frame[caseId] || 0}" step="1" data-action="scrub"><div class="timeline-markers" data-role="markers"></div></div><span class="time-readout" data-role="time">${esc(timeText(frameTime(caseId)))} / ${esc(timeText(caseData(caseId).duration_seconds || frameTime(caseId, caseFrameCount(caseId)-1)))}</span><input class="volume" type="range" min="0" max="1" step="0.05" value="1" data-action="volume"><button data-action="fullscreen">Fullscreen</button></div><div class="legend"><span class="red">blocking</span><span class="orange">uncertain</span><span class="blue">spot check</span><span class="purple">false redaction</span><span class="green">resolved</span></div></div>
+    </section>`;
+}
+function availableVersions(caseId) {
+  const roles = caseData(caseId).video_roles || [];
+  const original = roles.find(r => r.role === 'original'); const current = roles.find(r => r.role === 'current_result'); const final = roles.find(r => r.role === 'final_reviewed');
+  const versions = [];
+  if (original) versions.push({ key: 'original', label: 'Original', path: original.path, role: original.role });
+  if (current) versions.push({ key: 'automatic', label: 'Automatic', path: current.path, role: current.role });
+  if (state.latestReviewed[caseId]) versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: state.latestReviewed[caseId].path, role: 'latest_reviewed', note: 'Correction preview' });
+  else if (current) versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: current.path, role: current.role, note: 'Current result' });
+  if (final) versions.push({ key: 'final_reviewed', label: 'Final reviewed', path: final.path, role: final.role });
+  return versions;
+}
+function selectedVersion(caseId) { const versions = availableVersions(caseId); const stored = state.version[caseId]; return versions.find(v => v.key === stored) || versions.find(v => v.key === 'latest_reviewed') || versions.find(v => v.key === 'automatic') || versions[0]; }
+function bindPlayer(caseId) {
+  const panel = document.getElementById(`case-${caseId}`); const video = panel.querySelector('video'); const version = selectedVersion(caseId); const wrapper = panel.querySelector(`#player-${caseId}`);
+  video.disablePictureInPicture = true; video.playsInline = true; video.dataset.path = version.path;
+  if (!video.src.endsWith(version.path)) { video.removeAttribute('src'); video.load(); video.src = version.path; video.load(); }
+  video.addEventListener('loadedmetadata', () => { hideMediaError(caseId); seekToFrame(caseId, state.frame[caseId] || 0, { keepPaused: true }); });
+  video.addEventListener('error', () => showMediaError(caseId, version.path, video.error ? video.error.code : 'unknown'));
+  video.addEventListener('timeupdate', () => { if (!video.paused) updateFrameFromTime(caseId, video.currentTime); });
+  video.addEventListener('play', () => panel.querySelector('[data-action="toggle-play"]').textContent = 'Pause');
+  video.addEventListener('pause', () => panel.querySelector('[data-action="toggle-play"]').textContent = 'Play');
+  video.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); togglePlay(caseId); });
+  panel.querySelector('[data-action="toggle-play"]').addEventListener('click', () => togglePlay(caseId));
+  panel.querySelector('[data-action="fullscreen"]').addEventListener('click', () => toggleFullscreen(wrapper));
+  panel.querySelector('[data-action="retry-media"]').addEventListener('click', () => { hideMediaError(caseId); video.load(); });
+  panel.querySelector('[data-action="volume"]').addEventListener('input', e => { video.volume = Number(e.target.value); });
+  panel.querySelector('[data-action="scrub"]').addEventListener('input', e => seekToFrame(caseId, Number(e.target.value)));
+  panel.querySelector('[data-action="version"]').addEventListener('change', e => switchVersion(caseId, e.target.value));
+  updatePlayerUi(caseId);
+}
+function bindTimeline(caseId) {
+  const markerBox = document.querySelector(`#case-${caseId} [data-role="markers"]`); if (!markerBox) return;
+  const count = Math.max(1, caseFrameCount(caseId) - 1);
+  markerBox.innerHTML = allTasks(caseId).map((task, index) => {
+    const startCase = task.source_frame_start - caseData(caseId).source_frame_start;
+    const endCase = task.source_frame_end - caseData(caseId).source_frame_start;
+    const left = clamp(startCase / count * 100, 0, 100); const width = Math.max(0.4, (endCase - startCase) / count * 100);
+    const cls = markerClass(task); const active = task.review_task_id === state.selectedTask[caseId] ? ' active' : '';
+    const style = endCase > startCase ? `left:${left}%;width:${width}%;top:${(index % 3) * 4}px` : `left:${left}%;top:${(index % 3) * 4}px`;
+    return `<button class="marker ${endCase > startCase ? 'marker-span' : ''} ${cls}${active}" title="${esc(task.title)}" style="${style}" data-task-id="${esc(task.review_task_id)}"></button>`;
+  }).join('');
+  markerBox.querySelectorAll('.marker').forEach(btn => btn.addEventListener('click', () => selectTask(caseId, btn.dataset.taskId, { jump: true })));
+}
+function markerClass(task) { if (decisionGreen(task.review_task_id)) return 'resolved'; if (String(task.issue_type || '').includes('false') || String(task.issue_type || '').includes('wrong')) return 'false'; if (task.blocking) return 'blocking'; if (task.severity === 'low') return 'info'; return 'partial'; }
+function updateFrameFromTime(caseId, time) { const next = clamp(Math.round(time * fpsValue(caseId)), 0, caseFrameCount(caseId) - 1); if (next !== state.frame[caseId]) { state.frame[caseId] = next; persistFrame(caseId); updatePlayerUi(caseId); } }
+function persistFrame(caseId) { localStorage.setItem(storageKey(`frame_${caseId}`), String(state.frame[caseId] || 0)); }
+async function switchVersion(caseId, key) { const video = activeVideo(caseId); const wasPlaying = video && !video.paused; const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId) - 1); if (video) video.pause(); state.frame[caseId] = frame; state.version[caseId] = key; localStorage.setItem(storageKey(`version_${caseId}`), key); persistFrame(caseId); renderCase(caseId); state.frame[caseId] = frame; await syncPlayerToState(caseId); if (wasPlaying) await togglePlay(caseId, true); }
+async function syncPlayerToState(caseId) { const video = activeVideo(caseId); if (video) await seekToFrame(caseId, state.frame[caseId] || 0, { keepPaused: true }); }
+async function seekToFrame(caseId, frame, opts = {}) { const video = activeVideo(caseId); if (!video) return; const next = clamp(Math.round(frame), 0, caseFrameCount(caseId) - 1); const wasPlaying = !video.paused && !opts.keepPaused; video.pause(); state.frame[caseId] = next; persistFrame(caseId); await waitMetadata(video, 1600).catch(() => showMediaError(caseId, video.dataset.path, 'metadata')); await seekVideo(video, frameTime(caseId, next)); updatePlayerUi(caseId); if (wasPlaying) await togglePlay(caseId, true); }
+function stepFrame(delta) { const caseId = visibleCaseId(); if (!isPrimaryCase(caseId)) return; seekToFrame(caseId, (state.frame[caseId] || 0) + delta); }
+async function togglePlay(caseId, forcePlay = false) { const video = activeVideo(caseId); if (!video) return; hideMediaError(caseId); try { await waitMetadata(video, 2000); if (!forcePlay && !video.paused) { video.pause(); return; } await video.play(); } catch (err) { showMediaError(caseId, video.dataset.path || selectedVersion(caseId).path, err.message || 'play failed'); } }
+function updatePlayerUi(caseId) { const panel = document.getElementById(`case-${caseId}`); if (!panel) return; const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId)-1); panel.querySelector('[data-role="hud"]').textContent = hudText(caseId); const range = panel.querySelector('[data-action="scrub"]'); if (range) range.value = String(frame); const time = panel.querySelector('[data-role="time"]'); if (time) time.textContent = `${timeText(frameTime(caseId, frame))} / ${timeText(caseData(caseId).duration_seconds || frameTime(caseId, caseFrameCount(caseId)-1))}`; }
+function waitMetadata(video, timeoutMs) { if (video.readyState >= 1) return Promise.resolve(); return new Promise((resolve, reject) => { const t = setTimeout(() => cleanup(reject, new Error('metadata timeout')), timeoutMs); const cleanup = (fn, value) => { clearTimeout(t); video.removeEventListener('loadedmetadata', ready); video.removeEventListener('error', error); fn(value); }; const ready = () => cleanup(resolve); const error = () => cleanup(reject, new Error(`media error ${video.error ? video.error.code : 'unknown'}`)); video.addEventListener('loadedmetadata', ready, {once:true}); video.addEventListener('error', error, {once:true}); }); }
+function seekVideo(video, time) { return new Promise(resolve => { let done = false; const finish = () => { if (done) return; done = true; video.removeEventListener('seeked', finish); if (video.requestVideoFrameCallback) video.requestVideoFrameCallback(() => resolve()); else resolve(); }; video.addEventListener('seeked', finish, {once:true}); try { video.currentTime = Math.max(0, time); } catch { resolve(); } setTimeout(finish, 900); }); }
+function showMediaError(caseId, path, code) { const el = document.querySelector(`#case-${caseId} [data-role="media-error"]`); if (!el) return; el.classList.add('visible'); el.querySelector('span').textContent = `Playback error: ${path} (code ${code})`; }
+function hideMediaError(caseId) { const el = document.querySelector(`#case-${caseId} [data-role="media-error"]`); if (el) el.classList.remove('visible'); }
+function toggleFullscreen(wrapper) { if (!document.fullscreenElement) wrapper.requestFullscreen().catch(() => {}); else document.exitFullscreen().catch(() => {}); }
 
-function caseStatus(c) {
-  if (c.status === 'ready') return `<p class="status-amber">Current result is a review preview until all blockers are resolved.</p>`;
-  return `<div class="blocker"><h3>Case blocked</h3><p>${(c.blockers || []).map(escapeHtml).join('<br>')}</p></div>`;
+function reviewPanelHtml(caseId) {
+  const tasks = filteredTasks(caseId); const all = allTasks(caseId); const remaining = all.filter(t => !decisionGreen(t.review_task_id) && t.blocking).length; const completed = all.filter(t => decisionGreen(t.review_task_id)).length; const selected = selectedTask(caseId);
+  return `<div class="task-summary"><div class="stat"><span>Remaining</span><strong>${remaining}</strong></div><div class="stat"><span>Completed</span><strong>${completed}</strong></div><div class="stat"><span>Current</span><strong>${currentTaskNumber(caseId)}</strong></div></div><div class="filter-row">${['All','Open','Completed'].map(f => `<button class="${state.filter[caseId] === f ? 'active' : ''}" data-action="filter" data-filter="${f}">${f}</button>`).join('')}</div><div class="task-list">${tasks.map(t => taskCardHtml(caseId, t)).join('') || '<p class="muted">No review items in this filter.</p>'}</div>${selected && requiresEditor(selected) ? '<button class="primary open-editor" data-action="open-editor">Open in editor</button>' : ''}`;
 }
+function allTasks(caseId) { return [...(DATA.tasks?.tasks || []), ...state.manualTasks].filter(t => t.case_id === caseId && !t.technical_only); }
+function filteredTasks(caseId) { const f = state.filter[caseId] || 'Open'; return allTasks(caseId).filter(t => f === 'All' || (f === 'Completed' ? decisionGreen(t.review_task_id) : !decisionGreen(t.review_task_id))); }
+function firstOpenTask(caseId) { return allTasks(caseId).find(t => !decisionGreen(t.review_task_id)); }
+function currentTaskNumber(caseId) { const tasks = allTasks(caseId); const index = tasks.findIndex(t => t.review_task_id === state.selectedTask[caseId]); return index >= 0 ? `${index + 1}/${tasks.length}` : `0/${tasks.length}`; }
+function decisionGreen(taskId) { return ['looks_correct','not_sensitive','cosmetic_only'].includes(String(state.decisions[taskId]?.action || '')); }
+function taskCardHtml(caseId, task) { const selected = task.review_task_id === state.selectedTask[caseId]; const decision = state.decisions[task.review_task_id]; return `<article class="task-card ${selected ? 'selected' : ''}" data-task-id="${esc(task.review_task_id)}"><div class="task-title">${esc(cleanTaskTitle(task))}</div><div class="task-meta">${task.category} · source ${task.source_frame_start}${task.source_frame_end !== task.source_frame_start ? `-${task.source_frame_end}` : ''} · ${timeText((task.source_frame_start - caseData(caseId).source_frame_start)/fpsValue(caseId))}</div><p>${esc(task.what_to_inspect || 'Check this interval in the video.')}</p><span class="badge ${decisionGreen(task.review_task_id) ? 'done' : task.blocking ? 'open' : 'warn'}">${decision ? esc(actionLabel(decision.action)) : task.blocking ? 'Open required' : 'Open'}</span><div class="task-actions">${decisionButtons(task).map(a => `<button data-action="decision" data-task-id="${esc(task.review_task_id)}" data-decision="${a.action}" aria-pressed="${decision?.action === a.action ? 'true' : 'false'}" class="decision-choice decision-${a.tone}${decision?.action === a.action ? ' selected' : ''}">${esc(a.label)}</button>`).join('')}</div><div class="saved-note" data-saved-for="${esc(task.review_task_id)}">${state.savedFlash[task.review_task_id] ? 'Saved' : ''}</div></article>`; }
+function cleanTaskTitle(task) { if (task.issue_type === 'optional_spot_check') return 'Spot check this moment'; if (String(task.issue_type || '').includes('false')) return 'Check possible unnecessary redaction'; if (task.blocking && task.category === 'license_plate') return 'Plate may need correction'; if (task.blocking && task.category === 'face') return 'Face may need correction'; return task.title || 'Review this interval'; }
+function decisionButtons(task) { return [{label:'Correct', action:ACTIONS.looks, tone:'correct'}, {label:'Needs correction', action:ACTIONS.leak, tone:'needs-correction'}, {label:'Unsure', action:ACTIONS.unsure, tone:'unsure'}]; }
+function bindReviewPanel(caseId) { const panel = document.getElementById(`case-${caseId}`); if (panel.dataset.reviewDelegated === 'true') return; panel.dataset.reviewDelegated = 'true'; panel.addEventListener('click', e => { const actionEl = closestElement(e.target, '[data-action]'); if (actionEl) { const action = actionEl.dataset.action; if (action === 'filter') { state.filter[caseId] = actionEl.dataset.filter; renderCase(caseId); return; } if (action === 'decision') { e.preventDefault(); e.stopPropagation(); recordDecision(caseId, actionEl.dataset.taskId, actionEl.dataset.decision, actionEl); return; } if (action === 'open-editor') { setMode(caseId, 'edit'); return; } } const card = closestElement(e.target, '.task-card'); if (card && !closestElement(e.target, 'button,input,select,textarea,a')) selectTask(caseId, card.dataset.taskId, {jump:true}); }); }
+function selectTask(caseId, taskId, opts = {}) { state.selectedTask[caseId] = taskId; const task = selectedTask(caseId); if (task && opts.jump) seekToFrame(caseId, task.source_frame_start - caseData(caseId).source_frame_start); renderCase(caseId); setTimeout(() => document.querySelector(`#case-${caseId} [data-task-id="${CSS.escape(taskId)}"]`)?.scrollIntoView({block:'nearest'}), 0); }
+async function recordDecision(caseId, taskId, action, button = null) { if (!state.session) return showSessionError('Start review before recording decisions.'); const task = allTasks(caseId).find(t => t.review_task_id === taskId); setDecisionPending(button); try { const event = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: decisionNote(action, task) }); state.decisions[taskId] = event.event.after_state; state.savedFlash[taskId] = true; if (action === ACTIONS.leak && task?.issue_type === 'optional_spot_check') await createManualIssue(caseId, task.source_frame_start, task.source_frame_end, 'Privacy issue from spot check'); setTimeout(() => { delete state.savedFlash[taskId]; renderCase(caseId); }, 1200); const next = firstOpenTask(caseId); if (next && next.review_task_id !== taskId) state.selectedTask[caseId] = next.review_task_id; renderCase(caseId); } catch (err) { setDecisionError(button, err.message); showSessionError(`Decision was not saved: ${err.message}`); } }
+function setDecisionPending(button) { const card = button?.closest('.task-card'); if (!card) return; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.classList.toggle('selected', choice === button); choice.setAttribute('aria-pressed', choice === button ? 'true' : 'false'); choice.disabled = true; }); const note = card.querySelector('.saved-note'); if (note) note.textContent = 'Saving...'; }
+function setDecisionError(button, message) { const card = button?.closest('.task-card'); if (!card) return; const savedAction = state.decisions[card.dataset.taskId]?.action || ''; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.disabled = false; choice.classList.toggle('selected', choice.dataset.decision === savedAction); choice.setAttribute('aria-pressed', choice.dataset.decision === savedAction ? 'true' : 'false'); }); const note = card.querySelector('.saved-note'); if (note) note.textContent = `Could not save: ${message}`; }
+function decisionNote(action, task) { if (action === ACTIONS.leak || action === ACTIONS.partial) return 'Reviewer marked this item for correction.'; if (action === ACTIONS.falseRedaction) return 'Reviewer requested bounded redaction removal.'; return `Reviewer selected ${actionLabel(action)} for ${task?.review_task_id || 'task'}.`; }
+function requiresEditor(task) { const d = state.decisions[task.review_task_id]; return d && [ACTIONS.leak, ACTIONS.partial, ACTIONS.falseRedaction, ACTIONS.wrong].includes(d.action); }
 
-function videoGrid(c, roles) {
-  if (!roles.length) return `<p>No compatible current-result media is available for this case yet.</p>`;
-  return `<div class="video-grid">${roles.slice(0,2).map(role => `<div class="video-card" data-video-card="${c.case_id}:${role.role}"><h3>${escapeHtml(role.label)}</h3><video preload="metadata" data-role="${role.role}" data-case="${c.case_id}" data-media-path="${role.path}" src="${role.path}" playsinline disablepictureinpicture controls></video><div class="frame-overlay" data-frame-overlay="${c.case_id}">${frameHudText(c.case_id)}</div><div class="media-state"><span data-media-state="${c.case_id}:${role.role}">Loading</span> <button data-action="retry-media" data-case="${c.case_id}" data-role="${role.role}">Retry</button></div></div>`).join('')}</div>`;
-}
+function editPanelHtml(caseId) { const task = selectedTask(caseId); const draft = state.draft.caseId === caseId ? state.draft : {start:null,end:null,keyframes:[]}; return `<div class="edit-section"><section class="edit-card"><h3>Selected issue</h3><p class="task-title">${esc(task ? cleanTaskTitle(task) : 'No issue selected')}</p><p class="task-meta">${task ? `source ${task.source_frame_start}-${task.source_frame_end}` : 'Choose a review item or add an issue at the current frame.'}</p><div class="button-row"><button data-action="add-issue">Add issue at current frame</button><button data-action="back-review">Back to Review</button></div></section><section class="edit-card"><h3>Correction interval</h3><div class="button-row"><button data-action="set-start">Set start at current frame</button><button data-action="set-end">Set end at current frame</button></div><p class="muted">Start: ${draft.start ?? 'not set'} · End: ${draft.end ?? 'not set'} · ${draft.start !== null && draft.end !== null ? `${Math.abs(draft.end-draft.start)+1} frames` : 'set boundaries first'}</p></section><section class="edit-card"><h3>Keyframes</h3><div class="editor-canvas-wrap"><canvas id="editorCanvas-${caseId}" width="640" height="360"></canvas></div><div class="button-row"><button data-action="add-keyframe">Add keyframe at current frame</button><button data-action="barrier">Add not-visible / scene-cut barrier</button></div><div class="keyframe-list">${draft.keyframes.map(k => `<div class="keyframe-row"><span>Frame ${k.source_frame}</span><span>${k.bbox_xyxy.join(', ')}</span><button data-action="delete-keyframe" data-frame="${k.source_frame}">Delete</button></div>`).join('') || '<p class="muted">No keyframes yet.</p>'}</div></section><section class="edit-card"><h3>Preview and save</h3><div class="button-row"><button class="primary" data-action="preview-correction">Preview correction</button><button data-action="save-correction">Save correction revision</button><button data-action="verify-correction">Verify corrected interval</button><button data-action="discard-draft">Discard draft</button></div><p class="muted" id="correctionPreview-${caseId}">${state.latestReviewed[caseId] ? `Latest reviewed preview: ${esc(state.latestReviewed[caseId].path)}` : 'No correction preview yet.'}</p></section><section class="edit-card"><h3>Objects</h3><div class="inline-actions"><input data-action="entity-search" placeholder="Search objects"><select data-action="entity-filter"><option value="all">All</option><option value="face">People</option><option value="license_plate">Plates</option></select></div><div class="object-list">${entityCardsHtml(caseId)}</div></section></div>`; }
+function bindEditPanel(caseId) { const panel = document.getElementById(`case-${caseId}`); panel.querySelector('[data-action="back-review"]')?.addEventListener('click', () => setMode(caseId, 'review')); panel.querySelector('[data-action="set-start"]')?.addEventListener('click', () => { ensureDraft(caseId); state.draft.start = sourceFrame(caseId); renderCase(caseId); }); panel.querySelector('[data-action="set-end"]')?.addEventListener('click', () => { ensureDraft(caseId); state.draft.end = sourceFrame(caseId); renderCase(caseId); }); panel.querySelector('[data-action="add-keyframe"]')?.addEventListener('click', () => addDraftKeyframe(caseId)); panel.querySelector('[data-action="barrier"]')?.addEventListener('click', () => addDraftBarrier(caseId)); panel.querySelector('[data-action="discard-draft"]')?.addEventListener('click', () => { state.draft = { caseId: null, start: null, end: null, keyframes: [], selectedEntityId: null, selectedTaskId: null }; renderCase(caseId); }); panel.querySelector('[data-action="preview-correction"]')?.addEventListener('click', () => saveCorrection(caseId, {previewOnly:true})); panel.querySelector('[data-action="save-correction"]')?.addEventListener('click', () => saveCorrection(caseId)); panel.querySelector('[data-action="verify-correction"]')?.addEventListener('click', () => verifyCorrection(caseId)); panel.querySelector('[data-action="add-issue"]')?.addEventListener('click', () => createManualIssue(caseId, sourceFrame(caseId), sourceFrame(caseId), 'Reviewer discovered issue')); panel.querySelectorAll('[data-action="delete-keyframe"]').forEach(btn => btn.addEventListener('click', () => { state.draft.keyframes = state.draft.keyframes.filter(k => String(k.source_frame) !== btn.dataset.frame); renderCase(caseId); })); drawEditorCanvas(caseId); }
+function ensureDraft(caseId) { if (state.draft.caseId !== caseId) state.draft = { caseId, start: null, end: null, keyframes: [], selectedEntityId: null, selectedTaskId: state.selectedTask[caseId] }; }
+function addDraftKeyframe(caseId) { ensureDraft(caseId); const frame = sourceFrame(caseId); const box = defaultDraftBox(caseId); const existing = state.draft.keyframes.filter(k => k.source_frame !== frame); state.draft.keyframes = [...existing, { source_frame: frame, bbox_xyxy: box }].sort((a,b) => a.source_frame-b.source_frame); if (state.draft.start === null) state.draft.start = frame; if (state.draft.end === null) state.draft.end = frame; renderCase(caseId); }
+function addDraftBarrier(caseId) { ensureDraft(caseId); const frame = sourceFrame(caseId); state.draft.keyframes.push({ source_frame: frame, bbox_xyxy: defaultDraftBox(caseId), state: 'not_visible' }); renderCase(caseId); }
+function defaultDraftBox(caseId) { const m = caseData(caseId); const w = Number(m.width || 1280), h = Number(m.height || 720); return [Math.round(w*.42), Math.round(h*.42), Math.round(w*.58), Math.round(h*.54)]; }
+function drawEditorCanvas(caseId) { const canvas = document.getElementById(`editorCanvas-${caseId}`); if (!canvas) return; const ctx = canvas.getContext('2d'); ctx.fillStyle = '#020617'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.fillStyle = '#cbd5e1'; ctx.fillText('Draw and adjust correction geometry on Original media. Keyframes are reviewer-authored; interpolation is preview-only until verified.', 18, 32); ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 3; for (const k of (state.draft.keyframes || [])) { const [x1,y1,x2,y2] = k.bbox_xyxy; const m = caseData(caseId); const sx = canvas.width / (m.width || canvas.width), sy = canvas.height / (m.height || canvas.height); ctx.strokeRect(x1*sx, y1*sy, (x2-x1)*sx, (y2-y1)*sy); } }
+async function saveCorrection(caseId, opts = {}) { if (!state.session) return showSessionError('Start review before saving corrections.'); ensureDraft(caseId); const start = Math.min(state.draft.start ?? sourceFrame(caseId), state.draft.end ?? sourceFrame(caseId)); const end = Math.max(state.draft.start ?? sourceFrame(caseId), state.draft.end ?? sourceFrame(caseId)); const keyframes = (state.draft.keyframes || []).filter(k => !k.state); if (keyframes.length < 1) return showSessionError('Add at least one keyframe before saving a correction.'); if (start !== end && keyframes.length < 2) return showSessionError('Intervals longer than one frame require start and end keyframes.'); const task = selectedTask(caseId) || await createManualIssue(caseId, start, end, 'Reviewer-created correction'); const correction = { case_id: caseId, task_id: task.review_task_id, category: task.category || 'license_plate', operation: 'add_privacy_region', source_frame_start: start, source_frame_end: end, keyframe_boxes: keyframes, interpolation_method: keyframes.length > 1 ? 'linear' : 'none', reviewer_identity: currentActor(), reason: opts.previewOnly ? 'Preview correction draft' : 'Reviewed correction revision', source_video_hash: caseData(caseId).source_video_hash, configuration_freeze_hash: DATA.workspace.configuration_freeze_hash || 'package_freeze' }; try { const response = await postJson('/api/corrections', { session_id: state.session.session_id, actor: currentActor(), correction, reason: correction.reason }); state.corrections.push(response.event.after_state); if (response.preview?.latest_reviewed) { state.latestReviewed[caseId] = { path: response.preview.latest_reviewed, frame_start: response.preview.frame_start, frame_end: response.preview.frame_end }; state.version[caseId] = 'latest_reviewed'; localStorage.setItem(storageKey(`version_${caseId}`), 'latest_reviewed'); } else if (response.preview?.corrected_preview) { state.latestReviewed[caseId] = { path: response.preview.corrected_preview, frame_start: response.preview.frame_start, frame_end: response.preview.frame_end }; } state.savedFlash[task.review_task_id] = true; renderCase(caseId); } catch (err) { showSessionError(`Correction was not saved: ${err.message}`); } }
+async function verifyCorrection(caseId) { const task = selectedTask(caseId); if (!task) return; await recordDecision(caseId, task.review_task_id, ACTIONS.looks); }
+async function createManualIssue(caseId, startSource, endSource, reason) { const task = { blocking: true, case_id: caseId, category: 'license_plate', correction_required: true, decision_state: 'pending', issue_type: 'manual_reviewer_issue', raw_signal_ids: [], review_task_id: `manual_${caseId}_${Date.now()}`, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: startSource, source_frame_end: endSource, technical_only: false, title: 'Reviewer-added issue', what_happened: 'A reviewer added this issue during full-video review.', what_to_inspect: 'Open in editor, add a reviewed correction if privacy protection is needed.' }; if (state.session) await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'manual_issue_created', case_id: caseId, entity_id: null, payload: { after: { task } } } }); state.manualTasks.push(task); state.selectedTask[caseId] = task.review_task_id; renderCase(caseId); return task; }
 
-function playerControls(caseId) {
-  return `<div class="controls">
-    <button data-action="play" data-case="${caseId}">Play together</button>
-    <button data-action="restart" data-case="${caseId}">Restart</button>
-    <button data-action="back" data-case="${caseId}">One frame back</button>
-    <button data-action="forward" data-case="${caseId}">One frame forward</button>
-    <label>Go to frame <input data-go-frame="${caseId}" type="number" min="0"></label>
-    <button data-action="fullscreen-comparison" data-case="${caseId}">Fullscreen comparison</button>
-    <button data-action="fullscreen-original" data-case="${caseId}">Fullscreen Original</button>
-    <button data-action="fullscreen-current" data-case="${caseId}">Fullscreen Current/Final</button>
-    <span id="mediaError-${caseId}" class="status-red"></span>
-  </div>`;
-}
+function entityCardsHtml(caseId) { const entities = effectiveEntities(caseId).slice(0, 100); return entities.map(entity => `<article class="entity-card" data-entity-id="${esc(entity.entity_id)}"><img src="${esc(entity.representative_thumbnail_path || '')}" alt="${esc(entity.label)} thumbnail" data-action="jump-entity"><div><div class="task-title">${esc(entity.label)}</div><div class="task-meta">${entity.category === 'face' ? 'Person' : 'Plate'} · source ${entity.first_visible_source_frame ?? '?'}-${entity.last_visible_source_frame ?? '?'}</div><span class="badge ${entity.current_policy === 'review_required' ? 'open' : 'done'}">${policyLabel(entity.current_policy || entity.default_privacy_policy)}</span></div><div class="entity-actions"><button data-action="entity-redact">Redact</button><button data-action="entity-keep">Keep visible</button><button data-action="entity-invalid">${entity.category === 'face' ? 'Not a person' : 'Not a plate'}</button><button data-action="entity-merge">Merge with...</button></div><details><summary>Technical details</summary><pre>${esc(JSON.stringify({entity_id: entity.entity_id, tracks: entity.member_detector_tracker_ids || entity.automatic_source_track_ids, provenance: entity.created_provenance}, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No review objects available.</p>'; }
+function effectiveEntities(caseId) { const base = (DATA.entities?.cases?.[caseId] || []).map(e => ({...e, ...(state.entityOverrides[e.entity_id] || {})})); return base.filter(e => e.current_status !== 'merged'); }
+function bindEntityPanel(caseId) { const panel = document.getElementById(`case-${caseId}`); panel.querySelectorAll('[data-action="jump-entity"]').forEach(img => img.addEventListener('click', () => { const entity = findEntity(caseId, img.closest('.entity-card').dataset.entityId); if (entity?.representative_source_frame !== undefined) seekToFrame(caseId, entity.representative_source_frame - caseData(caseId).source_frame_start); })); panel.querySelectorAll('[data-action="entity-redact"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'redact'))); panel.querySelectorAll('[data-action="entity-keep"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'keep_visible'))); panel.querySelectorAll('[data-action="entity-invalid"]').forEach(btn => btn.addEventListener('click', () => setEntityPolicy(caseId, btn.closest('.entity-card').dataset.entityId, 'not_sensitive'))); panel.querySelectorAll('[data-action="entity-merge"]').forEach(btn => btn.addEventListener('click', () => mergeEntityPrompt(caseId, btn.closest('.entity-card').dataset.entityId))); }
+function findEntity(caseId, id) { return effectiveEntities(caseId).find(e => e.entity_id === id); }
+function policyLabel(policy) { return {redact:'Redact', keep_visible:'Keep visible', not_sensitive:'Invalid / not sensitive', review_required:'Needs review'}[policy] || policy; }
+async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; let reason = 'Reviewer object policy update.'; if (policy !== 'redact') { reason = (window.prompt(`Reason for ${policyLabel(policy)}?`, '') || '').trim(); if (!reason) return; } const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; if (verificationTaskId) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after } }, reason }); renderCase(caseId); }
+function policyTask(caseId, entity, taskId) { return { blocking: true, case_id: caseId, category: entity.category, correction_required: false, decision_state: 'pending', issue_type: 'entity_policy_verification', raw_signal_ids: [], review_task_id: taskId, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: entity.first_visible_source_frame || caseData(caseId).source_frame_start, source_frame_end: entity.first_visible_source_frame || caseData(caseId).source_frame_start, technical_only: false, title: `Verify ${policyLabel(entity.current_policy)} for ${entity.label}`, what_to_inspect: 'Confirm this object policy is correct before finalization.' }; }
+async function mergeEntityPrompt(caseId, entityId) { if (!state.session) return showSessionError('Start review before merging objects.'); const source = findEntity(caseId, entityId); const candidates = effectiveEntities(caseId).filter(e => e.entity_id !== entityId && e.category === source.category); const targetId = (window.prompt(`Merge ${source.label} with which ID?\n${candidates.map(e => `${e.entity_id}: ${e.label}`).join('\n')}`, '') || '').trim(); const target = findEntity(caseId, targetId); if (!target) return; if (entitiesOverlap(source, target)) return showSessionError('Merge rejected: these objects are simultaneously visible.'); const reason = (window.prompt('Reason for merging these objects?', '') || '').trim(); if (!reason) return; const before = { source, target }; const merged = {...source, member_detector_tracker_ids: [...new Set([...(source.member_detector_tracker_ids || []), ...(target.member_detector_tracker_ids || [])])], merge_split_lineage: [...(source.merge_split_lineage || []), { operation:'merge', merged_entity_id: target.entity_id }]}; state.entityOverrides[source.entity_id] = merged; state.entityOverrides[target.entity_id] = {...target, current_status:'merged'}; await postJson('/api/entities/merge', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, before_state: before, after_state: { primary: merged, retired_entity_ids: [target.entity_id] }, reason }); renderCase(caseId); }
+function entitiesOverlap(a,b) { const a1=a.first_visible_source_frame, a2=a.last_visible_source_frame, b1=b.first_visible_source_frame, b2=b.last_visible_source_frame; if ([a1,a2,b1,b2].some(v => v === null || v === undefined)) return false; return Math.max(a1,b1) <= Math.min(a2,b2); }
 
-function taskPanel(caseId, tasks) {
-  if (!tasks.length) return `<section class="task-panel"><h3>No tasks</h3></section>`;
-  return `<section class="panel"><h3>Guided risk review</h3><p id="progress-${caseId}"></p><div id="task-${caseId}"></div>
-    <div class="controls"><button data-action="prev-task" data-case="${caseId}">Previous</button><button data-action="next-task" data-case="${caseId}">Next</button><button data-action="loop-task" data-case="${caseId}">Loop interval</button></div></section>`;
-}
-
-function correctionPanel(caseId) {
-  return `<section class="panel"><h3>Temporal correction editor</h3><p>Draw and edit geometry on Original. The second pane remains the current or corrected preview; corrections are a reviewed override layer and never change automatic evidence.</p>
-    <div class="correction-canvas-wrap"><canvas data-correction-canvas="${caseId}"></canvas></div>
-    <div class="correction-tools">
-      <label>Entity <select data-correction-entity="${caseId}">${entityOptions(caseId)}</select></label>
-      <label>Operation <select data-correction-operation="${caseId}">
-        <option value="add_privacy_region">Add privacy region</option>
-        <option value="replace_privacy_region">Replace privacy region</option>
-        <option value="suppress_region">Suppress existing region</option>
-        <option value="suppress_track_segment">Suppress track segment</option>
-        <option value="mark_not_sensitive">Mark region not sensitive</option>
-        <option value="mark_not_visible">Mark interval not visible or occluded</option>
-      </select></label>
-      <label class="wide">Reason <textarea data-correction-reason="${caseId}"></textarea></label>
-      <div class="keyframe-list" id="keyframes-${caseId}">No reviewed keyframes yet.</div>
-      <div class="controls wide">
-        <button data-action="set-interval-start" data-case="${caseId}">Set interval start</button>
-        <button data-action="set-interval-end" data-case="${caseId}">Set interval end</button>
-        <button data-action="add-keyframe" data-case="${caseId}">Create/update keyframe</button>
-        <button data-action="prev-keyframe" data-case="${caseId}">Previous keyframe</button>
-        <button data-action="next-keyframe" data-case="${caseId}">Next keyframe</button>
-        <button data-action="preview-interpolation" data-case="${caseId}">Preview correction</button>
-        <button data-action="delete-correction" data-case="${caseId}">Discard draft</button>
-        <button data-action="save-correction" data-case="${caseId}" ${state.session ? '' : 'disabled'}>Save correction</button>
-        <button data-action="verify-correction" data-case="${caseId}" ${state.session ? '' : 'disabled'}>Verify corrected interval</button>
-      </div>
-    </div></section>`;
-}
-
-function entityPanel(caseId) {
-  const filters = state.entityFilters[caseId] || { query: '', category: 'all', policy: 'all' };
-  const all = caseEntities(caseId).filter(e => e.current_status !== 'merged');
-  const filtered = all.filter(e => {
-    const q = filters.query.toLowerCase();
-    const matchesQuery = !q || `${e.label} ${e.category}`.toLowerCase().includes(q);
-    const matchesCategory = filters.category === 'all' || e.category === filters.category;
-    const policy = e.default_privacy_policy || e.current_policy || 'redact';
-    const matchesPolicy = filters.policy === 'all' || policy === filters.policy;
-    return matchesQuery && matchesCategory && matchesPolicy;
-  });
-  const page = Math.max(0, state.entityPage[caseId] || 0);
-  const start = page * ENTITY_PAGE_SIZE;
-  const visible = filtered.slice(start, start + ENTITY_PAGE_SIZE);
-  if (!all.length) return `<section class="panel"><h3>Privacy entities</h3><p>No current automatic entities are indexed for this case.</p></section>`;
-  return `<section class="panel"><h3>Privacy entities</h3><p>Overlay visibility is editor-only. Redact, Keep, and Needs review are privacy policy choices and are audit events.</p>
-    <div class="entity-toolbar">
-      <label>Search <input data-entity-filter="query" data-case="${caseId}" value="${escapeHtml(filters.query)}"></label>
-      <label>Category <select data-entity-filter="category" data-case="${caseId}">
-        ${filterOption('all', 'All categories', filters.category)}
-        ${filterOption('face', 'People', filters.category)}
-        ${filterOption('license_plate', 'Plates', filters.category)}
-      </select></label>
-      <label>Policy <select data-entity-filter="policy" data-case="${caseId}">
-        ${filterOption('all', 'All policies', filters.policy)}
-        ${filterOption('redact', 'Redact', filters.policy)}
-        ${filterOption('keep_visible', 'Keep', filters.policy)}
-        ${filterOption('review_required', 'Needs review', filters.policy)}
-      </select></label>
-      <div class="controls"><button data-action="merge-selected-entities" data-case="${caseId}" ${state.session ? '' : 'disabled'}>Merge selected</button><button data-action="split-selected-entity" data-case="${caseId}" ${state.session ? '' : 'disabled'}>Split selected</button></div>
-    </div>
-    <p>${filtered.length} of ${all.length} entities shown. Page ${page + 1} of ${Math.max(1, Math.ceil(filtered.length / ENTITY_PAGE_SIZE))}.</p>
-    <div class="entity-grid">${visible.map(entityCard).join('')}</div>
-    <div class="controls"><button data-action="entity-page" data-page-delta="-1" data-case="${caseId}">Previous page</button><button data-action="entity-page" data-page-delta="1" data-case="${caseId}">Next page</button></div></section>`;
-}
-
-function entityCard(entity) {
-  const selected = !!state.entitySelection[entity.entity_id];
-  const policy = entity.default_privacy_policy || entity.current_policy || 'redact';
-  const thumb = entity.representative_thumbnail_path ? `<img alt="${escapeHtml(entity.label)} representative thumbnail" src="${entity.representative_thumbnail_path}" data-action="jump-entity" data-case="${entity.case_id}" data-entity="${entity.entity_id}">` : `<div class="placeholder-thumb" data-action="jump-entity" data-case="${entity.case_id}" data-entity="${entity.entity_id}">No image</div>`;
-  return `<article class="entity-card ${selected ? 'selected' : ''}" data-entity-card="${entity.entity_id}">
-    ${thumb}<div><header><strong>${escapeHtml(entity.label)}</strong><span class="badge ${policy}">${policyLabel(policy)}</span></header>
-    <p><small>${categoryLabel(entity.category)} · first seen ${formatEntityFrame(entity)}</small></p>
-    <label><input type="checkbox" data-action="select-entity" data-case="${entity.case_id}" data-entity="${entity.entity_id}" ${selected ? 'checked' : ''}> Select</label>
-    <div class="entity-actions">
-      <button data-action="toggle-entity-overlay" data-case="${entity.case_id}" data-entity="${entity.entity_id}">${entityVisible(entity.entity_id) ? 'Hide overlay' : 'Show overlay'}</button>
-      <button data-action="toggle-entity-lock" data-case="${entity.case_id}" data-entity="${entity.entity_id}">${entity.locked ? 'Unlock geometry' : 'Lock geometry'}</button>
-    </div>
-    <label>Privacy action <select data-action="entity-policy" data-case="${entity.case_id}" data-entity="${entity.entity_id}" ${state.session ? '' : 'disabled'}>
-      ${policyOption('redact', 'Redact', policy)}
-      ${policyOption('keep_visible', 'Keep', policy)}
-      ${policyOption('review_required', 'Needs review', policy)}
-    </select></label>
-    <details><summary>More details</summary><pre>${escapeHtml(JSON.stringify(entity, null, 2))}</pre></details></div>
-  </article>`;
-}
-
-function policyOption(value, label, selected) { return `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`; }
-function filterOption(value, label, selected) { return `<option value="${value}" ${value === selected ? 'selected' : ''}>${label}</option>`; }
-function caseEntities(caseId) { return ((DATA.entities && DATA.entities.cases && DATA.entities.cases[caseId]) || []); }
-function entityOptions(caseId) { return caseEntities(caseId).map(e => `<option value="${e.entity_id}">${e.label}</option>`).join('') || '<option value="">New entity from correction</option>'; }
-function categoryLabel(category) { return category === 'face' ? 'Person' : 'Plate'; }
-function entityVisible(entityId) { return state.entityVisibility[entityId] !== false; }
-function policyLabel(policy) { return policy === 'keep_visible' ? 'Keep' : policy === 'review_required' ? 'Needs review' : 'Redact'; }
-function formatEntityFrame(entity) { return entity.representative_source_frame === null || entity.representative_source_frame === undefined ? 'unknown' : `frame ${entity.representative_source_frame}`; }
-
-function updateTask(caseId) {
-  const tasks = state.tasks.filter(t => t.case_id === caseId && !t.technical_only);
-  const idx = Math.min(state.activeTask[caseId] || 0, Math.max(0, tasks.length - 1));
-  state.activeTask[caseId] = idx;
-  const task = tasks[idx]; const box = document.getElementById(`task-${caseId}`); if (!box) return;
-  document.getElementById(`progress-${caseId}`).textContent = progressText(caseId, tasks);
-  if (!task) { box.innerHTML = '<p>No current task.</p>'; return; }
-  box.innerHTML = `<article class="task-card ${task.blocking ? 'blocking' : ''}"><h3>Task ${idx + 1} of ${tasks.length}: ${task.title}</h3>
-    <p><strong>Frames:</strong> ${task.source_frame_start}-${task.source_frame_end}</p>
-    <p><strong>What happened:</strong> ${task.what_happened}</p><p><strong>What to inspect:</strong> ${task.what_to_inspect}</p>
-    <div class="decision-grid">${Object.entries(DATA.tasks.actions.reduce((m,a)=>{m[a.action]=a.label;return m;},{})).map(([action,label]) => `<button data-action="decision" data-decision="${action}" data-case="${caseId}" data-task="${task.review_task_id}" ${state.session ? '' : 'disabled'}>${label}</button>`).join('')}</div>
-    <p id="taskError-${caseId}" class="status-red"></p></article>`;
-  markSelectedDecision(caseId, task.review_task_id);
-  seekToFrame(caseId, task.source_frame_start, true);
-}
-
-function progressText(caseId, tasks) {
-  const required = tasks.filter(t => t.blocking);
-  const doneRequired = required.filter(t => state.decisions[t.review_task_id]).length;
-  const doneAll = tasks.filter(t => state.decisions[t.review_task_id]).length;
-  return `Required: ${doneRequired}/${required.length} · All visible tasks: ${doneAll}/${tasks.length}`;
-}
-
-function bindGlobalControls() {
-  document.querySelectorAll('.tabs button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
-  document.getElementById('startSession').addEventListener('click', startSession);
-  document.getElementById('exportSession').addEventListener('click', exportSession);
-  document.getElementById('changeAttribution').addEventListener('click', () => openAttributionModal('change'));
-  document.getElementById('closeDrawer').addEventListener('click', closeDrawer);
-  document.getElementById('cancelAttribution').addEventListener('click', closeAttributionModal);
-  document.getElementById('submitAttribution').addEventListener('click', submitAttribution);
-  document.addEventListener('click', handleClick);
-  document.addEventListener('change', handleChange);
-}
-
-function handleClick(event) {
-  const el = event.target.closest('[data-action]');
-  if (!el) return;
-  const caseId = el.dataset.case || state.activeTab;
-  const action = el.dataset.action;
-  if (action === 'open-drawer') return openDrawer(el.dataset.drawer, caseId);
-  if (action === 'play') return playPauseTogether(caseId);
-  if (action === 'restart') return restartMedia(caseId);
-  if (action === 'back') return stepFrame(caseId, -1);
-  if (action === 'forward') return stepFrame(caseId, 1);
-  if (action === 'fullscreen-comparison') return fullscreen(document.getElementById(`player-${caseId}`));
-  if (action === 'fullscreen-original') return fullscreen(activeVideos(caseId)[0]?.parentElement);
-  if (action === 'fullscreen-current') return fullscreen(activeVideos(caseId)[1]?.parentElement);
-  if (action === 'retry-media') return retryMedia(caseId, el.dataset.role);
-  if (action === 'prev-task') return moveTask(caseId, -1);
-  if (action === 'next-task') return moveTask(caseId, 1);
-  if (action === 'loop-task') return loopTask(caseId);
-  if (action === 'decision') return recordDecision(caseId, el.dataset.task, el.dataset.decision, el);
-  if (action === 'ack-sweep') return acknowledgeSweep(caseId);
-  if (action === 'add-issue') return addIssueAtFrame(caseId);
-  if (action === 'toggle-entity-overlay') return toggleEntityOverlay(caseId, el.dataset.entity);
-  if (action === 'toggle-entity-lock') return toggleEntityLock(caseId, el.dataset.entity);
-  if (action === 'jump-entity') return jumpToEntity(caseId, el.dataset.entity);
-  if (action === 'select-entity') return toggleEntitySelection(el.dataset.entity, el.checked);
-  if (action === 'entity-page') return moveEntityPage(caseId, Number(el.dataset.pageDelta || 0));
-  if (action === 'merge-selected-entities') return mergeSelectedEntities(caseId);
-  if (action === 'split-selected-entity') return splitSelectedEntity(caseId);
-  if (action === 'set-interval-start') return setDraftIntervalBoundary(caseId, 'start');
-  if (action === 'set-interval-end') return setDraftIntervalBoundary(caseId, 'end');
-  if (action === 'add-keyframe') return addKeyframe(caseId);
-  if (action === 'prev-keyframe') return jumpKeyframe(caseId, -1);
-  if (action === 'next-keyframe') return jumpKeyframe(caseId, 1);
-  if (action === 'preview-interpolation') return previewInterpolation(caseId);
-  if (action === 'delete-correction') return deleteCorrectionDraft(caseId);
-  if (action === 'save-correction') return saveCorrection(caseId);
-  if (action === 'verify-correction') return verifyCorrection(caseId);
-}
-
-function handleChange(event) {
-  const el = event.target;
-  if (el.matches('[data-go-frame]')) return seekToFrame(el.dataset.goFrame, Number(el.value), true);
-  if (el.matches('[data-action="entity-policy"]')) return changeEntityPolicy(el.dataset.case, el.dataset.entity, el.value);
-  if (el.matches('[data-entity-filter]')) {
-    const caseId = el.dataset.case;
-    state.entityFilters[caseId] = state.entityFilters[caseId] || { query: '', category: 'all', policy: 'all' };
-    state.entityFilters[caseId][el.dataset.entityFilter] = el.value;
-    state.entityPage[caseId] = 0;
-    renderDrawer();
-  }
-}
-
-function bindCaseMedia(panel) {
-  panel.querySelectorAll('video').forEach(v => {
-    v.disablePictureInPicture = true;
-    v.setAttribute('disablePictureInPicture', '');
-    v.addEventListener('loadedmetadata', () => setMediaState(v, 'Ready'));
-    v.addEventListener('canplay', () => setMediaState(v, 'Ready'));
-    v.addEventListener('error', () => setMediaState(v, `Playback error: ${v.dataset.mediaPath} code ${v.error ? v.error.code : 'unknown'}`));
-    v.addEventListener('play', () => updateControls());
-    v.addEventListener('pause', () => updateControls());
-    v.addEventListener('timeupdate', () => { syncStateFromVideo(v); updateFrameOverlay(v.dataset.case); refreshCorrectionCanvas(v.dataset.case); });
-    scheduleFrameCallback(v);
-  });
-}
-
-function initCorrectionCanvas(caseId) {
-  const canvas = document.querySelector(`[data-correction-canvas="${caseId}"]`);
-  if (!canvas || canvas.dataset.bound === '1') return;
-  canvas.dataset.bound = '1';
-  const c = DATA[caseId];
-  canvas.width = c.width || 1280; canvas.height = c.height || 720;
-  canvas.addEventListener('pointerdown', e => {
-    const p = canvasPoint(caseId, e);
-    state.drawing = { caseId, start: p, current: p };
-    canvas.setPointerCapture(e.pointerId);
-    refreshCorrectionCanvas(caseId);
-  });
-  canvas.addEventListener('pointermove', e => {
-    if (!state.drawing || state.drawing.caseId !== caseId) return;
-    state.drawing.current = canvasPoint(caseId, e);
-    refreshCorrectionCanvas(caseId);
-  });
-  canvas.addEventListener('pointerup', e => {
-    if (!state.drawing || state.drawing.caseId !== caseId) return;
-    state.drawing.current = canvasPoint(caseId, e);
-    const box = normalizedDraftBox(caseId, state.drawing.start, state.drawing.current);
-    if (box && box[2] - box[0] >= 4 && box[3] - box[1] >= 4) {
-      const draft = ensureDraft(caseId);
-      draft.bbox_xyxy = box;
-      draft.source_frame = sourceFrame(caseId);
-      state.correctionDrafts[caseId] = draft;
-    }
-    state.drawing = null;
-    refreshCorrectionCanvas(caseId);
-  });
-  refreshCorrectionCanvas(caseId);
-}
-
-function canvasPoint(caseId, event) {
-  const canvas = document.querySelector(`[data-correction-canvas="${caseId}"]`);
-  const rect = canvas.getBoundingClientRect();
-  const c = DATA[caseId];
-  return {
-    x: Math.round(((event.clientX - rect.left) / rect.width) * (c.width || canvas.width)),
-    y: Math.round(((event.clientY - rect.top) / rect.height) * (c.height || canvas.height))
-  };
-}
-
-function normalizedDraftBox(caseId, a, b) {
-  const c = DATA[caseId]; const w = c.width || 1280; const h = c.height || 720;
-  const x1 = Math.max(0, Math.min(w - 1, Math.min(a.x, b.x)));
-  const y1 = Math.max(0, Math.min(h - 1, Math.min(a.y, b.y)));
-  const x2 = Math.max(0, Math.min(w - 1, Math.max(a.x, b.x)));
-  const y2 = Math.max(0, Math.min(h - 1, Math.max(a.y, b.y)));
-  return [x1, y1, x2, y2];
-}
-
-function refreshCorrectionCanvas(caseId) {
-  const canvas = document.querySelector(`[data-correction-canvas="${caseId}"]`);
-  if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  const c = DATA[caseId];
-  canvas.width = c.width || canvas.width || 1280; canvas.height = c.height || canvas.height || 720;
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  const original = document.querySelector(`#player-${caseId} video[data-role="original"]`) || activeVideos(caseId)[0];
-  if (original && original.readyState >= 2) {
-    try { ctx.drawImage(original, 0, 0, canvas.width, canvas.height); }
-    catch (e) { ctx.fillStyle = '#111827'; ctx.fillRect(0, 0, canvas.width, canvas.height); }
-  } else {
-    ctx.fillStyle = '#111827'; ctx.fillRect(0, 0, canvas.width, canvas.height);
-  }
-  ctx.lineWidth = Math.max(2, Math.round(canvas.width / 640));
-  ctx.strokeStyle = '#facc15'; ctx.fillStyle = 'rgba(250, 204, 21, 0.16)';
-  const draft = state.correctionDrafts[caseId];
-  if (draft) drawBox(ctx, draft.bbox_xyxy);
-  if (draft && draft.keyframes) {
-    ctx.strokeStyle = '#22c55e';
-    ctx.fillStyle = 'rgba(34, 197, 94, 0.12)';
-    draft.keyframes.forEach(k => drawBox(ctx, k.bbox_xyxy));
-  }
-  if (state.drawing && state.drawing.caseId === caseId) {
-    const box = normalizedDraftBox(caseId, state.drawing.start, state.drawing.current);
-    if (box) drawBox(ctx, box);
-  }
-  ctx.fillStyle = 'rgba(0, 0, 0, .70)'; ctx.fillRect(8, 8, 260, 30);
-  ctx.fillStyle = '#fff'; ctx.font = '18px system-ui';
-  ctx.fillText(`Source frame ${sourceFrame(caseId)}`, 18, 30);
-  refreshKeyframeList(caseId);
-}
-
-function drawBox(ctx, box) {
-  const [x1, y1, x2, y2] = box;
-  ctx.fillRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
-  ctx.strokeRect(x1, y1, Math.max(1, x2 - x1), Math.max(1, y2 - y1));
-}
-
-function activeVideos(caseId) { return [...document.querySelectorAll(`#player-${caseId} video`)].filter(v => v.offsetParent !== null); }
-function fpsValue(c) { const [a,b] = String(c.fps || '30000/1001').split('/').map(Number); return b ? a / b : Number(c.fps || 29.97); }
-function currentFrame(caseId) {
-  const v = activeVideos(caseId)[0];
-  if (v && !Number.isNaN(v.currentTime)) return clampCaseFrame(caseId, Math.round(v.currentTime * fpsValue(DATA[caseId])));
-  return clampCaseFrame(caseId, state.frame[caseId] || 0);
-}
-function sourceFrame(caseId) { return (DATA[caseId].source_frame_start || 0) + currentFrame(caseId); }
-function clampCaseFrame(caseId, frame) { return Math.max(0, Math.min(Math.max(0, (DATA[caseId].frame_count || 1) - 1), Number(frame) || 0)); }
-function frameHudText(caseId) {
-  const c = DATA[caseId]; const local = clampCaseFrame(caseId, state.frame[caseId] || 0); const src = (c.source_frame_start || 0) + local;
-  const t = local / fpsValue(c);
-  return `Source frame ${src} · Case frame ${local} / ${Math.max(0, c.frame_count - 1)} · ${formatTime(t)}`;
-}
-
-async function playPauseTogether(caseId) {
-  const videos = activeVideos(caseId); const err = document.getElementById(`mediaError-${caseId}`); err.textContent = '';
-  if (!videos.length) { err.textContent = 'No playable media for this task.'; return; }
-  const anyPlaying = videos.some(v => !v.paused && !v.ended);
-  if (anyPlaying) { videos.forEach(v => v.pause()); updateControls(); return; }
-  const ready = await Promise.allSettled(videos.map(v => waitMetadata(v, 2500)));
-  const failedIndex = ready.findIndex(r => r.status === 'rejected');
-  if (failedIndex >= 0) {
-    err.textContent = `Playback is not ready for ${videos[failedIndex].dataset.mediaPath}.`;
-    return;
-  }
-  const t = currentFrame(caseId) / fpsValue(DATA[caseId]);
-  videos.forEach(v => { v.muted = true; v.currentTime = t; });
-  const results = await Promise.allSettled(videos.map(v => v.play()));
-  const failedIndexPlay = results.findIndex(r => r.status === 'rejected');
-  if (failedIndexPlay >= 0) err.textContent = `Playback failed for ${videos[failedIndexPlay].dataset.mediaPath}.`;
-  updateControls();
-}
-
-async function restartMedia(caseId) {
-  await seekToCaseFrame(caseId, 0, true);
-  updateControls();
-  clearMediaError(caseId);
-}
-async function stepFrame(caseId, delta) {
-  if (!DATA[caseId]) return;
-  const videos = activeVideos(caseId);
-  videos.forEach(v => v.pause());
-  await Promise.allSettled(videos.map(v => waitMetadata(v, 500)));
-  const base = clampCaseFrame(caseId, state.frame[caseId] ?? currentFrame(caseId));
-  return seekToCaseFrame(caseId, base + delta, true);
-}
-async function seekToFrame(caseId, sourceFrameValue, pause) {
-  const c = DATA[caseId]; const local = Number(sourceFrameValue) - (c.source_frame_start || 0);
-  await seekToCaseFrame(caseId, local, pause);
-}
-async function seekToCaseFrame(caseId, frameValue, pause) {
-  const c = DATA[caseId]; const local = clampCaseFrame(caseId, frameValue);
-  state.frame[caseId] = local;
-  const videos = activeVideos(caseId);
-  if (pause) videos.forEach(v => v.pause());
-  const t = local / fpsValue(c);
-  const ready = await Promise.allSettled(videos.map(v => waitMetadata(v, 1200)));
-  const err = document.getElementById(`mediaError-${caseId}`);
-  const failedIndex = ready.findIndex(r => r.status === 'rejected');
-  if (failedIndex >= 0 && err) err.textContent = `Seek failed because ${videos[failedIndex].dataset.mediaPath} is not ready.`;
-  await Promise.allSettled(videos.map(v => seekVideo(v, t)));
-  state.frame[caseId] = local;
-  updateFrameOverlay(caseId, local);
-  setTimeout(() => refreshCorrectionCanvas(caseId), 80);
-}
-function updateFrameOverlay(caseId, exactFrame) {
-  if (!DATA[caseId]) return;
-  const c = DATA[caseId]; const local = exactFrame === undefined ? currentFrame(caseId) : clampCaseFrame(caseId, exactFrame); const src = (c.source_frame_start || 0) + local;
-  state.frame[caseId] = local;
-  const t = local / fpsValue(c); const text = `Source frame ${src} · Case frame ${local} / ${Math.max(0, c.frame_count - 1)} · ${formatTime(t)}`;
-  document.querySelectorAll(`[data-frame-overlay="${caseId}"]`).forEach(o => o.textContent = text);
-  state.viewed[caseId] = Math.max(state.viewed[caseId] || 0, local); const bar = document.getElementById(`sweep-${caseId}`);
-  if (bar && c.frame_count) bar.style.width = `${Math.min(100, 100 * (state.viewed[caseId] || 0) / c.frame_count)}%`;
-}
-function formatTime(t) { const m = Math.floor(t / 60); const s = (t % 60).toFixed(3).padStart(6,'0'); return `${String(m).padStart(2,'0')}:${s}`; }
-function updateControls() { document.querySelectorAll('[data-action="play"]').forEach(b => { const vids = activeVideos(b.dataset.case); b.textContent = vids.some(v => !v.paused && !v.ended) ? 'Pause together' : 'Play together'; }); }
-function fullscreen(el) { if (el && el.requestFullscreen) el.requestFullscreen(); }
-function moveTask(caseId, delta) { state.activeTask[caseId] = Math.max(0, (state.activeTask[caseId] || 0) + delta); updateTask(caseId); }
-function loopTask(caseId) { const t = visibleCaseTasks(caseId)[state.activeTask[caseId] || 0]; if (t) seekToFrame(caseId, t.source_frame_start, true); }
-function visibleCaseTasks(caseId) { return state.tasks.filter(t => t.case_id === caseId && !t.technical_only); }
-
-async function startSession() {
-  const banner = document.getElementById('sessionBanner');
-  const freezeHash = await digestJson(DATA.freeze);
-  const manifests = {}; const hashes = {};
-  for (const id of ['day','night']) { manifests[id] = await digestJson(DATA[id]); if (DATA[id].source_video_hash) hashes[id] = DATA[id].source_video_hash; }
-  try {
-    const res = await postJson('/api/sessions', { reviewer: {}, configuration_freeze_hash: freezeHash, case_manifest_hashes: manifests, source_hashes: hashes });
-    state.session = res.session;
-    state.decisions = {};
-    localStorage.setItem(storageKey('session_id'), state.session.session_id);
-    await loadSessionState(state.session.session_id);
-    addAudit(`Session started: ${state.session.session_id}.`);
-  } catch (e) {
-    banner.textContent = `Could not start local review session: ${e.message}`;
-    banner.classList.remove('ready');
-  }
-  updateSessionBanner();
-  rerenderActiveDrawer();
-}
-
-async function recordDecision(caseId, taskId, action, el) {
-  if (!requireSession()) return;
-  const error = document.getElementById(`taskError-${caseId}`);
-  if (error) error.textContent = '';
-  try {
-    const response = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: '' });
-    state.decisions[taskId] = { action, case_id: caseId, task_id: taskId, event_hash: response.event.event_hash, reviewed_at_utc: response.event.timestamp_utc };
-    el.parentElement.querySelectorAll('button').forEach(b => b.classList.remove('selected'));
-    el.classList.add('selected');
-    addAudit(`Decision saved for ${taskId}: ${actionLabel(action)}.`);
-    updateTask(caseId);
-    setTimeout(() => moveTask(caseId, 1), 350);
-  } catch (e) {
-    if (error) error.textContent = `Decision was not saved: ${e.message}`;
-  }
-}
-
-async function acknowledgeSweep(caseId) {
-  if (!requireSession()) return;
-  const note = value(`sweep-note-${caseId}`);
-  await postJson('/api/events/sweep', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, viewed_ranges: [{ start: 0, end: state.viewed[caseId] || 0 }], override_reason: note });
-  addAudit(`Sweep acknowledged for ${caseId}.`);
-}
-function addIssueAtFrame(caseId) {
-  if (!requireSession()) return;
-  const frame = sourceFrame(caseId);
-  const categoryChoice = (window.prompt('Category for this issue: Face or Plate?', 'Plate') || '').trim().toLowerCase();
-  const category = categoryChoice.startsWith('f') ? 'face' : (categoryChoice.startsWith('p') ? 'license_plate' : 'both');
-  const issueChoice = (window.prompt('Issue type: Privacy leak, Partial coverage, False redaction, or Wrong target?', 'Privacy leak') || 'Privacy leak').trim().toLowerCase();
-  const issueType = issueChoice.includes('partial') ? 'partial_coverage' : issueChoice.includes('false') ? 'false_redaction' : issueChoice.includes('wrong') ? 'wrong_target' : 'privacy_leak';
-  const task = {
-    allowed_actions: DATA.tasks.actions.map(a => a.action),
-    blocking: true,
-    case_id: caseId,
-    category,
-    correction_required: true,
-    issue_type: `reviewer_added_${issueType}`,
-    raw_signal_ids: [],
-    review_task_id: `${caseId}_manual_issue_${Date.now()}`,
-    severity: 'blocker',
-    source_frame_end: frame,
-    source_frame_start: frame,
-    technical_only: false,
-    title: 'Reviewer-added privacy issue',
-    what_happened: 'A reviewer found a possible privacy issue during full-video sweep.',
-    what_to_inspect: 'Define the affected interval, add reviewed regions or suppressions, and verify the corrected preview.'
-  };
-  state.tasks.push(task);
-  state.activeTask[caseId] = visibleCaseTasks(caseId).length - 1;
-  if (category === 'face' || category === 'license_plate') ensureManualEntity(caseId, category);
-  renderCase(caseId);
-  addEntityEvent(caseId, '', 'reviewer_discovered_issue_created', { task });
-  addAudit(`New blocking issue started at source frame ${frame} for ${caseId}.`);
-}
-function ensureManualEntity(caseId, category) {
-  const entities = caseEntities(caseId);
-  const prefix = category === 'face' ? 'Person' : 'Plate';
-  const next = 1 + Math.max(0, ...entities.filter(e => e.category === category).map(e => {
-    const parts = String(e.label || '').split(' ');
-    return parts[0] === prefix && Number.isFinite(Number(parts[1])) ? Number(parts[1]) : 0;
-  }));
-  const entity = {
-    automatic_source_track_ids: [],
-    case_id: caseId,
-    category,
-    created_provenance: { source: 'reviewer_created', source_frame: sourceFrame(caseId) },
-    current_status: 'active',
-    default_privacy_policy: 'review_required',
-    entity_id: `entity_${crypto.randomUUID()}`,
-    interval_policy_overrides: [],
-    label: `${prefix} ${String(next).padStart(2, '0')}`,
-    locked: false,
-    object_uuid: '',
-    reviewed_region_track_ids: [],
-    schema_version: 'privacy_entity.v1'
-  };
-  entity.object_uuid = entity.entity_id.replace(/^entity_/, '');
-  DATA.entities.cases[caseId].push(entity);
-  addEntityEvent(caseId, entity.entity_id, 'entity_created_by_reviewer', { after: entity });
-  return entity;
-}
-function ensureObjectPolicyVerificationTask(caseId, entity, title, note) {
-  const taskId = `object_policy_verify_${caseId}_${entity.entity_id}`;
-  let task = state.tasks.find(t => t.review_task_id === taskId);
-  if (!task) {
-    task = {
-      allowed_actions: ['looks_correct', 'privacy_leak', 'false_redaction', 'wrong_target', 'uncertain_escalate'],
-      blocking: true,
-      case_id: caseId,
-      category: entity.category,
-      correction_required: false,
-      issue_type: 'object_policy_verification',
-      raw_signal_ids: [],
-      review_task_id: taskId,
-      severity: 'blocker',
-      source_frame_end: DATA[caseId].source_frame_end,
-      source_frame_start: DATA[caseId].source_frame_start,
-      technical_only: false,
-      title,
-      what_happened: `${entity.label} privacy action changed. ${note || ''}`.trim(),
-      what_to_inspect: 'Verify that this object policy is intentional before finalization.'
-    };
-    state.tasks.push(task);
-  }
-  return task;
-}
-function toggleEntityOverlay(caseId, entityId) {
-  state.entityVisibility[entityId] = !entityVisible(entityId);
-  addEntityEvent(caseId, entityId, 'entity_overlay_visibility_changed', { visible: state.entityVisibility[entityId] });
-  renderDrawer();
-}
-function changeEntityPolicy(caseId, entityId, policy) {
-  if (!requireSession()) return;
-  const entity = caseEntities(caseId).find(e => e.entity_id === entityId);
-  if (!entity) return;
-  const previousPolicy = entity.default_privacy_policy;
-  let note = '';
-  if (policy === 'keep_visible') {
-    note = (window.prompt('A note is required before keeping this object visible.', '') || '').trim();
-    if (!note) { renderCase(caseId); addAudit('Keep action cancelled because no note was provided.'); return; }
-  }
-  const before = {...entity};
-  entity.default_privacy_policy = policy;
-  entity.privacy_action = policy;
-  let verificationTask = null;
-  if (policy === 'keep_visible') verificationTask = ensureObjectPolicyVerificationTask(caseId, entity, 'Keep policy verification', note);
-  if (policy === 'review_required') verificationTask = ensureObjectPolicyVerificationTask(caseId, entity, 'Object needs review', note || 'Object policy set to Needs review.');
-  if (verificationTask) entity.verification_task_id = verificationTask.review_task_id;
-  addEntityEvent(caseId, entityId, 'entity_policy_changed', { before, after: entity });
-  if (policy === 'keep_visible') addAudit(`${entity.label} policy set to Keep. Verification is required before finalization.`);
-  else if (policy === 'review_required') addAudit(`${entity.label} policy set to Needs review. Finalization remains blocked.`);
-  else addAudit(`${entity.label} policy changed from ${previousPolicy.replace('_', ' ')} to Redact.`);
-  renderDrawer();
-}
-function toggleEntityLock(caseId, entityId) {
-  const entity = caseEntities(caseId).find(e => e.entity_id === entityId);
-  if (!entity) return;
-  const before = {...entity};
-  entity.locked = !entity.locked;
-  addEntityEvent(caseId, entityId, entity.locked ? 'entity_locked' : 'entity_unlocked', { before, after: entity });
-  renderDrawer();
-}
-function addEntityEvent(caseId, entityId, eventType, payload) {
-  const event = {
-    actor: currentActor(),
-    case_id: caseId,
-    entity_id: entityId,
-    event_id: `browser_entity_${Date.now()}_${Math.random().toString(16).slice(2)}`,
-    event_type: eventType,
-    payload,
-    timestamp_utc: new Date().toISOString()
-  };
-  state.entityHistory.push(event);
-  if (state.session) {
-    postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), event }).catch(e => addAudit(`Entity persistence warning: ${e.message}`));
-  }
-}
-function ensureDraft(caseId) { return state.correctionDrafts[caseId] || { keyframes: [], checkpoints: [] }; }
-function setDraftIntervalBoundary(caseId, which) {
-  const draft = ensureDraft(caseId);
-  if (which === 'start') draft.interval_start = sourceFrame(caseId);
-  else draft.interval_end = sourceFrame(caseId);
-  if (draft.interval_start !== undefined && draft.interval_end !== undefined && draft.interval_end < draft.interval_start) {
-    const tmp = draft.interval_start; draft.interval_start = draft.interval_end; draft.interval_end = tmp;
-  }
-  state.correctionDrafts[caseId] = draft;
-  refreshKeyframeList(caseId);
-  addAudit(`Correction interval ${which} set to source frame ${sourceFrame(caseId)}.`);
-}
-function addKeyframe(caseId) {
-  const draft = ensureDraft(caseId);
-  if (!draft.bbox_xyxy) { addAudit('Draw a rectangle before creating a keyframe.'); return; }
-  const frame = draft.source_frame || sourceFrame(caseId);
-  draft.keyframes = (draft.keyframes || []).filter(k => k.source_frame !== frame);
-  draft.keyframes.push({ source_frame: frame, bbox_xyxy: draft.bbox_xyxy });
-  draft.keyframes.sort((a, b) => a.source_frame - b.source_frame);
-  draft.checkpoints = requiredCheckpointsForDraft(caseId, draft).map(f => ({ source_frame: f, state: 'unreviewed', suggested: true }));
-  state.correctionDrafts[caseId] = draft;
-  refreshCorrectionCanvas(caseId);
-  addAudit(`Keyframe saved at source frame ${frame}.`);
-}
-function jumpKeyframe(caseId, direction) {
-  const draft = state.correctionDrafts[caseId];
-  if (!draft || !draft.keyframes || !draft.keyframes.length) return;
-  const current = sourceFrame(caseId);
-  const sorted = draft.keyframes.map(k => k.source_frame).sort((a, b) => a - b);
-  const target = direction < 0 ? [...sorted].reverse().find(f => f < current) : sorted.find(f => f > current);
-  if (target !== undefined) seekToFrame(caseId, target, true);
-}
-function previewInterpolation(caseId) {
-  const draft = state.correctionDrafts[caseId];
-  if (!draft || !draft.keyframes || draft.keyframes.length < 2) {
-    addAudit('Add at least two keyframes to preview interpolation.');
-    return;
-  }
-  addAudit(`Interpolation preview ready across ${draft.keyframes.length} keyframes and ${requiredCheckpointsForDraft(caseId, draft).length} checkpoints.`);
-}
-function requiredCheckpointsForDraft(caseId, draft) {
-  const keyframes = (draft.keyframes || []).map(k => k.source_frame).sort((a, b) => a - b);
-  const start = draft.interval_start ?? keyframes[0];
-  const end = draft.interval_end ?? keyframes[keyframes.length - 1];
-  if (start === undefined || end === undefined) return [];
-  const fps = fpsValue(DATA[caseId]);
-  const seconds = Math.max(0, (end - start) / fps);
-  const frames = new Set([start, end]);
-  if (seconds > 0.5 && seconds <= 2 && end > start) frames.add(Math.floor((start + end) / 2));
-  if (seconds > 2) {
-    const step = Math.max(1, Math.round(fps));
-    for (let f = start + step; f < end; f += step) frames.add(f);
-  }
-  return [...frames].sort((a, b) => a - b);
-}
-function refreshKeyframeList(caseId) {
-  const el = document.getElementById(`keyframes-${caseId}`);
-  if (!el) return;
-  const draft = state.correctionDrafts[caseId];
-  if (!draft || !draft.keyframes || !draft.keyframes.length) {
-    const interval = draft && (draft.interval_start !== undefined || draft.interval_end !== undefined) ? `Interval: ${draft.interval_start ?? '?'}-${draft.interval_end ?? '?'}. ` : '';
-    el.textContent = `${interval}No reviewed keyframes yet.`;
-    return;
-  }
-  const pages = reviewPagesForDraft(caseId, draft);
-  const pageText = pages.length > 1 ? ` · review pages: ${pages.map(p => `${p[0]}-${p[1]}`).join('; ')}` : '';
-  el.textContent = `Interval: ${draft.interval_start ?? draft.keyframes[0].source_frame}-${draft.interval_end ?? draft.keyframes[draft.keyframes.length - 1].source_frame} · Keyframes: ${draft.keyframes.map(k => k.source_frame).join(', ')} · suggested checkpoints: ${requiredCheckpointsForDraft(caseId, draft).join(', ')}${pageText}`;
-}
-function reviewPagesForDraft(caseId, draft) {
-  const keyframes = (draft.keyframes || []).map(k => k.source_frame).sort((a,b)=>a-b);
-  const start = draft.interval_start ?? keyframes[0];
-  const end = draft.interval_end ?? keyframes[keyframes.length - 1];
-  if (start === undefined || end === undefined) return [];
-  const maxFrames = Math.max(1, Math.round(5 * fpsValue(DATA[caseId])));
-  const pages = [];
-  for (let frame = start; frame <= end; frame += maxFrames) pages.push([frame, Math.min(end, frame + maxFrames - 1)]);
-  return pages;
-}
-function deleteCorrectionDraft(caseId) {
-  if (!window.confirm('Discard the current correction draft?')) return;
-  delete state.correctionDrafts[caseId]; refreshCorrectionCanvas(caseId); addAudit(`Correction draft cleared for ${caseId}.`);
-}
-function ensureCorrectionVerificationTask(caseId, correction) {
-  const taskId = `verify_${correction.correction_id}`;
-  if (!state.tasks.find(t => t.review_task_id === taskId)) {
-    state.tasks.push({
-      allowed_actions: ['looks_correct', 'partial_coverage', 'privacy_leak', 'wrong_target', 'uncertain_escalate'],
-      blocking: true,
-      case_id: caseId,
-      category: correction.category,
-      correction_required: false,
-      issue_type: 'correction_verification',
-      raw_signal_ids: [],
-      review_task_id: taskId,
-      severity: 'blocker',
-      source_frame_end: correction.source_frame_end,
-      source_frame_start: correction.source_frame_start,
-      technical_only: false,
-      title: 'Verify corrected interval',
-      what_happened: 'A reviewed correction was saved for this interval.',
-      what_to_inspect: 'Compare Original and Corrected preview. Choose Looks correct only if the corrected interval is acceptable.'
-    });
-  }
-  return taskId;
-}
-async function verifyCorrection(caseId) {
-  if (!requireSession()) return;
-  const stored = JSON.parse(localStorage.getItem(storageKey('corrections')) || '[]').filter(c => c.case_id === caseId);
-  if (!stored.length) { addAudit('No saved correction is available to verify.'); return; }
-  const correction = stored[stored.length - 1];
-  const actor = currentActor();
-  const revised = {
-    ...correction,
-    checkpoint_verifications: (correction.checkpoint_verifications || []).map(checkpoint => ({ ...checkpoint, state: 'verified' })),
-    previous_revision_id: correction.revision_id,
-    revision_id: `corr_rev_${crypto.randomUUID()}`
-  };
-  const allCorrections = JSON.parse(localStorage.getItem(storageKey('corrections')) || '[]');
-  allCorrections.push(revised);
-  localStorage.setItem(storageKey('corrections'), JSON.stringify(allCorrections));
-  const response = await postJson('/api/corrections', { session_id: state.session.session_id, actor, correction: revised, reason: 'Corrected interval verified' }).catch(e => { addAudit(`Correction verification persistence warning: ${e.message}`); return null; });
-  if (response && response.preview && response.preview.ok) addAudit(`Corrected preview refreshed: ${response.preview.corrected_preview}`);
-  const taskId = ensureCorrectionVerificationTask(caseId, correction);
-  const tasks = visibleCaseTasks(caseId);
-  state.activeTask[caseId] = Math.max(0, tasks.findIndex(t => t.review_task_id === taskId));
-  updateTask(caseId);
-  addAudit('Corrected interval checkpoints marked verified. Select Looks correct on the verification task after review.');
-}
-async function saveCorrection(caseId) {
-  if (!requireSession()) return;
-  const tasks = visibleCaseTasks(caseId);
-  const task = tasks[state.activeTask[caseId] || 0];
-  const operation = document.querySelector(`[data-correction-operation="${caseId}"]`)?.value || 'add_privacy_region';
-  const entityId = document.querySelector(`[data-correction-entity="${caseId}"]`)?.value || null;
-  const reason = document.querySelector(`[data-correction-reason="${caseId}"]`)?.value.trim() || 'Reviewed correction';
-  const draft = state.correctionDrafts[caseId];
-  if (!task) { addAudit('No active task is selected for the correction.'); return; }
-  if (['add_privacy_region','replace_privacy_region'].includes(operation) && !draft) {
-    addAudit('Draw a reviewed region on the Original frame before saving this correction.');
-    return;
-  }
-  const entity = entityId ? caseEntities(caseId).find(e => e.entity_id === entityId) : null;
-  if (task.category === 'both' && !entity) {
-    addAudit('Choose a Human or Plate entity before saving a new correction for a combined task.');
-    return;
-  }
-  const correctionCategory = task.category === 'both' && entity ? entity.category : task.category;
-  const actor = currentActor();
-  const keyframes = draft && draft.keyframes && draft.keyframes.length ? draft.keyframes : (draft ? [{ source_frame: draft.source_frame, bbox_xyxy: draft.bbox_xyxy }] : []);
-  const frameStart = draft && draft.interval_start !== undefined ? draft.interval_start : (keyframes.length ? Math.min(...keyframes.map(k => k.source_frame)) : task.source_frame_start);
-  const frameEnd = draft && draft.interval_end !== undefined ? draft.interval_end : (keyframes.length ? Math.max(...keyframes.map(k => k.source_frame)) : task.source_frame_end);
-  const checkpointFrames = keyframes.length ? requiredCheckpointsForDraft(caseId, { ...draft, keyframes, interval_start: frameStart, interval_end: frameEnd }) : [];
-  const checkpoints = checkpointFrames.map(frame => ({ source_frame: frame, state: keyframes.some(k => k.source_frame === frame) ? 'verified' : 'unreviewed' }));
-  const correction = {
-    application_version: 'final_review_workspace.v2.2',
-    case_id: caseId,
-    category: correctionCategory,
-    checkpoint_verifications: checkpoints,
-    configuration_freeze_hash: (state.session && state.session.configuration_freeze_hash) || await digestJson(DATA.freeze),
-    correction_id: `corr_${crypto.randomUUID()}`,
-    revision_id: `corr_rev_${crypto.randomUUID()}`,
-    entity_id: entityId,
-    input_region_ids: [],
-    interpolation_method: 'linear',
-    keyframe_boxes: keyframes,
-    operation,
-    reason,
-    reviewer_identity: actor,
-    schema_version: 'review_correction.v1',
-    source_frame_end: frameEnd,
-    source_frame_start: frameStart,
-    source_video_hash: DATA[caseId].source_video_hash || '',
-    task_id: task.review_task_id
-  };
-  const stored = JSON.parse(localStorage.getItem(storageKey('corrections')) || '[]');
-  stored.push(correction); localStorage.setItem(storageKey('corrections'), JSON.stringify(stored));
-  const response = await postJson('/api/corrections', { session_id: state.session.session_id, actor, correction, reason }).catch(e => { addAudit(`Correction persistence warning: ${e.message}`); return null; });
-  if (response && response.preview && response.preview.ok) addAudit(`Corrected preview rendered: ${response.preview.corrected_preview}`);
-  ensureCorrectionVerificationTask(caseId, correction);
-  addAudit(`Reviewed correction saved for ${caseId}, task ${task.review_task_id}. A correction verification task remains required before finalization.`);
-  delete state.correctionDrafts[caseId]; refreshCorrectionCanvas(caseId);
-}
-function renderFinal() { document.getElementById('finalResults').innerHTML = '<p>No reviewed-final case has passed all gates yet.</p>'; }
-function addAudit(text) { const li = document.createElement('li'); li.textContent = `${new Date().toISOString()} · ${text}`; document.getElementById('auditTrail').prepend(li); }
-function value(id) { return document.getElementById(id).value.trim(); }
-function storageKey(name) { return `final-review-v2.2:${location.pathname}:${name}`; }
-async function exportSession() {
-  if (!requireSession()) return;
-  if (!state.attribution || !state.attribution.display_name) {
-    pendingAttributionAction = exportSession;
-    openAttributionModal('export');
-    return;
-  }
-  await loadSessionState(state.session.session_id);
-  const payload = { session: state.session, attribution: state.attribution, decisions: state.decisions, corrections: JSON.parse(localStorage.getItem(storageKey('corrections')) || '[]'), entity_events: state.entityHistory };
-  const blob = new Blob([JSON.stringify(payload,null,2)], {type:'application/json'});
-  const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `${state.session.session_id}_review_export.json`; a.click(); URL.revokeObjectURL(a.href);
-}
-async function postJson(path, payload) { const res = await fetch(path, { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload) }); if (!res.ok) throw new Error(await res.text()); return await res.json(); }
-async function digestJson(obj) { const text = JSON.stringify(obj, Object.keys(obj).sort()); const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)); return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2,'0')).join(''); }
-function escapeHtml(text) { return String(text).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function handleKeys(e) {
-  if (['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName) || document.activeElement.isContentEditable || document.activeElement.dataset.correctionCanvas) return;
-  const caseId = ['day','night'].includes(state.activeTab) ? state.activeTab : null;
-  if (e.key === 'Escape') {
-    if (document.getElementById('drawer').classList.contains('open')) { closeDrawer(); return; }
-    if (document.getElementById('attributionModal').classList.contains('open')) { closeAttributionModal(); return; }
-    if (document.fullscreenElement) document.exitFullscreen();
-  }
-  if (e.code === 'Space' && caseId) { e.preventDefault(); e.stopPropagation(); playPauseTogether(caseId); return; }
-  if (e.key === 'ArrowRight' && caseId) { e.preventDefault(); e.stopPropagation(); stepFrame(caseId, e.shiftKey ? 10 : 1); return; }
-  if (e.key === 'ArrowLeft' && caseId) { e.preventDefault(); e.stopPropagation(); stepFrame(caseId, e.shiftKey ? -10 : -1); return; }
-  if (e.key.toLowerCase() === 'f') {
-    e.preventDefault();
-    if (document.fullscreenElement) document.exitFullscreen();
-    else if (caseId) fullscreen(document.getElementById(`player-${caseId}`));
-    return;
-  }
-  if (e.key === ']' && caseId) { e.preventDefault(); e.stopPropagation(); moveTask(caseId, 1); return; }
-  if (e.key === '[' && caseId) { e.preventDefault(); e.stopPropagation(); moveTask(caseId, -1); return; }
-  if (e.key.toLowerCase() === 'k' && caseId) { e.preventDefault(); e.stopPropagation(); addKeyframe(caseId); return; }
-  if (e.key.toLowerCase() === 'i' && caseId) { e.preventDefault(); e.stopPropagation(); setDraftIntervalBoundary(caseId, 'start'); return; }
-  if (e.key.toLowerCase() === 'o' && caseId) { e.preventDefault(); e.stopPropagation(); setDraftIntervalBoundary(caseId, 'end'); return; }
-  if (e.key === 'Delete' && caseId) { e.preventDefault(); e.stopPropagation(); deleteCorrectionDraft(caseId); }
-}
-
-function setMediaState(video, text) {
-  const key = `${video.dataset.case}:${video.dataset.role}`;
-  state.mediaReady[key] = text === 'Ready';
-  const el = document.querySelector(`[data-media-state="${key}"]`);
-  if (el) {
-    el.textContent = text;
-    el.className = text.startsWith('Playback error') ? 'status-red' : '';
-  }
-  if (text.startsWith('Playback error')) {
-    const err = document.getElementById(`mediaError-${video.dataset.case}`);
-    if (err) err.textContent = text;
-  }
-}
-function retryMedia(caseId, role) {
-  const video = document.querySelector(`#player-${caseId} video[data-role="${role}"]`);
-  if (!video) return;
-  setMediaState(video, 'Loading');
-  video.load();
-}
-function clearMediaError(caseId) { const err = document.getElementById(`mediaError-${caseId}`); if (err) err.textContent = ''; }
-function waitMetadata(video, timeoutMs) {
-  if (video.readyState >= 1) return Promise.resolve();
-  video.load();
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => cleanup(reject, new Error('metadata timeout')), timeoutMs);
-    const cleanup = (done, value) => {
-      clearTimeout(timeout);
-      video.removeEventListener('loadedmetadata', onReady);
-      video.removeEventListener('error', onError);
-      done(value);
-    };
-    const onReady = () => cleanup(resolve);
-    const onError = () => cleanup(reject, new Error(`media error ${video.error ? video.error.code : 'unknown'}`));
-    video.addEventListener('loadedmetadata', onReady, { once: true });
-    video.addEventListener('error', onError, { once: true });
-  });
-}
-function seekVideo(video, time) {
-  return new Promise(resolve => {
-    const done = () => { video.removeEventListener('seeked', done); resolve(); };
-    video.addEventListener('seeked', done, { once: true });
-    try { video.currentTime = Math.max(0, time); } catch (e) { resolve(); }
-    setTimeout(done, 900);
-  });
-}
-function syncStateFromVideo(video) {
-  const caseId = video.dataset.case;
-  state.frame[caseId] = clampCaseFrame(caseId, Math.round(video.currentTime * fpsValue(DATA[caseId])));
-}
-function scheduleFrameCallback(video) {
-  if (!video.requestVideoFrameCallback) return;
-  const loop = (_now, meta) => {
-    const caseId = video.dataset.case;
-    if (video.offsetParent !== null && !video.paused) {
-      state.frame[caseId] = clampCaseFrame(caseId, Math.round(meta.mediaTime * fpsValue(DATA[caseId])));
-      updateFrameOverlay(caseId);
-    }
-    video.requestVideoFrameCallback(loop);
-  };
-  video.requestVideoFrameCallback(loop);
-}
-function pauseInactiveCases(activeTab) {
-  for (const caseId of ['day','night']) {
-    if (caseId !== activeTab) activeVideos(caseId).forEach(v => v.pause());
-  }
-}
-
-async function restoreSession() {
-  const sessionId = localStorage.getItem(storageKey('session_id'));
-  if (!sessionId) return;
-  try {
-    await loadSessionState(sessionId);
-    addAudit(`Restored local session ${sessionId}.`);
-  } catch (e) {
-    localStorage.removeItem(storageKey('session_id'));
-    addAudit(`Stored session could not be restored: ${e.message}.`);
-  }
-}
-async function loadSessionState(sessionId) {
-  const res = await fetch(`/api/session-state?session_id=${encodeURIComponent(sessionId)}`);
-  if (!res.ok) throw new Error(await res.text());
-  const payload = await res.json();
-  state.session = payload.session;
-  state.attribution = payload.attribution;
-  state.decisions = payload.decisions || {};
-  renderAuditEvents(payload.events || []);
-  updateSessionBanner();
-}
-function updateSessionBanner() {
-  const banner = document.getElementById('sessionBanner');
-  const startButton = document.getElementById('startSession');
-  const attributionButton = document.getElementById('changeAttribution');
-  const exportButton = document.getElementById('exportSession');
-  if (!state.session) {
-    banner.classList.remove('ready');
-    banner.textContent = 'No local review session yet. Start review to enable decisions and corrections.';
-    if (startButton) { startButton.disabled = false; startButton.textContent = 'Start review'; }
-    if (attributionButton) attributionButton.disabled = true;
-    if (exportButton) exportButton.disabled = true;
-    return;
-  }
-  banner.classList.add('ready');
-  const name = state.attribution && state.attribution.display_name ? ` · reviewer ${state.attribution.display_name}` : ' · anonymous until export/finalization';
-  banner.textContent = `Session ${state.session.session_id} is active${name}.`;
-  if (startButton) { startButton.disabled = true; startButton.textContent = 'Review active'; }
-  if (attributionButton) attributionButton.disabled = false;
-  if (exportButton) exportButton.disabled = false;
-}
-function requireSession() {
-  if (state.session) return true;
-  const banner = document.getElementById('sessionBanner');
-  banner.classList.remove('ready');
-  banner.textContent = 'Start review before saving decisions, entity changes, or corrections.';
-  return false;
-}
-function currentActor() {
-  if (state.attribution && state.attribution.display_name) return { display_name: state.attribution.display_name };
-  return { display_name: null, reviewer_id: null };
-}
-function openAttributionModal(action) {
-  if (!requireSession()) return;
-  pendingAttributionAction = action === 'change' ? null : pendingAttributionAction;
-  document.getElementById('attributionError').textContent = '';
-  document.getElementById('attributionModal').classList.add('open');
-  document.getElementById('attributionModal').setAttribute('aria-hidden', 'false');
-  document.getElementById('reviewerName').focus();
-}
-function closeAttributionModal() {
-  document.getElementById('attributionModal').classList.remove('open');
-  document.getElementById('attributionModal').setAttribute('aria-hidden', 'true');
-}
-async function submitAttribution() {
-  const name = value('reviewerName');
-  const error = document.getElementById('attributionError');
-  if (!name) { error.textContent = 'Reviewer name is required.'; return; }
-  try {
-    const response = await postJson('/api/reviewer-attribution', { session_id: state.session.session_id, actor: currentActor(), display_name: name });
-    state.attribution = response.attribution;
-    closeAttributionModal();
-    updateSessionBanner();
-    addAudit(`Reviewer attribution set to ${name}.`);
-    if (pendingAttributionAction) { const next = pendingAttributionAction; pendingAttributionAction = null; await next(); }
-  } catch (e) {
-    error.textContent = `Attribution was not saved: ${e.message}`;
-  }
-}
-function renderAuditEvents(events) {
-  const list = document.getElementById('auditTrail');
-  list.innerHTML = '';
-  for (const event of [...events].reverse()) {
-    const li = document.createElement('li');
-    const name = event.actor && event.actor.display_name ? event.actor.display_name : 'Anonymous reviewer';
-    li.innerHTML = `${escapeHtml(event.timestamp_utc)} · ${escapeHtml(name)} · ${escapeHtml(event.event_type)}${event.case_id ? ` · ${escapeHtml(event.case_id)}` : ''}<details><summary>Technical JSON</summary><pre>${escapeHtml(JSON.stringify(event, null, 2))}</pre></details>`;
-    list.appendChild(li);
-  }
-}
-
-function openDrawer(type, caseId) {
-  state.drawer = { type, caseId };
-  const drawer = document.getElementById('drawer');
-  drawer.classList.add('open');
-  drawer.setAttribute('aria-hidden', 'false');
-  renderDrawer();
-}
-function closeDrawer() {
-  document.getElementById('drawer').classList.remove('open');
-  document.getElementById('drawer').setAttribute('aria-hidden', 'true');
-}
-function rerenderActiveDrawer() { if (state.drawer) renderDrawer(); }
-function renderDrawer() {
-  if (!state.drawer) return;
-  const { type, caseId } = state.drawer;
-  const title = type === 'entities' ? 'Entities' : type === 'tasks' ? 'Review queue' : type === 'corrections' ? 'Corrections' : 'Technical details';
-  document.getElementById('drawerTitle').textContent = `${DATA[caseId].display_name}: ${title}`;
-  const body = document.getElementById('drawerBody');
-  if (type === 'entities') body.innerHTML = entityPanel(caseId);
-  else if (type === 'tasks') body.innerHTML = taskPanel(caseId, visibleCaseTasks(caseId));
-  else if (type === 'corrections') body.innerHTML = correctionPanel(caseId);
-  else body.innerHTML = `<pre>${escapeHtml(JSON.stringify(DATA[caseId], null, 2))}</pre>`;
-  updateTask(caseId);
-  initCorrectionCanvas(caseId);
-  refreshCorrectionCanvas(caseId);
-}
-function moveEntityPage(caseId, delta) {
-  state.entityPage[caseId] = Math.max(0, (state.entityPage[caseId] || 0) + delta);
-  renderDrawer();
-}
-function toggleEntitySelection(entityId, checked) {
-  state.entitySelection[entityId] = checked;
-}
-function jumpToEntity(caseId, entityId) {
-  const entity = caseEntities(caseId).find(e => e.entity_id === entityId);
-  if (!entity) return;
-  if (entity.representative_source_frame !== null && entity.representative_source_frame !== undefined) seekToFrame(caseId, entity.representative_source_frame, true);
-  document.querySelectorAll('.entity-card').forEach(card => card.classList.remove('selected'));
-  const card = document.querySelector(`[data-entity-card="${entityId}"]`);
-  if (card) card.classList.add('selected');
-}
-async function mergeSelectedEntities(caseId) {
-  if (!requireSession()) return;
-  const entities = selectedEntities(caseId);
-  if (entities.length < 2) { addAudit('Select at least two same-category entities to merge.'); return; }
-  if (!entities.every(e => e.category === entities[0].category)) { addAudit('Only same-category entities can be merged.'); return; }
-  if (entities.some((a, i) => entities.slice(i + 1).some(b => entitiesOverlap(a, b)))) {
-    addAudit('Merge rejected because selected entities are simultaneously visible or ambiguous.');
-    return;
-  }
-  const reason = (window.prompt('Reason for merging these entities?', '') || '').trim();
-  if (!reason) return;
-  const primary = entities[0];
-  const before = entities.map(e => ({ ...e }));
-  const mergedTrackIds = [...new Set(entities.flatMap(e => e.member_detector_tracker_ids || e.automatic_source_track_ids || []))].sort();
-  primary.member_detector_tracker_ids = mergedTrackIds;
-  primary.automatic_source_track_ids = mergedTrackIds;
-  primary.merge_split_lineage = [...(primary.merge_split_lineage || []), { operation: 'merge', merged_entity_ids: entities.slice(1).map(e => e.entity_id) }];
-  for (const entity of entities.slice(1)) entity.current_status = 'merged';
-  const event = await postJson('/api/entities/merge', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, before_state: before, after_state: { primary, retired_entity_ids: entities.slice(1).map(e => e.entity_id) }, reason });
-  addAudit(`Merged entities into ${primary.label}. Event ${event.event.event_id}.`);
-  state.entitySelection = {};
-  renderDrawer();
-}
-async function splitSelectedEntity(caseId) {
-  if (!requireSession()) return;
-  const entities = selectedEntities(caseId);
-  if (entities.length !== 1) { addAudit('Select exactly one entity to split.'); return; }
-  const source = entities[0];
-  const reason = (window.prompt('Reason for splitting this entity?', '') || '').trim();
-  if (!reason) return;
-  const trackText = (window.prompt('Track IDs to split into a new entity, comma separated. Leave blank for a bounded interval split marker.', '') || '').trim();
-  const moved = trackText ? trackText.split(',').map(x => x.trim()).filter(Boolean) : [];
-  const before = { ...source };
-  const categoryEntities = caseEntities(caseId).filter(e => e.category === source.category);
-  const nextNumber = 1 + Math.max(0, ...categoryEntities.map(e => Number(String(e.label).split(' ')[1]) || 0));
-  const prefix = source.category === 'face' ? 'Person' : 'Plate';
-  const newEntity = { ...source, entity_id: `entity_${crypto.randomUUID()}`, object_uuid: '', entity_uuid: '', label: `${prefix} ${String(nextNumber).padStart(2, '0')}`, member_detector_tracker_ids: moved, automatic_source_track_ids: moved, merge_split_lineage: [{ operation: 'split', parent_entity_id: source.entity_id }] };
-  newEntity.object_uuid = newEntity.entity_id.replace(/^entity_/, '');
-  newEntity.entity_uuid = newEntity.object_uuid;
-  DATA.entities.cases[caseId].push(newEntity);
-  source.merge_split_lineage = [...(source.merge_split_lineage || []), { operation: 'split', child_entity_id: newEntity.entity_id, moved_track_ids: moved }];
-  await postJson('/api/entities/split', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, before_state: before, after_state: { source, new_entity: newEntity }, reason });
-  addAudit(`Split ${source.label}; created ${newEntity.label}.`);
-  state.entitySelection = {};
-  renderDrawer();
-}
-function selectedEntities(caseId) { return caseEntities(caseId).filter(e => state.entitySelection[e.entity_id]); }
-function entitiesOverlap(a, b) {
-  const a1 = a.first_visible_source_frame, a2 = a.last_visible_source_frame;
-  const b1 = b.first_visible_source_frame, b2 = b.last_visible_source_frame;
-  if ([a1,a2,b1,b2].some(v => v === null || v === undefined)) return false;
-  return Math.max(a1, b1) <= Math.min(a2, b2);
-}
-
-function markSelectedDecision(caseId, taskId) {
-  const decision = state.decisions[taskId];
-  document.querySelectorAll(`#task-${caseId} [data-action="decision"]`).forEach(button => {
-    button.classList.toggle('selected', !!decision && button.dataset.decision === decision.action);
-  });
-}
-function actionLabel(action) {
-  const row = (DATA.tasks.actions || []).find(item => item.action === action);
-  return row ? row.label : action;
-}
+async function restoreSession() { const sessionId = localStorage.getItem(storageKey('session_id')); if (!sessionId) return; try { await loadSessionState(sessionId); } catch { localStorage.removeItem(storageKey('session_id')); } }
+async function loadSessionState(sessionId) { const res = await fetch(`/api/session-state?session_id=${encodeURIComponent(sessionId)}`); if (!res.ok) throw new Error(await res.text()); const payload = await res.json(); state.session = payload.session; state.attribution = payload.attribution; state.decisions = payload.decisions || {}; state.events = payload.events || []; state.corrections = payload.corrections || []; rebuildFromEvents(); }
+function rebuildFromEvents() { state.manualTasks = []; state.entityOverrides = {}; for (const event of state.events) { if (event.event_type === 'manual_issue_created' && event.after_state?.task) state.manualTasks.push(event.after_state.task); if (event.event_type === 'entity_policy_changed' && event.after_state?.entity_id) { state.entityOverrides[event.after_state.entity_id] = event.after_state; if (event.after_state.verification_task_id) state.manualTasks.push(policyTask(event.case_id, event.after_state, event.after_state.verification_task_id)); } if (event.event_type === 'entities_merged' && event.after_state?.primary) { state.entityOverrides[event.after_state.primary.entity_id] = event.after_state.primary; for (const id of event.after_state.retired_entity_ids || []) state.entityOverrides[id] = { entity_id: id, current_status: 'merged' }; } } }
+function renderSessionBanner() { const banner = document.getElementById('sessionBanner'); const start = document.getElementById('startSession'); if (!state.session) { banner.className = 'session-banner'; banner.textContent = 'No local review session yet. Start review to enable decisions and corrections.'; start.disabled = false; return; } banner.className = 'session-banner ready'; banner.textContent = `Local session ${state.session.session_id}${state.attribution?.display_name ? ` · Reviewer ${state.attribution.display_name}` : ' · anonymous until export/finalization'}`; start.disabled = true; }
+function showSessionError(message) { const banner = document.getElementById('sessionBanner'); banner.className = 'session-banner error'; banner.textContent = message; }
+async function startSession() { try { const payload = await postJson('/api/sessions', { reviewer: {}, source_revision: DATA.workspace.source_revision || null }); state.session = payload.session; localStorage.setItem(storageKey('session_id'), state.session.session_id); await loadSessionState(state.session.session_id); renderApp(); } catch (err) { showSessionError(`Could not start local review session: ${err.message}`); } }
+function openAttributionModal() { document.getElementById('attributionModal').classList.add('open'); document.getElementById('attributionModal').setAttribute('aria-hidden', 'false'); document.getElementById('reviewerName').focus(); }
+function closeAttributionModal() { document.getElementById('attributionModal').classList.remove('open'); document.getElementById('attributionModal').setAttribute('aria-hidden', 'true'); }
+async function submitAttribution() { if (!state.session) return showSessionError('Start review before setting attribution.'); const name = document.getElementById('reviewerName').value.trim(); if (!name) { document.getElementById('attributionError').textContent = 'Reviewer name is required.'; return; } try { const res = await postJson('/api/reviewer-attribution', { session_id: state.session.session_id, display_name: name, actor: currentActor(), note: 'Reviewer attribution set.' }); state.attribution = res.attribution; await loadSessionState(state.session.session_id); closeAttributionModal(); renderApp(); } catch (err) { document.getElementById('attributionError').textContent = err.message; } }
+function exportSession() { if (!state.session) return showSessionError('Start review before exporting.'); if (!state.attribution?.display_name) { openAttributionModal(); return; } window.open(`sessions/${state.session.session_id}/review_summary.json`, '_blank'); }
+function renderAudit() { const panel = document.getElementById('case-audit'); panel.innerHTML = `<h2>Audit Trail</h2><p class="case-subtitle">Append-only events with hash-chain validation.</p><div class="audit-list">${(state.events || []).map(e => `<article class="audit-card"><strong>${esc(e.event_type)}</strong><p class="task-meta">${esc(e.timestamp_utc)} · ${esc(e.case_id || 'workspace')}</p><p>${esc(e.note || '')}</p><details><summary>Technical JSON</summary><pre>${esc(JSON.stringify(e, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No events yet.</p>'}</div>`; }
+function renderFinal() { const panel = document.getElementById('case-final'); panel.innerHTML = `<h2>Final Results</h2><p class="case-subtitle">Reviewed-final outputs remain unavailable until finalization gates pass.</p><div class="final-card"><p class="muted">Finalization is currently controlled by the same validated backend gates. Use Review/Edit to resolve blockers, then finalize from the supported workflow.</p><div class="button-row"><button data-action="finalize-day">Check Day finalization</button><button data-action="finalize-night">Check Night finalization</button></div><pre id="finalizeStatus"></pre></div>`; panel.querySelector('[data-action="finalize-day"]').addEventListener('click', () => finalizeCase('day')); panel.querySelector('[data-action="finalize-night"]').addEventListener('click', () => finalizeCase('night')); }
+async function finalizeCase(caseId) { if (!state.session) return showSessionError('Start review before finalizing.'); if (!state.attribution?.display_name) { openAttributionModal(); return; } const out = document.getElementById('finalizeStatus'); try { const res = await postJson('/api/finalize', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId }); out.textContent = JSON.stringify(res.result, null, 2); } catch (err) { out.textContent = `Finalization blocked: ${err.message}`; } }
+function actionLabel(action) { if (action === ACTIONS.looks) return 'Correct'; if ([ACTIONS.leak, ACTIONS.partial, ACTIONS.falseRedaction, ACTIONS.wrong].includes(action)) return 'Needs correction'; if (action === ACTIONS.unsure) return 'Unsure'; if (action === ACTIONS.notSensitive) return 'Not sensitive'; if (action === ACTIONS.cosmetic) return 'Cosmetic only'; const found = (DATA.tasks?.actions || []).find(a => a.action === action); return found ? found.label : action; }
+function installGlobalHandlers() { document.body.tabIndex = -1; document.body.focus(); document.getElementById('startSession').addEventListener('click', startSession); document.getElementById('changeAttribution').addEventListener('click', openAttributionModal); document.getElementById('exportSession').addEventListener('click', exportSession); document.getElementById('submitAttribution').addEventListener('click', submitAttribution); document.getElementById('cancelAttribution').addEventListener('click', closeAttributionModal); document.querySelectorAll('.case-tabs button').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab))); window.addEventListener('keydown', onKeyDown, { capture: true }); document.addEventListener('fullscreenchange', () => updatePlayerUi(visibleCaseId())); }
+function isTextEntryTarget(element) { const tag = element?.tagName?.toLowerCase(); if (!tag) return false; if (element.isContentEditable) return true; if (tag === 'textarea' || tag === 'select') return true; if (tag !== 'input') return false; const type = String(element.type || 'text').toLowerCase(); return !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes(type); }
+function onKeyDown(event) { if (isTextEntryTarget(document.activeElement)) return; if (event.key === 'ArrowRight' || event.key === 'Right') { event.preventDefault(); stepFrame(event.shiftKey ? 10 : 1); } else if (event.key === 'ArrowLeft' || event.key === 'Left') { event.preventDefault(); stepFrame(event.shiftKey ? -10 : -1); } else if (event.key === ' ') { event.preventDefault(); togglePlay(visibleCaseId()); } else if (event.key.toLowerCase() === 'f') { const wrapper = document.querySelector(`#case-${visibleCaseId()}.active .player-wrapper`); if (wrapper) toggleFullscreen(wrapper); } else if (event.key === 'Escape' && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); } }
 init().catch(err => { document.body.innerHTML = `<pre>${err.stack || err}</pre>`; });
 """
