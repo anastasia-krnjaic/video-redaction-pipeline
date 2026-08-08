@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { finalizeCase as finalizeCaseRequest } from '../api/client';
 import { ReviewVideoPlayer } from '../components/ReviewVideoPlayer';
 import { usePersistentState } from '../hooks/usePersistentState';
@@ -32,19 +32,7 @@ export function FinalResultsPage({
   const [finalStatus, setFinalStatus] = useState<Record<string, FinalizationStatus>>({});
   const [busy, setBusy] = useState(false);
 
-  const finalRole = useMemo(() => {
-    const status = finalStatus[caseId];
-    if (!status?.finalized || !status.final_video) return undefined;
-    return {
-      label: 'Final',
-      path: status.final_video,
-      role: 'final_reviewed',
-      sha256: null,
-      source_frame_start: manifest.source_frame_start,
-      source_frame_end: manifest.source_frame_end,
-    } satisfies MediaVersion;
-  }, [caseId, finalStatus, manifest.source_frame_end, manifest.source_frame_start]);
-  const roles = finalRole ? manifest.video_roles.concat(finalRole) : manifest.video_roles;
+  const roles = publicVideoRoles(manifest.video_roles);
   const selectedVersion =
     roles.find((role) => role.role === selectedRole) ||
     roles.find((role) => role.role === 'latest_reviewed') ||
@@ -98,7 +86,6 @@ export function FinalResultsPage({
       <div className="final-layout">
         <ReviewVideoPlayer
           controller={controller}
-          finalRole={finalRole}
           manifest={manifest}
           roles={roles}
           selectedRole={selectedVersion?.role || selectedRole}
@@ -132,4 +119,15 @@ export function FinalResultsPage({
       </div>
     </section>
   );
+}
+
+function publicVideoRoles(roles: MediaVersion[]): MediaVersion[] {
+  const byRole = new Map(roles.map((role) => [role.role, role]));
+  const automatic = byRole.get('automatic') || byRole.get('current_result');
+  const latest = byRole.get('latest_reviewed') || automatic;
+  return [
+    byRole.get('original'),
+    automatic ? { ...automatic, label: 'Automatic', role: 'automatic' as const } : undefined,
+    latest ? { ...latest, label: 'Latest reviewed', role: 'latest_reviewed' as const } : undefined,
+  ].filter((role): role is MediaVersion => Boolean(role));
 }

@@ -14,6 +14,7 @@ export interface VideoController {
   seekToFrame: (frame: number) => void;
   seekToSourceFrame: (sourceFrame: number) => void;
   stepFrame: (delta: number) => void;
+  pause: () => void;
   togglePlay: () => void;
   toggleFullscreen: () => void;
   retryMedia: () => void;
@@ -30,19 +31,36 @@ export function useVideoController(
   const wrapperRef = useRef<HTMLDivElement>(null);
   const [playing, setPlaying] = useState(false);
   const [mediaError, setMediaError] = useState<string>();
+  const caseFrameRef = useRef(caseFrame);
   const lastVersionPath = useRef<string | undefined>(version?.path);
 
   const maxFrame = Math.max(0, manifest.frame_count - 1);
+  const versionStartFrame = clamp((version?.source_frame_start ?? manifest.source_frame_start) - manifest.source_frame_start, 0, maxFrame);
+  const versionEndFrame = clamp((version?.source_frame_end ?? manifest.source_frame_end) - manifest.source_frame_start, versionStartFrame, maxFrame);
+  const maxVersionLocalFrame = Math.max(0, versionEndFrame - versionStartFrame);
+  const versionLocalToCaseFrame = useCallback(
+    (localFrame: number) => clamp(versionStartFrame + Math.round(localFrame), 0, maxFrame),
+    [maxFrame, versionStartFrame],
+  );
+  const caseToVersionLocalFrame = useCallback(
+    (frame: number) => clamp(Math.round(frame) - versionStartFrame, 0, maxVersionLocalFrame),
+    [maxVersionLocalFrame, versionStartFrame],
+  );
+  useEffect(() => {
+    caseFrameRef.current = caseFrame;
+  }, [caseFrame]);
+
   const seekToFrame = useCallback(
     (frame: number) => {
       const nextFrame = clamp(Math.round(frame), 0, maxFrame);
+      caseFrameRef.current = nextFrame;
       setCaseFrame(nextFrame);
       const video = videoRef.current;
       if (video && Number.isFinite(video.duration || 0)) {
-        video.currentTime = frameToSeconds(manifest, nextFrame);
+        video.currentTime = frameToSeconds(manifest, caseToVersionLocalFrame(nextFrame));
       }
     },
-    [manifest, maxFrame, setCaseFrame],
+    [caseToVersionLocalFrame, manifest, maxFrame, setCaseFrame],
   );
 
   const seekToSourceFrame = useCallback(
@@ -71,6 +89,10 @@ export function useVideoController(
     }
   }, []);
 
+  const pause = useCallback(() => {
+    videoRef.current?.pause();
+  }, []);
+
   const toggleFullscreen = useCallback(() => {
     const wrapper = wrapperRef.current;
     if (!wrapper) return;
@@ -89,31 +111,46 @@ export function useVideoController(
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
-    const onTimeUpdate = () => setCaseFrame(secondsToFrame(manifest, video.currentTime));
+    const onTimeUpdate = () => {
+      const localFrame = secondsToFrame(manifest, video.currentTime);
+      const nextFrame = versionLocalToCaseFrame(localFrame);
+      caseFrameRef.current = nextFrame;
+      setCaseFrame(nextFrame);
+    };
+    const onLoadedMetadata = () => {
+      const frame = clamp(Math.round(caseFrameRef.current), 0, Math.max(0, manifest.frame_count - 1));
+      const localFrame = caseToVersionLocalFrame(frame);
+      const nextFrame = versionLocalToCaseFrame(localFrame);
+      caseFrameRef.current = nextFrame;
+      setCaseFrame(nextFrame);
+      video.currentTime = frameToSeconds(manifest, localFrame);
+    };
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
     const onError = () => setMediaError('Media could not be loaded. Check package media files and Range support.');
     video.addEventListener('timeupdate', onTimeUpdate);
+    video.addEventListener('loadedmetadata', onLoadedMetadata);
     video.addEventListener('play', onPlay);
     video.addEventListener('pause', onPause);
     video.addEventListener('error', onError);
     video.disablePictureInPicture = true;
     return () => {
       video.removeEventListener('timeupdate', onTimeUpdate);
+      video.removeEventListener('loadedmetadata', onLoadedMetadata);
       video.removeEventListener('play', onPlay);
       video.removeEventListener('pause', onPause);
       video.removeEventListener('error', onError);
     };
-  }, [manifest, setCaseFrame]);
+  }, [caseToVersionLocalFrame, manifest, setCaseFrame, versionLocalToCaseFrame]);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
     if (lastVersionPath.current !== version?.path) {
       lastVersionPath.current = version?.path;
-      video.currentTime = frameToSeconds(manifest, caseFrame);
+      video.currentTime = frameToSeconds(manifest, caseToVersionLocalFrame(caseFrame));
     }
-  }, [caseFrame, manifest, version?.path]);
+  }, [caseFrame, caseToVersionLocalFrame, manifest, version?.path]);
 
   return useMemo(
     () => ({
@@ -124,6 +161,7 @@ export function useVideoController(
       timeText: formatTime(frameToSeconds(manifest, caseFrame)),
       playing,
       mediaError,
+      pause,
       seekToFrame,
       seekToSourceFrame,
       stepFrame,
@@ -136,6 +174,7 @@ export function useVideoController(
       caseFrame,
       manifest,
       mediaError,
+      pause,
       playing,
       retryMedia,
       seekToFrame,

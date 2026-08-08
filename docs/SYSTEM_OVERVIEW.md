@@ -1,8 +1,8 @@
 # Video Redaction Pipeline - System Overview
 
-- **Document version:** v030
+- **Document version:** v031
 - **Last updated:** 2026-08-07
-- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus shared accumulated-evidence tracking, bounded gap recovery, and non-final automatic plate previews. Final Review Workspace v2.3.4 freezes the Python backend review behavior, and Frontend Foundation v1 adds a React + TypeScript presentation layer over the same manifests, media, source-frame mappings, sessions, review entities, corrections, audit trail, Range serving, and finalization gates.
+- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus shared accumulated-evidence tracking, bounded gap recovery, and non-final automatic plate previews. Final Review Workspace v2.3.4 freezes the Python backend review behavior, and Frontend v1.3.3 layers React + TypeScript presentation over the same manifests, media, source-frame mappings, sessions, review entities, corrections, History, Range serving, finalization gates, and debounced reviewed-media materialization jobs.
 - **Canonical document:** `docs/SYSTEM_OVERVIEW.md`
 
 ## What The System Is For
@@ -11,7 +11,7 @@ This repository builds a local video-redaction pipeline. Its most complete path 
 
 The system is not a finished automatic redaction product, and it does not make a universal zero-leak claim. It produces structured evidence, diagnostic outputs, non-final previews, and approved face-redacted MP4s when the available privacy-region evidence passes final safety gates.
 
-The frozen case-based review backend package is `artifacts/final_pipeline_package_v2_3_4/`. It records the active component hashes, case manifests, source lineage, reviewer tasks, stable Person/Plate review objects with representative thumbnails, local session/correction provenance, version-alignment evidence, and finalization gates. The React frontend package is generated under `artifacts/final_pipeline_package_frontend_v1/` by preserving the frozen backend package and layering Vite-built assets under `app/`. The earlier behavior-freeze package under `artifacts/final_pipeline_package_v1/` remains preserved.
+The frozen case-based review backend package is `artifacts/final_pipeline_package_v2_3_4/`. It records the active component hashes, case manifests, source lineage, reviewer tasks, stable Person/Plate review objects with representative thumbnails, local session/correction provenance, version-alignment evidence, and finalization gates. The current React frontend package is generated under `artifacts/final_pipeline_package_frontend_v1_3_3/` from the accepted v1.3.2 package baseline by layering Vite-built assets under `app/` and preserving `legacy.html`. The earlier behavior-freeze package under `artifacts/final_pipeline_package_v1/` remains preserved.
 
 ## Current User Workflow
 

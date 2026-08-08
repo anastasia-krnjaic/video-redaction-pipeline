@@ -27,10 +27,16 @@ const orderedNames = [
   'EntityIndex',
   'Entity',
   'EntityPolicyAction',
+  'BulkEntityPolicyAction',
   'EntityMergeCandidate',
   'EntityMergeEvent',
   'Correction',
   'CorrectionPreview',
+  'WorkingState',
+  'MaterializationStatus',
+  'MaterializationJob',
+  'Checkpoint',
+  'History',
   'AuditEvent',
   'FinalizationStatus',
   'VersionAlignmentAudit',
@@ -43,6 +49,7 @@ function refName(ref) {
 function typeFromSchema(value) {
   if (!value || value === true) return 'unknown';
   if (value.$ref) return refName(value.$ref);
+  if (value.anyOf) return value.anyOf.map((item) => typeFromSchema(item)).join(' | ');
   if (value.const !== undefined) return JSON.stringify(value.const);
   if (value.enum) return value.enum.map((item) => JSON.stringify(item)).join(' | ');
   if (Array.isArray(value.type)) {
@@ -51,6 +58,7 @@ function typeFromSchema(value) {
       .join(' | ');
   }
   if (value.type === 'string') return 'string';
+  if (value.type === 'null') return 'null';
   if (value.type === 'integer' || value.type === 'number') return 'number';
   if (value.type === 'boolean') return 'boolean';
   if (value.type === 'array') return `${typeFromSchema(value.items)}[]`;

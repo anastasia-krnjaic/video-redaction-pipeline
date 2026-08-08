@@ -1,25 +1,36 @@
-import { Maximize2, Pause, Play, RotateCcw, StepBack, StepForward } from 'lucide-react';
+import { RotateCcw } from 'lucide-react';
+import type { ReactNode } from 'react';
 import type { Case, MediaVersion } from '../types/api';
 import type { VideoController } from '../hooks/useVideoController';
+import type { TaskWithDecision } from '../types/domain';
+import { PlayerChrome } from './PlayerChrome';
 import { VersionSelector } from './VersionSelector';
 
 interface Props {
+  children?: ReactNode;
   manifest: Case;
   selectedRole: string;
   roles: MediaVersion[];
   finalRole?: MediaVersion;
   version?: MediaVersion;
   controller: VideoController;
+  selectedTaskId?: string | null;
+  tasks?: TaskWithDecision[];
   onVersionChange: (role: string) => void;
+  onSelectTask?: (task: TaskWithDecision) => void;
 }
 
 export function ReviewVideoPlayer({
+  children,
   controller,
   finalRole,
   manifest,
+  onSelectTask,
   onVersionChange,
   roles,
   selectedRole,
+  selectedTaskId,
+  tasks,
   version,
 }: Props) {
   const source = version?.path || manifest.source_path;
@@ -41,12 +52,14 @@ export function ReviewVideoPlayer({
           <video
             ref={controller.videoRef}
             data-case={manifest.case_id}
+            data-media-path={source}
             disablePictureInPicture
             playsInline
             preload="metadata"
             src={`/${source}`}
             onClick={controller.togglePlay}
           />
+          {children}
           <div className="frame-hud">
             Source frame {controller.sourceFrame} · Case frame {controller.caseFrame} · {controller.timeText}
           </div>
@@ -59,24 +72,13 @@ export function ReviewVideoPlayer({
             </div>
           ) : null}
         </div>
-        <div className="player-controls">
-          <div className="controls-top">
-            <button type="button" onClick={controller.togglePlay} title="Play or pause">
-              {controller.playing ? <Pause size={16} aria-hidden="true" /> : <Play size={16} aria-hidden="true" />}
-              <span>{controller.playing ? 'Pause' : 'Play'}</span>
-            </button>
-            <div className="time-readout">{controller.timeText}</div>
-            <button type="button" onClick={() => controller.stepFrame(-1)} title="Step back one frame">
-              <StepBack size={16} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={() => controller.stepFrame(1)} title="Step forward one frame">
-              <StepForward size={16} aria-hidden="true" />
-            </button>
-            <button type="button" onClick={controller.toggleFullscreen} title="Fullscreen">
-              <Maximize2 size={16} aria-hidden="true" />
-            </button>
-          </div>
-        </div>
+        <PlayerChrome
+          controller={controller}
+          manifest={manifest}
+          selectedTaskId={selectedTaskId}
+          tasks={tasks}
+          onSelectTask={onSelectTask}
+        />
       </div>
     </section>
   );

@@ -20,7 +20,7 @@ const NEEDS_CORRECTION_ACTIONS = new Set<string>([
 ]);
 
 export function taskBucket(task: Task, decision?: TaskDecision): QueueBucket {
-  if (task.decision_state === 'resolved') return 'Resolved';
+  if (task.decision_state === 'resolved') return 'Completed';
   if (!decision) return 'Open';
   if (decision.action === ACTIONS.unsure) return 'Unsure / Escalated';
   if (NEEDS_CORRECTION_ACTIONS.has(decision.action)) return 'Needs correction';
@@ -42,7 +42,6 @@ export function bucketCounts(tasks: TaskWithDecision[]): Record<QueueBucket, num
     'Needs correction': tasks.filter((task) => task.bucket === 'Needs correction').length,
     'Unsure / Escalated': tasks.filter((task) => task.bucket === 'Unsure / Escalated').length,
     Completed: tasks.filter((task) => task.bucket === 'Completed').length,
-    Resolved: tasks.filter((task) => task.bucket === 'Resolved').length,
   };
 }
 
@@ -60,7 +59,6 @@ export function taskColorClass(task: TaskWithDecision): string {
   if (task.bucket === 'Completed') return 'marker-correct';
   if (task.bucket === 'Needs correction') return 'marker-needs-correction';
   if (task.bucket === 'Unsure / Escalated') return 'marker-unsure';
-  if (task.bucket === 'Resolved') return 'marker-resolved';
   if (task.normal_task_class === 'possible_false_redaction') return 'marker-false';
   if (task.category === 'face') return 'marker-face';
   return 'marker-plate';
@@ -70,9 +68,26 @@ export function effectiveEntities(
   entities: Entity[],
   overrides: Record<string, EffectiveEntity>,
 ): EffectiveEntity[] {
-  return entities
-    .map((entity) => ({ ...entity, ...(overrides[entity.entity_id] || {}) }))
+  const seen = new Set<string>();
+  const caseIds = new Set(entities.map((entity) => String(entity.case_id || '')).filter(Boolean));
+  const effective = entities
+    .map((entity) => {
+      seen.add(entity.entity_id);
+      return { ...entity, ...(overrides[entity.entity_id] || {}) };
+    })
     .filter((entity) => entity.current_status !== 'merged');
+  for (const [entityId, override] of Object.entries(overrides)) {
+    if (seen.has(entityId) || override.current_status === 'merged') continue;
+    if (!override.case_id) continue;
+    if (caseIds.size && !caseIds.has(String(override.case_id))) continue;
+    effective.push(override);
+  }
+  return effective.sort((left, right) => {
+    const leftFrame = typeof left.first_visible_source_frame === 'number' ? left.first_visible_source_frame : Number.MAX_SAFE_INTEGER;
+    const rightFrame = typeof right.first_visible_source_frame === 'number' ? right.first_visible_source_frame : Number.MAX_SAFE_INTEGER;
+    if (leftFrame !== rightFrame) return leftFrame - rightFrame;
+    return left.label.localeCompare(right.label);
+  });
 }
 
 export function filteredEntities(

@@ -4,10 +4,12 @@ import json
 import shutil
 import urllib.error
 import urllib.request
+from dataclasses import replace
 from pathlib import Path
 
 import cv2 as cv
 import numpy as np
+import pytest
 
 from redactor import (
     case_manifests,
@@ -15,6 +17,7 @@ from redactor import (
     review_corrections,
     review_finalization,
     review_sessions,
+    review_working_state,
     review_workspace,
 )
 from redactor.privacy_records import (
@@ -76,6 +79,88 @@ def synthetic_case_manifest(package_root: Path) -> case_manifests.CaseManifest:
     )
     case_manifests.write_case_manifest(package_root / "cases" / "synthetic.json", manifest)
     return manifest
+
+
+def write_review_entity_shell(package_root: Path, case_id: str) -> None:
+    shell = {
+        "cases": {case_id: []},
+        "schema_version": "review_entities.v2",
+        "unresolved_evidence_by_case": {
+            case_id: {
+                "fragment_count": 0,
+                "fragments": [],
+                "schema_version": "review_unresolved_evidence.v1",
+            }
+        },
+    }
+    write_json(package_root / "review_entities.json", shell)
+    write_json(package_root / "review_objects.json", shell)
+    write_json(package_root / "privacy_entities.json", shell)
+    write_json(
+        package_root / "entities" / f"{case_id}_unresolved_evidence.json",
+        shell["unresolved_evidence_by_case"][case_id],
+    )
+
+
+def write_explicit_keep_face_policy(
+    package_root: Path,
+    manifest: case_manifests.CaseManifest,
+    *,
+    track_id: int,
+) -> None:
+    policy_root = package_root / "technical" / f"{manifest.case_id}_pipeline" / "face_policy"
+    write_json(
+        policy_root / "track_census.json",
+        {
+            "source_video_hash": manifest.source_video_hash,
+            "tracks": [
+                {
+                    "assignment_provenance": "explicit_case_policy",
+                    "first_frame": 1,
+                    "interpolated_frames": [],
+                    "last_frame": 3,
+                    "observed_frames": [1, 2, 3],
+                    "predicted_frames": [],
+                    "quality_status": "auto_confirmed",
+                    "representative_frame": 2,
+                    "track_id": track_id,
+                }
+            ],
+        },
+    )
+    write_json(
+        policy_root / "privacy_policy.json",
+        {
+            "assignments": [
+                {
+                    "decision": "keep",
+                    "provenance": "explicit_case_policy",
+                    "track_id": track_id,
+                }
+            ]
+        },
+    )
+    tracks_dir = policy_root / "tracking"
+    tracks_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for frame_index in (1, 2, 3):
+        rows.append(
+            {
+                "frame_index": frame_index,
+                "track_boxes": [
+                    {
+                        "bbox_xyxy": [20 + frame_index, 22, 54 + frame_index, 42],
+                        "candidate_id": f"candidate_{track_id}_{frame_index}",
+                        "render_eligible": True,
+                        "track_id": track_id,
+                    }
+                ],
+            }
+        )
+    tracks_dir.joinpath("tracks.jsonl").write_text(
+        "\n".join(json.dumps(row, sort_keys=True) for row in rows) + "\n",
+        encoding="utf-8",
+    )
 
 
 def create_session(package_root: Path, manifest: case_manifests.CaseManifest) -> Path:
@@ -310,6 +395,45 @@ def test_task_aggregation_preserves_raw_ids_and_separates_technical() -> None:
     assert technical["raw_signal_ids"] == ["c"]
 
 
+def test_long_reviewer_task_is_split_into_traceable_child_chunks(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    manifest = replace(manifest, fps="10/1", frame_count=200, source_frame_end=199)
+    case_manifests.write_case_manifest(package / "cases" / "synthetic.json", manifest)
+    task = {
+        "blocking": True,
+        "case_id": manifest.case_id,
+        "category": CATEGORY_PLATE,
+        "issue_type": "possible_privacy_gap",
+        "normal_task_class": "possible_privacy_gap",
+        "raw_signal_ids": ["raw_long"],
+        "review_task_id": "synthetic_task_long",
+        "source_frame_end": 60,
+        "source_frame_start": 0,
+        "technical_only": False,
+        "title": "Possible plate privacy gap",
+        "what_to_inspect": "Inspect the interval.",
+    }
+
+    children, audit = review_workspace.chunk_reviewer_tasks_for_package(package, [task])
+
+    assert audit["passed"] is True
+    assert len(children) == 3
+    assert [child["child_index"] for child in children] == [1, 2, 3]
+    assert children[0]["title"] == "Possible plate privacy gap - part 1 of 3"
+    assert all(child["parent_review_task_id"] == "synthetic_task_long" for child in children)
+    assert all(child["parent_raw_signal_ids"] == ["raw_long"] for child in children)
+    assert all(
+        (child["source_frame_end"] - child["source_frame_start"] + 1) / 10.0 <= 5.0
+        for child in children
+    )
+    assert [(child["source_frame_start"], child["source_frame_end"]) for child in children] == [
+        (0, 29),
+        (30, 59),
+        (60, 60),
+    ]
+
+
 def test_detector_span_audit_requires_every_canonical_day_frame(tmp_path: Path) -> None:
     detections = tmp_path / "detections.jsonl"
     rows = [
@@ -443,6 +567,154 @@ def test_correction_interpolation_rejects_extrapolation() -> None:
         raise AssertionError("correction extrapolation was accepted")
 
 
+@pytest.mark.parametrize(
+    (
+        "name",
+        "start",
+        "end",
+        "method",
+        "keyframes",
+        "expected_frames",
+        "sample_frame",
+        "sample_box",
+    ),
+    [
+        (
+            "single",
+            0,
+            0,
+            review_corrections.INTERPOLATION_NONE,
+            ((0, (10, 10, 70, 50)),),
+            [0],
+            0,
+            (10, 10, 70, 50),
+        ),
+        (
+            "fixed",
+            1,
+            3,
+            review_corrections.INTERPOLATION_LINEAR,
+            ((1, (10, 10, 70, 50)),),
+            [1, 2, 3],
+            2,
+            (10, 10, 70, 50),
+        ),
+        (
+            "interpolate",
+            1,
+            3,
+            review_corrections.INTERPOLATION_LINEAR,
+            ((1, (10, 10, 60, 42)), (3, (26, 16, 78, 50))),
+            [1, 2, 3],
+            2,
+            (18, 13, 69, 46),
+        ),
+    ],
+)
+def test_saved_manual_correction_materializes_latest_reviewed_regions_and_pixels(
+    tmp_path: Path,
+    name: str,
+    start: int,
+    end: int,
+    method: str,
+    keyframes: tuple[tuple[int, tuple[int, int, int, int]], ...],
+    expected_frames: list[int],
+    sample_frame: int,
+    sample_box: tuple[int, int, int, int],
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    automatic = package / "media" / "synthetic" / "automatic_baseline.mp4"
+    shutil.copy2(package / manifest.video_roles[0].path, automatic)
+    roles = (
+        manifest.video_roles[0],
+        case_manifests.VideoRole(
+            label="Automatic",
+            path=automatic.relative_to(package).as_posix(),
+            role="automatic",
+            sha256=review_workspace.media.sha256_file(automatic),
+            source_frame_end=manifest.source_frame_end,
+            source_frame_start=manifest.source_frame_start,
+        ),
+    )
+    manifest = replace(manifest, video_roles=roles)
+    case_manifests.write_case_manifest(package / "cases" / "synthetic.json", manifest)
+    write_empty_regions(package, manifest.case_id)
+    session_dir = create_session(package, manifest)
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_PLATE,
+        configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
+        interpolation_method=method,
+        keyframes=tuple(
+            review_corrections.CorrectionKeyframe(frame, box) for frame, box in keyframes
+        ),
+        operation=review_corrections.OP_ADD,
+        reason=f"{name} correction",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=end,
+        source_frame_start=start,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id=f"task_{name}",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+
+    final_regions, provenance = review_working_state.compute_effective_privacy_regions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    correction_regions = [
+        record for record in final_regions if record.provenance == "reviewed_correction"
+    ]
+
+    assert [
+        record.source_record["source_frame"] for record in correction_regions
+    ] == expected_frames
+    assert provenance["manual_correction_count"] == 1
+
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        actor={"reviewer_id": "analyst"},
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+    latest_path = package / materialization["latest_reviewed"]["path"]
+    automatic_frame = read_video_frame(automatic, sample_frame)
+    latest_frame = read_video_frame(latest_path, sample_frame)
+    x1, y1, x2, y2 = sample_box
+    inside_diff = float(
+        np.mean(
+            np.abs(
+                latest_frame[y1:y2, x1:x2].astype(np.int16)
+                - automatic_frame[y1:y2, x1:x2].astype(np.int16)
+            )
+        )
+    )
+    control_diff = float(
+        np.mean(
+            np.abs(
+                latest_frame[0:8, 0:8].astype(np.int16) - automatic_frame[0:8, 0:8].astype(np.int16)
+            )
+        )
+    )
+    audit = json.loads(
+        (package / "manual_correction_persistence_audit.json").read_text(encoding="utf-8")
+    )
+
+    assert materialization["manual_correction_count"] == 1
+    assert video_frame_count(latest_path) == manifest.frame_count
+    assert inside_diff > max(5.0, control_diff * 1.5)
+    assert audit["events"][-1]["correction_ids"] == [correction.correction_id]
+
+
 def write_base_region(package: Path, case_id: str) -> None:
     record = PrivacyRegionRecord(
         approval_state=APPROVAL_ACCEPTED,
@@ -458,6 +730,33 @@ def write_base_region(package: Path, case_id: str) -> None:
         package / "regions" / f"{case_id}_current_regions.jsonl",
         [record],
     )
+
+
+def write_empty_regions(package: Path, case_id: str) -> None:
+    review_finalization.write_privacy_region_records(
+        package / "regions" / f"{case_id}_current_regions.jsonl",
+        [],
+    )
+
+
+def read_video_frame(path: Path, frame_index: int) -> np.ndarray:
+    capture = cv.VideoCapture(str(path))
+    try:
+        capture.set(cv.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = capture.read()
+        if not ok:
+            raise AssertionError(f"could not read frame {frame_index} from {path}")
+        return frame
+    finally:
+        capture.release()
+
+
+def video_frame_count(path: Path) -> int:
+    capture = cv.VideoCapture(str(path))
+    try:
+        return int(capture.get(cv.CAP_PROP_FRAME_COUNT))
+    finally:
+        capture.release()
 
 
 def test_finalization_blocks_required_unresolved_task(tmp_path: Path) -> None:
@@ -746,6 +1045,684 @@ def test_backend_parity_audit_detects_hash_drift(tmp_path: Path) -> None:
     assert passed["passed"] is True
     assert failed["passed"] is False
     assert any("day_current_regions" in error for error in failed["errors"])
+
+
+def test_backend_parity_audit_allows_source_backed_keep_entity_delta(tmp_path: Path) -> None:
+    reference = tmp_path / "reference"
+    candidate = tmp_path / "candidate"
+    for root in (reference, candidate):
+        write_json(root / "cases" / "night.json", {"case_id": "night", "value": 1})
+        write_json(root / "reviewer_tasks.json", {"tasks": []})
+        write_json(root / "entities" / "night.json", {"entities": []})
+        write_json(root / "review_entities.json", {"cases": {"night": []}})
+        write_json(root / "privacy_entities.json", {"cases": {"night": []}})
+        (root / "regions").mkdir(parents=True, exist_ok=True)
+        (root / "regions" / "night_current_regions.jsonl").write_text("same\n", encoding="utf-8")
+    keep_entity = {"entity_id": "entity_keep", "automatic_source_track_ids": ["10"]}
+    write_json(candidate / "entities" / "night.json", {"entities": [keep_entity]})
+    write_json(candidate / "review_entities.json", {"cases": {"night": [keep_entity]}})
+    write_json(candidate / "privacy_entities.json", {"cases": {"night": [keep_entity]}})
+    write_json(
+        candidate / "review_entity_coverage_audit.json",
+        {
+            "cases": {
+                "night": {
+                    "explicit_keep_tracks_added": [
+                        {
+                            "assignment_provenance": "explicit_case_policy",
+                            "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                            "review_entity_uuid": "entity_keep",
+                            "track_id": "10",
+                            "valid_source_evidence": True,
+                        }
+                    ]
+                }
+            },
+            "passed": True,
+            "schema_version": "review_entity_coverage_audit.v1",
+        },
+    )
+
+    audit = review_workspace.backend_parity_audit(reference, candidate)
+
+    assert audit["passed"] is True
+    assert audit["entity_registry_coverage_delta_count"] == 3
+    assert audit["privacy_regions_preserved"] is True
+
+
+def test_entity_merge_payload_allows_manual_overlap_but_rejects_invalid_targets() -> None:
+    source = {
+        "case_id": "day",
+        "category": CATEGORY_FACE,
+        "entity_id": "source",
+        "first_visible_source_frame": 10,
+        "last_visible_source_frame": 20,
+    }
+    overlap = {
+        "case_id": "day",
+        "category": CATEGORY_FACE,
+        "entity_id": "overlap",
+        "first_visible_source_frame": 15,
+        "last_visible_source_frame": 30,
+    }
+    safe = {
+        "case_id": "day",
+        "category": CATEGORY_FACE,
+        "entity_id": "safe",
+        "first_visible_source_frame": 21,
+        "last_visible_source_frame": 30,
+    }
+
+    assert (
+        review_workspace.validate_entity_merge_payload(
+            {
+                "before_state": {"source": source, "target": overlap},
+                "after_state": {"primary": source, "retired_entity_ids": ["overlap"]},
+            }
+        )
+        is None
+    )
+    assert "retired target" in (
+        review_workspace.validate_entity_merge_payload(
+            {
+                "before_state": {"source": source, "target": safe},
+                "after_state": {"primary": source, "retired_entity_ids": []},
+            }
+        )
+        or ""
+    )
+    assert (
+        review_workspace.validate_entity_merge_payload(
+            {
+                "before_state": {"source": source, "target": safe},
+                "after_state": {"primary": source, "retired_entity_ids": ["safe"]},
+            }
+        )
+        is None
+    )
+
+
+def test_entity_merge_event_creates_canonical_active_entity(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    entity_a = {
+        "automatic_source_track_ids": ["track_a"],
+        "case_id": manifest.case_id,
+        "category": CATEGORY_FACE,
+        "current_policy": privacy_entities.POLICY_REDACT,
+        "entity_id": "entity_a",
+        "evidence_summary": {"region_count": 2, "review_observation_count": 2},
+        "first_visible_source_frame": 1,
+        "label": "Person 01",
+        "last_visible_source_frame": 2,
+        "member_detector_tracker_ids": ["track_a"],
+        "representative_quality": {"bbox_xyxy": [1, 2, 10, 12], "relative_area": 0.1},
+        "representative_source_frame": 1,
+    }
+    entity_b = {
+        "automatic_source_track_ids": ["track_b"],
+        "case_id": manifest.case_id,
+        "category": CATEGORY_FACE,
+        "current_policy": privacy_entities.POLICY_REDACT,
+        "entity_id": "entity_b",
+        "evidence_summary": {"region_count": 3, "review_observation_count": 3},
+        "first_visible_source_frame": 2,
+        "label": "Person 02",
+        "last_visible_source_frame": 4,
+        "member_detector_tracker_ids": ["track_b"],
+        "representative_quality": {"bbox_xyxy": [3, 4, 20, 22], "relative_area": 0.2},
+        "representative_source_frame": 2,
+    }
+    registry = {
+        "cases": {manifest.case_id: [entity_a, entity_b]},
+        "schema_version": "review_entities.v2",
+    }
+    write_json(package / "review_entities.json", registry)
+    session_dir = create_session(package, manifest)
+
+    merged = review_workspace.canonical_merged_entity(
+        [entity_a, entity_b],
+        session_dir=session_dir,
+    )
+    review_sessions.append_event(
+        session_dir,
+        event_type="entities_merged",
+        actor={"display_name": "Analyst"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state={"entities": [entity_a, entity_b]},
+        after_state={
+            "primary": merged,
+            "retired_entity_ids": ["entity_a", "entity_b"],
+            "retired_entity_uuids": ["entity_a", "entity_b"],
+        },
+        note="Reviewer confirmed object merge.",
+        application_hashes={},
+    )
+
+    state = review_working_state.derive_working_state(package, session_dir)
+    active = review_working_state.effective_case_entities(
+        registry["cases"][manifest.case_id], state
+    )
+
+    assert [entity["entity_id"] for entity in active] == [merged["entity_id"]]
+    assert active[0]["automatic_source_track_ids"] == ["track_a", "track_b"]
+    assert active[0]["member_detector_tracker_ids"] == ["track_a", "track_b"]
+    assert active[0]["representative_bbox"] == [3, 4, 20, 22]
+    assert active[0]["label"] == "Merged Person 01"
+    assert active[0]["current_policy"] == privacy_entities.POLICY_REDACT
+    assert (
+        active[0]["merge_policy_initialization"]["reason"] == "all_selected_entities_shared_policy"
+    )
+
+    entity_c = entity_a | {
+        "automatic_source_track_ids": ["track_c"],
+        "entity_id": "entity_c",
+        "label": "Person 03",
+    }
+    entity_d = entity_b | {
+        "automatic_source_track_ids": ["track_d"],
+        "current_policy": privacy_entities.POLICY_KEEP_VISIBLE,
+        "entity_id": "entity_d",
+        "label": "Person 04",
+    }
+    second = review_workspace.canonical_merged_entity(
+        [entity_c, entity_d],
+        session_dir=session_dir,
+    )
+    assert second["label"] == "Merged Person 02"
+    assert second["current_policy"] == privacy_entities.POLICY_REVIEW_REQUIRED
+    assert second["merge_policy_initialization"]["reason"] == "conflicting_selected_policies"
+
+    extended = review_workspace.canonical_merged_entity(
+        [active[0], entity_c],
+        session_dir=session_dir,
+    )
+    assert extended["label"] == "Merged Person 01"
+
+    wrong_case_active = review_working_state.effective_case_entities(
+        [
+            {
+                **entity_a,
+                "case_id": "other_case",
+                "entity_id": "other_entity_a",
+            }
+        ],
+        state,
+    )
+    assert [entity["entity_id"] for entity in wrong_case_active] == ["other_entity_a"]
+
+
+def test_case_restart_resets_only_selected_active_projection(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    day_manifest = synthetic_case_manifest(package)
+    day_manifest = replace(day_manifest, case_id="day", display_name="Day")
+    case_manifests.write_case_manifest(package / "cases" / "day.json", day_manifest)
+    (package / "cases" / "synthetic.json").unlink()
+    night_source = package / "media" / "night" / "original_reference.mp4"
+    night_source.parent.mkdir(parents=True, exist_ok=True)
+    write_synthetic_video(night_source)
+    night_manifest = case_manifests.case_manifest_from_media(
+        case_id="night",
+        display_name="Night",
+        source_path="media/night/original_reference.mp4",
+        source_video=night_source,
+        video_roles=[
+            case_manifests.VideoRole(
+                label="Original",
+                path="media/night/original_reference.mp4",
+                role="original",
+                sha256=None,
+                source_frame_end=4,
+                source_frame_start=0,
+            ),
+            case_manifests.VideoRole(
+                label="Automatic",
+                path="media/night/original_reference.mp4",
+                role="automatic",
+                sha256=None,
+                source_frame_end=4,
+                source_frame_start=0,
+            ),
+        ],
+    )
+    case_manifests.write_case_manifest(package / "cases" / "night.json", night_manifest)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "blocking": True,
+                    "case_id": "day",
+                    "review_task_id": "day_task",
+                    "technical_only": False,
+                },
+                {
+                    "blocking": True,
+                    "case_id": "night",
+                    "review_task_id": "night_task",
+                    "technical_only": False,
+                },
+            ]
+        },
+    )
+    day_a = {
+        "case_id": "day",
+        "category": CATEGORY_FACE,
+        "current_policy": privacy_entities.POLICY_REDACT,
+        "entity_id": "day_a",
+        "label": "Person 01",
+        "representative_source_frame": 0,
+    }
+    day_b = {
+        "case_id": "day",
+        "category": CATEGORY_FACE,
+        "current_policy": privacy_entities.POLICY_REDACT,
+        "entity_id": "day_b",
+        "label": "Person 02",
+        "representative_source_frame": 1,
+    }
+    night_entity = {
+        "case_id": "night",
+        "category": CATEGORY_FACE,
+        "current_policy": privacy_entities.POLICY_KEEP_VISIBLE,
+        "entity_id": "night_keep",
+        "label": "Person 01",
+        "representative_source_frame": 0,
+    }
+    registry = {"cases": {"day": [day_a, day_b], "night": [night_entity]}}
+    write_json(package / "review_entities.json", registry)
+    (package / "regions").mkdir(parents=True, exist_ok=True)
+    (package / "regions" / "day_current_regions.jsonl").write_text("", encoding="utf-8")
+    review_working_state.write_reset_baseline_state_audit_shell(package)
+    day_baseline_summary = review_working_state.baseline_case_active_state_summary(package, "day")
+    night_baseline_summary = review_working_state.baseline_case_active_state_summary(
+        package, "night"
+    )
+    freeze = {"schema_version": "freeze.test", "value": 1}
+    write_json(package / "configuration_freeze.json", freeze)
+    session = review_sessions.create_review_session(
+        package_root=package,
+        reviewer=review_sessions.ReviewerIdentity("Analyst", "analyst@example.test"),
+        source_revision="test",
+        configuration_freeze_hash=stable_hash(freeze),
+        case_manifest_hashes={
+            "day": day_manifest.manifest_hash(),
+            "night": night_manifest.manifest_hash(),
+        },
+        source_hashes={
+            "day": day_manifest.source_video_hash or "",
+            "night": night_manifest.source_video_hash or "",
+        },
+    )
+    session_dir = review_sessions.session_directory(package, session.session_id)
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+        task_id="day_task",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="correct",
+    )
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="night",
+        task_id="night_task",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="correct",
+    )
+    review_sessions.append_sweep_acknowledgement(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+        viewed_ranges=[{"start": 0, "end": 4}],
+    )
+    review_sessions.append_sweep_acknowledgement(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="night",
+        viewed_ranges=[{"start": 0, "end": 4}],
+    )
+    correction = review_corrections.ReviewCorrection(
+        case_id="day",
+        category=CATEGORY_FACE,
+        configuration_freeze_hash=stable_hash(freeze),
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (1, 2, 10, 12)),),
+        operation=review_corrections.OP_ADD,
+        reason="reviewed",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=0,
+        source_frame_start=0,
+        source_video_hash=day_manifest.source_video_hash or "",
+        task_id="day_task",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+    review_sessions.append_event(
+        session_dir,
+        event_type="manual_issue_created",
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+        task_id="manual_day",
+        before_state=None,
+        after_state={"task": {"case_id": "day", "review_task_id": "manual_day"}},
+        note="manual",
+        application_hashes={},
+    )
+    merged = review_workspace.canonical_merged_entity([day_a, day_b], session_dir=session_dir)
+    review_sessions.append_event(
+        session_dir,
+        event_type="entities_merged",
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+        task_id=None,
+        before_state={"entities": [day_a, day_b]},
+        after_state={"primary": merged, "retired_entity_ids": ["day_a", "day_b"]},
+        note="merge",
+        application_hashes={},
+    )
+    review_sessions.append_event(
+        session_dir,
+        event_type="entity_policy_changed",
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+        task_id=None,
+        before_state=merged,
+        after_state=merged | {"current_policy": privacy_entities.POLICY_KEEP_VISIBLE},
+        note="keep",
+        application_hashes={},
+    )
+    checkpoint, _event = review_working_state.create_checkpoint(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        name="Before restart",
+    )
+    mutated = review_working_state.derive_working_state(package, session_dir)
+    day_mutated_summary = review_working_state.normalized_case_active_state_summary(
+        package,
+        mutated,
+        "day",
+    )
+    night_mutated_summary = review_working_state.normalized_case_active_state_summary(
+        package,
+        mutated,
+        "night",
+    )
+
+    assert (
+        day_mutated_summary["normalized_state_hash"]
+        != day_baseline_summary["normalized_state_hash"]
+    )
+    assert day_mutated_summary["merged_entity_ids"] == [merged["entity_id"]]
+    assert day_mutated_summary["entity_count"] == 1
+    assert (
+        night_mutated_summary["normalized_state_hash"]
+        != night_baseline_summary["normalized_state_hash"]
+    )
+
+    restart_event, restarted = review_working_state.restart_review_workflow(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+    )
+    restarted_day_active = review_working_state.effective_case_entities(
+        registry["cases"]["day"], restarted
+    )
+    restarted_night_active = review_working_state.effective_case_entities(
+        registry["cases"]["night"], restarted
+    )
+
+    assert restart_event["event_type"] == "review_workflow_restarted"
+    assert "day_task" not in restarted["task_decisions"]
+    assert (
+        restarted["task_decisions"]["night_task"]["action"] == review_sessions.ACTION_LOOKS_CORRECT
+    )
+    assert "day" not in restarted["sweep_acknowledgements"]
+    assert "night" in restarted["sweep_acknowledgements"]
+    assert restarted["active_manual_tasks"] == []
+    assert restarted["active_correction_ids"] == [correction.correction_id]
+    assert [entity["entity_id"] for entity in restarted_day_active] == [merged["entity_id"]]
+    assert restarted_day_active[0]["current_policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+    assert restarted_night_active[0]["entity_id"] == "night_keep"
+    assert restarted_night_active[0]["current_policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+    assert checkpoint["checkpoint_uuid"] in {
+        item["checkpoint_uuid"] for item in restarted["checkpoints"]
+    }
+    pre_reset_day_summary = review_working_state.normalized_case_active_state_summary(
+        package,
+        restarted,
+        "day",
+    )
+
+    reset_event, reset = review_working_state.reset_to_automatic_baseline(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+    )
+    day_active = review_working_state.effective_case_entities(registry["cases"]["day"], reset)
+    night_active = review_working_state.effective_case_entities(registry["cases"]["night"], reset)
+
+    assert reset_event["event_type"] == "case_edits_reset_to_automatic_baseline"
+    assert (
+        reset_event["after_state"]["baseline_state_hashes"]["day"]
+        == day_baseline_summary["normalized_state_hash"]
+    )
+    assert (
+        reset_event["after_state"]["mutated_state_hashes"]["day"]
+        == pre_reset_day_summary["normalized_state_hash"]
+    )
+    assert "day_task" not in reset["task_decisions"]
+    assert reset["task_decisions"]["night_task"]["action"] == review_sessions.ACTION_LOOKS_CORRECT
+    assert "day" not in reset["sweep_acknowledgements"]
+    assert "night" in reset["sweep_acknowledgements"]
+    assert reset["active_manual_tasks"] == []
+    assert reset["active_correction_ids"] == []
+    assert [entity["entity_id"] for entity in day_active] == ["day_a", "day_b"]
+    assert night_active[0]["entity_id"] == "night_keep"
+    assert night_active[0]["current_policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+    assert (
+        review_working_state.normalized_case_active_state_summary(
+            package,
+            reset,
+            "day",
+        )["normalized_state_hash"]
+        == day_baseline_summary["normalized_state_hash"]
+    )
+    assert (
+        review_working_state.normalized_case_active_state_summary(
+            package,
+            reset,
+            "night",
+        )["normalized_state_hash"]
+        == night_mutated_summary["normalized_state_hash"]
+    )
+    automatic_regions = review_finalization.load_privacy_region_records(
+        package / "regions" / "day_current_regions.jsonl"
+    )
+    effective_regions, provenance = review_working_state.compute_effective_privacy_regions(
+        package,
+        session_dir,
+        case_id="day",
+    )
+    assert stable_hash([record.to_dict() for record in effective_regions]) == stable_hash(
+        [record.to_dict() for record in automatic_regions]
+    )
+    assert provenance["privacy_region_changes_by_cause"]["suppression_removed"] == 0
+    stale_latest = {
+        "label": "Latest reviewed",
+        "path": "sessions/stale/media/day/stale.mp4",
+        "role": "latest_reviewed",
+        "source_frame_end": 4,
+        "source_frame_start": 0,
+    }
+    review_sessions.append_event(
+        session_dir,
+        event_type="reviewed_media_materialization_completed",
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+        task_id=None,
+        before_state=None,
+        after_state={
+            "active_projection_hash": mutated["active_projection_hash"],
+            "case_id": "day",
+            "latest_reviewed": stale_latest,
+        },
+        note="stale materialization",
+        application_hashes={},
+    )
+    stale_guarded = review_working_state.derive_working_state(package, session_dir)
+    assert "day" not in stale_guarded["materialized_latest_reviewed"]
+    audit = json.loads((package / "reset_baseline_state_audit.json").read_text())
+    audit_event = audit["events"][-1]
+    assert audit_event["case_isolation"] == {"night": True}
+    assert audit_event["case_results"][0]["post_reset_equals_baseline"] is True
+    assert audit_event["case_results"][0]["entity_counts"] == {
+        "after_mutation": 1,
+        "after_reset": 2,
+        "before_mutation": 2,
+    }
+    assert audit_event["case_results"][0]["merged_entities"]["after_mutation"] == [
+        merged["entity_id"]
+    ]
+    assert audit_event["case_results"][0]["merged_entities"]["after_reset"] == []
+    assert checkpoint["checkpoint_uuid"] in {
+        item["checkpoint_uuid"] for item in reset["checkpoints"]
+    }
+
+    _checkpoint, _restore_event, restored = review_working_state.restore_checkpoint(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        checkpoint_uuid=checkpoint["checkpoint_uuid"],
+    )
+
+    assert restored["task_decisions"]["day_task"]["action"] == review_sessions.ACTION_LOOKS_CORRECT
+    assert "day" in restored["sweep_acknowledgements"]
+    assert restored["active_correction_ids"] == [correction.correction_id]
+    restored_day_active = review_working_state.effective_case_entities(
+        registry["cases"]["day"],
+        restored,
+    )
+    assert restored_day_active[0]["entity_id"] == merged["entity_id"]
+
+
+def test_case_versions_exposes_only_public_review_versions(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    roles = [
+        case_manifests.VideoRole(
+            label="Original",
+            path="media/synthetic/original_reference.mp4",
+            role="original",
+            sha256=None,
+            source_frame_end=4,
+            source_frame_start=0,
+        ),
+        case_manifests.VideoRole(
+            label="Current result",
+            path="media/synthetic/original_reference.mp4",
+            role="current_result",
+            sha256=None,
+            source_frame_end=4,
+            source_frame_start=0,
+        ),
+        case_manifests.VideoRole(
+            label="Correction preview",
+            path="media/synthetic/original_reference.mp4",
+            role="correction_preview",
+            sha256=None,
+            source_frame_end=4,
+            source_frame_start=0,
+        ),
+    ]
+    manifest = replace(manifest, video_roles=tuple(roles))
+    case_manifests.write_case_manifest(package / "cases" / "synthetic.json", manifest)
+
+    versions = review_working_state.case_versions(package, None, case_id="synthetic")["versions"]
+
+    assert [role["role"] for role in versions] == ["original", "automatic", "latest_reviewed"]
+    assert versions[1]["path"] == versions[2]["path"]
+
+
+def test_entity_registry_adds_source_backed_explicit_keep_face_track(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_review_entity_shell(package, "synthetic")
+    write_explicit_keep_face_policy(package, manifest, track_id=10)
+
+    audit = review_workspace.apply_review_entity_coverage_patch(package)
+    registry = json.loads((package / "review_entities.json").read_text(encoding="utf-8"))
+    entities = registry["cases"]["synthetic"]
+
+    assert audit["passed"] is True
+    assert audit["summary"]["before_counts"]["synthetic"] == 0
+    assert audit["summary"]["after_counts"]["synthetic"] == 1
+    assert audit["summary"]["entity_count_delta"]["synthetic"] == 1
+    assert audit["summary"]["explicit_keep_tracks_added"]["synthetic"][0]["track_id"] == "10"
+    assert len(entities) == 1
+    assert entities[0]["current_policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+    assert entities[0]["automatic_source_track_ids"] == ["10"]
+
+
+def test_entity_focus_overlay_audit_enriches_source_backed_keep_geometry(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_review_entity_shell(package, "synthetic")
+    write_explicit_keep_face_policy(package, manifest, track_id=10)
+    review_workspace.apply_review_entity_coverage_patch(package)
+    registry = json.loads((package / "review_entities.json").read_text(encoding="utf-8"))
+    entity = registry["cases"]["synthetic"][0]
+    entity.pop("representative_bbox", None)
+    registry["cases"]["synthetic"][0] = entity
+    write_json(package / "review_entities.json", registry)
+
+    audit = review_workspace.write_entity_focus_overlay_audit(package)
+    updated = json.loads((package / "review_entities.json").read_text(encoding="utf-8"))
+    enriched = updated["cases"]["synthetic"][0]
+
+    assert audit["summary"]["focus_ready_count"]["synthetic"] == 1
+    assert audit["summary"]["missing_geometry_count"]["synthetic"] == 0
+    assert audit["summary"]["enriched_entity_ids"]["synthetic"] == [entity["entity_id"]]
+    assert enriched["representative_source_frame"] == 2
+    assert enriched["representative_bbox"] == [22, 22, 56, 42]
+
+
+def test_entity_registry_fails_if_explicit_keep_track_stays_omitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_review_entity_shell(package, "synthetic")
+    write_explicit_keep_face_policy(package, manifest, track_id=10)
+
+    def broken_entity_payload(**_: object) -> dict[str, object]:
+        return {
+            "case_id": "synthetic",
+            "category": CATEGORY_FACE,
+            "current_policy": privacy_entities.POLICY_KEEP_VISIBLE,
+            "entity_id": "entity_without_track_lineage",
+            "label": "Person 01",
+        }
+
+    monkeypatch.setattr(
+        review_workspace,
+        "source_backed_keep_entity_payload",
+        broken_entity_payload,
+    )
+
+    with pytest.raises(ValueError, match="explicit keep-policy face tracks omitted"):
+        review_workspace.apply_review_entity_coverage_patch(package)
 
 
 def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_picture() -> None:
@@ -1668,6 +2645,52 @@ def test_render_correction_interval_preview(tmp_path: Path) -> None:
     assert (package / preview["original_preview"]).exists()
     assert (package / preview["corrected_preview"]).exists()
     assert preview["rendered_frames"] >= 1
+
+
+def test_materialization_job_manager_coalesces_queued_case_jobs(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    session_dir = package / "sessions" / "session_test"
+    session_dir.mkdir(parents=True)
+    manager = review_workspace.MaterializationJobManager(package)
+    manager.debounce_seconds = 60.0
+
+    first = manager.enqueue(
+        session_dir=session_dir,
+        case_id="day",
+        actor={"reviewer_id": "analyst"},
+        reason="first policy change",
+        accepted_revision="revision_a",
+        affected_entity_ids=["entity_a"],
+        requested_policy=privacy_entities.POLICY_KEEP_VISIBLE,
+    )
+    second = manager.enqueue(
+        session_dir=session_dir,
+        case_id="day",
+        actor={"reviewer_id": "analyst"},
+        reason="second policy change",
+        accepted_revision="revision_b",
+        affected_entity_ids=["entity_b"],
+        requested_policy=privacy_entities.POLICY_REDACT,
+    )
+
+    with manager.lock:
+        state = manager.case_state[("session_test", "day")]
+        timer = state.get("debounce_timer")
+        if timer is not None:
+            timer.cancel()
+        state["debounce_timer"] = None
+        first_job = manager.jobs[first["job_id"]]
+        second_job = manager.jobs[second["job_id"]]
+
+    assert first_job["status"] == "superseded"
+    assert first_job["superseded_by"] == second["job_id"]
+    assert second_job["status"] == "queued"
+    assert state["latest_requested"] == second["job_id"]
+    assert manager.metrics["day"]["accepted_state_mutations"] == 2
+    assert manager.metrics["day"]["jobs_coalesced"] == 1
+
+    audit = json.loads((package / "materialization_job_audit.json").read_text())
+    assert audit["cases"]["day"]["jobs_coalesced"] == 1
 
 
 def media_hash(path: Path) -> str:

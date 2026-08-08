@@ -28,6 +28,7 @@ export function ReviewTaskCard({ manifest, onDecision, onSelect, pending, select
         <span className={`badge ${task.bucket === 'Open' ? 'open' : task.bucket === 'Completed' ? 'done' : 'warn'}`}>
           {task.decision ? decisionLabel(task.decision.action) : task.bucket}
         </span>
+        {task.decision_state === 'resolved' ? <span className="badge done">Corrected</span> : null}
         {task.blocking ? <span className="badge warn">Blocking</span> : null}
       </div>
       <div className="task-actions" onClick={(event) => event.stopPropagation()}>

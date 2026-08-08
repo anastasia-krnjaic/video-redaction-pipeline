@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { Case, Task } from '../src/types/api';
-import { caseToSourceFrame, formatTime, fpsValue, frameToSeconds, sourceToCaseFrame, taskTimestamp } from '../src/utils/frame';
+import {
+  caseToSourceFrame,
+  formatTime,
+  fpsValue,
+  frameToSeconds,
+  sourceToCaseFrame,
+  taskTimestamp,
+  timelineRatioToFrame,
+} from '../src/utils/frame';
 
 const manifest: Case = {
   case_id: 'day',
@@ -39,5 +47,13 @@ describe('frame utilities', () => {
       what_to_inspect: 'Review',
     } satisfies Task;
     expect(taskTimestamp(manifest, task)).toBe('00:00:01');
+  });
+
+  it('maps timeline ratios to the nearest clamped case frame', () => {
+    expect(timelineRatioToFrame(manifest, 0.25)).toBe(75);
+    expect(timelineRatioToFrame(manifest, 0.5)).toBe(150);
+    expect(timelineRatioToFrame(manifest, 0.9)).toBe(269);
+    expect(timelineRatioToFrame(manifest, -1)).toBe(0);
+    expect(timelineRatioToFrame(manifest, 2)).toBe(299);
   });
 });

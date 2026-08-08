@@ -6,6 +6,8 @@
 
 Every archived version must preserve the implementation sources and configuration sources on which it was based. Archived versions must never be edited retroactively. Do not create a new archived version for spelling, grammar, or formatting corrections that do not change the documented system behavior.
 
+Final Review Frontend v1.3.1 packages are generated from `artifacts/final_pipeline_package_frontend_v1_3/` into `artifacts/final_pipeline_package_frontend_v1_3_1/`. Do not overwrite frozen package baselines. React owns presentation and draft interaction state; Python remains the source of truth for review tasks, entities, merges, object policies, corrections, checkpoints, materialization jobs, provenance, media serving, and finalization.
+
 A material system change includes any change to detector model or model version, model selection status, confidence thresholds, shared detection logic, track association, track confirmation criteria, interpolation or prediction rules, analyst decisions or manual override workflow, identity grouping, rendering eligibility, redaction rendering, audit records or manifests, output artifacts, evaluation methodology, benchmark clips, or production workflow.
 
 ## Ground-Truth Benchmark Rules

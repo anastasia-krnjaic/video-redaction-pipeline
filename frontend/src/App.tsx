@@ -20,10 +20,21 @@ export function App() {
   const [entityOverrides, setEntityOverrides] = useState<Record<string, EffectiveEntity>>({});
 
   useEffect(() => {
+    if (workspaceState.workingState) {
+      setEntityOverrides(
+        (workspaceState.workingState.object_policy_overrides || {}) as Record<string, EffectiveEntity>,
+      );
+      setManualTasks(
+        (Array.isArray(workspaceState.workingState.active_manual_tasks)
+          ? workspaceState.workingState.active_manual_tasks
+          : []) as Task[],
+      );
+      return;
+    }
     const derived = rebuildFromEvents(workspaceState.events);
     setManualTasks(derived.manualTasks);
     setEntityOverrides(derived.entityOverrides);
-  }, [workspaceState.events]);
+  }, [workspaceState.events, workspaceState.workingState]);
 
   const page = useMemo(() => {
     if (!workspaceState.workspace) return null;
@@ -45,6 +56,7 @@ export function App() {
     }
     return (
       <CaseReviewPage
+        key={route}
         attribution={workspaceState.attribution}
         caseId={route}
         corrections={workspaceState.corrections}
@@ -53,6 +65,7 @@ export function App() {
         events={workspaceState.events}
         manualTasks={manualTasks}
         session={workspaceState.session}
+        workingState={workspaceState.workingState}
         workspace={workspaceState.workspace}
         onCorrectionsChange={workspaceState.setCorrections}
         onDecisionsChange={workspaceState.setDecisions}
@@ -60,6 +73,7 @@ export function App() {
         onError={workspaceState.setError}
         onEventsChange={workspaceState.setEvents}
         onManualTasksChange={setManualTasks}
+        onWorkingStateChange={workspaceState.setWorkingState}
       />
     );
   }, [entityOverrides, manualTasks, route, workspaceState]);
@@ -132,6 +146,9 @@ export function App() {
         onRouteChange={(nextRoute: TopLevelRoute) => {
           workspaceState.setError(undefined);
           setRoute(nextRoute);
+          if (nextRoute === 'audit' && workspaceState.session) {
+            void workspaceState.refreshSession(workspaceState.session.session_id);
+          }
         }}
         onStartSession={startSession}
       >

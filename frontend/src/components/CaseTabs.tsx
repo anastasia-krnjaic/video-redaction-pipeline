@@ -4,7 +4,7 @@ const tabs: Array<{ route: TopLevelRoute; label: string }> = [
   { route: 'day', label: 'Day' },
   { route: 'night', label: 'Night' },
   { route: 'final', label: 'Final Results' },
-  { route: 'audit', label: 'Audit Trail' },
+  { route: 'audit', label: 'History' },
 ];
 
 interface Props {

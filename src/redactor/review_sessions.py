@@ -13,6 +13,7 @@ from redactor.review_corrections import ReviewCorrection, write_correction_jsonl
 
 SCHEMA_VERSION = "review_session.v1"
 EVENT_SCHEMA_VERSION = "review_session_event.v1"
+SESSION_LAYOUT_DIRS = ("state", "events", "corrections", "checkpoints", "media")
 
 ACTION_LOOKS_CORRECT = "looks_correct"
 ACTION_PRIVACY_LEAK = "privacy_leak"
@@ -124,6 +125,7 @@ def create_review_session(
     )
     session_dir = session_directory(package_root, session.session_id)
     session_dir.mkdir(parents=True, exist_ok=False)
+    ensure_session_layout(session_dir)
     write_json(session_dir / "review_session.json", session.to_dict())
     write_json(
         session_dir / "reviewer_attribution_current.json",
@@ -266,6 +268,7 @@ def append_correction_event(
         application_hashes={"configuration_freeze_hash": correction.configuration_freeze_hash},
     )
     write_correction_jsonl(session_dir / "corrections.jsonl", correction)
+    write_correction_jsonl(session_dir / "corrections" / "corrections.jsonl", correction)
     refresh_session_summary(session_dir)
     return event
 
@@ -322,9 +325,13 @@ def append_event(
         "timestamp_utc": media.utc_timestamp(),
     }
     payload["event_hash"] = stable_hash(payload)
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
     events_path = session_dir / "events.jsonl"
     with events_path.open("a", encoding="utf-8") as file:
-        file.write(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+        file.write(encoded)
+    ensure_session_layout(session_dir)
+    with (session_dir / "events" / "events.jsonl").open("a", encoding="utf-8") as file:
+        file.write(encoded)
     return payload
 
 
@@ -375,6 +382,11 @@ def load_current_decisions(session_dir: Path) -> dict[str, Any]:
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
     return dict(payload.get("decisions") or {})
+
+
+def ensure_session_layout(session_dir: Path) -> None:
+    for dirname in SESSION_LAYOUT_DIRS:
+        (session_dir / dirname).mkdir(parents=True, exist_ok=True)
 
 
 def refresh_session_summary(session_dir: Path) -> dict[str, Any]:

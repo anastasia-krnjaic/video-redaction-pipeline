@@ -140,6 +140,34 @@
       ],
       "type": "object"
     },
+    "BulkEntityPolicyAction": {
+      "additionalProperties": false,
+      "properties": {
+        "case_id": {
+          "type": "string"
+        },
+        "entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "policy": {
+          "enum": [
+            "redact",
+            "keep_visible",
+            "not_sensitive",
+            "review_required"
+          ]
+        }
+      },
+      "required": [
+        "case_id",
+        "entity_ids",
+        "policy"
+      ],
+      "type": "object"
+    },
     "Case": {
       "additionalProperties": true,
       "properties": {
@@ -214,6 +242,33 @@
         "source_path",
         "status",
         "video_roles"
+      ],
+      "type": "object"
+    },
+    "Checkpoint": {
+      "additionalProperties": true,
+      "properties": {
+        "checkpoint_uuid": {
+          "type": "string"
+        },
+        "created_at_utc": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "state_hash": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "checkpoint_uuid",
+        "created_at_utc",
+        "name",
+        "state_hash"
       ],
       "type": "object"
     },
@@ -319,6 +374,12 @@
             "null"
           ]
         },
+        "draft_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "frame_end": {
           "type": [
             "integer",
@@ -332,6 +393,12 @@
           ]
         },
         "latest_reviewed": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "preview_token": {
           "type": [
             "string",
             "null"
@@ -424,6 +491,17 @@
         },
         "privacy_action": {
           "type": "string"
+        },
+        "representative_bbox": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 4,
+          "minItems": 4,
+          "type": [
+            "array",
+            "null"
+          ]
         },
         "representative_case_frame": {
           "type": [
@@ -549,7 +627,8 @@
           "enum": [
             "redact",
             "keep_visible",
-            "not_sensitive"
+            "not_sensitive",
+            "review_required"
           ]
         }
       },
@@ -622,8 +701,160 @@
       ],
       "type": "object"
     },
+    "History": {
+      "additionalProperties": true,
+      "properties": {
+        "events": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "ok": {
+          "const": true
+        },
+        "schema_version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "events",
+        "ok",
+        "schema_version"
+      ],
+      "type": "object"
+    },
+    "MaterializationJob": {
+      "additionalProperties": true,
+      "properties": {
+        "accepted_working_state_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "affected_entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "case_id": {
+          "type": "string"
+        },
+        "completed_at_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "created_at_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "job_id": {
+          "type": "string"
+        },
+        "latest_reviewed": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MediaVersion"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "materialization": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "requested_policy": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "session_id": {
+          "type": "string"
+        },
+        "started_at_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "completed",
+            "failed",
+            "superseded"
+          ]
+        },
+        "superseded_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "working_state": {
+          "$ref": "#/definitions/WorkingState"
+        }
+      },
+      "required": [
+        "case_id",
+        "job_id",
+        "schema_version",
+        "status"
+      ],
+      "type": "object"
+    },
+    "MaterializationStatus": {
+      "additionalProperties": true,
+      "properties": {
+        "case_id": {
+          "type": "string"
+        },
+        "effective_regions_hash": {
+          "type": "string"
+        },
+        "latest_reviewed": {
+          "$ref": "#/definitions/MediaVersion"
+        },
+        "materialized": {
+          "type": "boolean"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "state_hash": {
+          "type": "string"
+        },
+        "video_sha256": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "case_id",
+        "latest_reviewed",
+        "materialized",
+        "schema_version"
+      ],
+      "type": "object"
+    },
     "MediaVersion": {
-      "additionalProperties": false,
+      "additionalProperties": true,
       "properties": {
         "label": {
           "type": "string"
@@ -636,6 +867,8 @@
             "original",
             "automatic",
             "current_result",
+            "correction_preview",
+            "checkpoint",
             "latest_reviewed",
             "final_reviewed"
           ]
@@ -738,6 +971,9 @@
         "summary": {
           "additionalProperties": true,
           "type": "object"
+        },
+        "working_state": {
+          "$ref": "#/definitions/WorkingState"
         }
       },
       "required": [
@@ -748,7 +984,8 @@
         "events",
         "ok",
         "session",
-        "summary"
+        "summary",
+        "working_state"
       ],
       "type": "object"
     },
@@ -940,6 +1177,93 @@
       },
       "type": "object"
     },
+    "WorkingState": {
+      "additionalProperties": true,
+      "properties": {
+        "active_correction_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "active_manual_tasks": {
+          "items": {
+            "$ref": "#/definitions/Task"
+          },
+          "type": "array"
+        },
+        "active_projection_hash": {
+          "type": "string"
+        },
+        "baseline": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "checkpoints": {
+          "items": {
+            "$ref": "#/definitions/Checkpoint"
+          },
+          "type": "array"
+        },
+        "current_event_chain_head": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "manual_corrections": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "materialized_latest_reviewed": {
+          "additionalProperties": {
+            "$ref": "#/definitions/MediaVersion"
+          },
+          "type": "object"
+        },
+        "object_policy_overrides": {
+          "additionalProperties": {
+            "$ref": "#/definitions/Entity"
+          },
+          "type": "object"
+        },
+        "schema_version": {
+          "type": "string"
+        },
+        "state_hash": {
+          "type": "string"
+        },
+        "suppressions": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "sweep_acknowledgements": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "task_decisions": {
+          "additionalProperties": true,
+          "type": "object"
+        }
+      },
+      "required": [
+        "baseline",
+        "current_event_chain_head",
+        "manual_corrections",
+        "materialized_latest_reviewed",
+        "object_policy_overrides",
+        "schema_version",
+        "state_hash",
+        "task_decisions"
+      ],
+      "type": "object"
+    },
     "WorkspaceSummary": {
       "additionalProperties": false,
       "properties": {
@@ -1004,8 +1328,20 @@
     "GET /api/v1/cases/{case_id}": {
       "response": "#/definitions/Case"
     },
+    "GET /api/v1/cases/{case_id}/versions?session_id=...": {
+      "response": "#/definitions/MediaVersion"
+    },
+    "GET /api/v1/checkpoints?session_id=...": {
+      "response": "#/definitions/Checkpoint"
+    },
     "GET /api/v1/entities": {
       "response": "#/definitions/EntityIndex"
+    },
+    "GET /api/v1/history?session_id=...": {
+      "response": "#/definitions/History"
+    },
+    "GET /api/v1/materialization-jobs/{job_id}": {
+      "response": "#/definitions/MaterializationJob"
     },
     "GET /api/v1/schema": {
       "response": "#/definitions/FinalReviewWorkspaceApiSchema"
@@ -1013,13 +1349,39 @@
     "GET /api/v1/session-state?session_id=...": {
       "response": "#/definitions/SessionState"
     },
+    "GET /api/v1/working-state?session_id=...": {
+      "response": "#/definitions/WorkingState"
+    },
     "GET /api/v1/workspace": {
       "response": "#/definitions/WorkspaceSummary"
     },
     "GET /api/v1/workspace/summary": {
       "response": "#/definitions/WorkspaceSummary"
     },
+    "POST /api/v1/bulk-object-policy": {
+      "request": "#/definitions/BulkEntityPolicyAction",
+      "response": "#/definitions/MaterializationJob"
+    },
+    "POST /api/v1/checkpoints": {
+      "response": "#/definitions/Checkpoint"
+    },
+    "POST /api/v1/checkpoints/delete": {
+      "response": "#/definitions/Checkpoint"
+    },
+    "POST /api/v1/checkpoints/reset": {
+      "response": "#/definitions/WorkingState"
+    },
+    "POST /api/v1/checkpoints/restart-review": {
+      "response": "#/definitions/WorkingState"
+    },
+    "POST /api/v1/checkpoints/restore": {
+      "response": "#/definitions/WorkingState"
+    },
     "POST /api/v1/corrections": {
+      "request": "#/definitions/Correction",
+      "response": "#/definitions/CorrectionPreview"
+    },
+    "POST /api/v1/corrections/preview": {
       "request": "#/definitions/Correction",
       "response": "#/definitions/CorrectionPreview"
     },
@@ -1034,6 +1396,13 @@
     },
     "POST /api/v1/finalize": {
       "response": "#/definitions/FinalizationStatus"
+    },
+    "POST /api/v1/materialization-jobs/retry": {
+      "response": "#/definitions/MaterializationJob"
+    },
+    "POST /api/v1/object-policy": {
+      "request": "#/definitions/EntityPolicyAction",
+      "response": "#/definitions/MaterializationJob"
     },
     "POST /api/v1/sessions": {
       "response": "#/definitions/Session"

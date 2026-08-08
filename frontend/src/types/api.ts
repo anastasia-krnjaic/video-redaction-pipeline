@@ -39,10 +39,11 @@ export interface Case {
 export interface MediaVersion {
   "label": string;
   "path": string;
-  "role": "original" | "automatic" | "current_result" | "latest_reviewed" | "final_reviewed";
+  "role": "original" | "automatic" | "current_result" | "correction_preview" | "checkpoint" | "latest_reviewed" | "final_reviewed";
   "sha256"?: string | null;
   "source_frame_end": number;
   "source_frame_start": number;
+  [key: string]: unknown;
 }
 
 export interface TaskCollection {
@@ -112,6 +113,7 @@ export interface SessionState {
   "ok": true;
   "session": Session;
   "summary": Record<string, unknown>;
+  "working_state": WorkingState;
 }
 
 export type Attribution = {
@@ -154,6 +156,7 @@ export interface Entity {
   "possible_duplicate"?: boolean;
   "possible_duplicate_suggestions"?: Record<string, unknown>[];
   "privacy_action"?: string;
+  "representative_bbox"?: number[] | null;
   "representative_case_frame"?: number | null;
   "representative_source_frame": number | null;
   "representative_thumbnail_path"?: string | null;
@@ -165,7 +168,13 @@ export interface Entity {
 export interface EntityPolicyAction {
   "case_id": string;
   "entity_id": string;
-  "policy": "redact" | "keep_visible" | "not_sensitive";
+  "policy": "redact" | "keep_visible" | "not_sensitive" | "review_required";
+}
+
+export interface BulkEntityPolicyAction {
+  "case_id": string;
+  "entity_ids": string[];
+  "policy": "redact" | "keep_visible" | "not_sensitive" | "review_required";
 }
 
 export interface EntityMergeCandidate {
@@ -206,9 +215,75 @@ export interface Correction {
 
 export interface CorrectionPreview {
   "corrected_preview"?: string | null;
+  "draft_hash"?: string | null;
   "frame_end"?: number | null;
   "frame_start"?: number | null;
   "latest_reviewed"?: string | null;
+  "preview_token"?: string | null;
+  [key: string]: unknown;
+}
+
+export interface WorkingState {
+  "active_correction_ids"?: string[];
+  "active_manual_tasks"?: Task[];
+  "active_projection_hash"?: string;
+  "baseline": Record<string, unknown>;
+  "checkpoints"?: Checkpoint[];
+  "current_event_chain_head": string | null;
+  "manual_corrections": Record<string, unknown>[];
+  "materialized_latest_reviewed": Record<string, MediaVersion>;
+  "object_policy_overrides": Record<string, Entity>;
+  "schema_version": string;
+  "state_hash": string;
+  "suppressions"?: Record<string, unknown>[];
+  "sweep_acknowledgements"?: Record<string, unknown>;
+  "task_decisions": Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface MaterializationStatus {
+  "case_id": string;
+  "effective_regions_hash"?: string;
+  "latest_reviewed": MediaVersion;
+  "materialized": boolean;
+  "schema_version": string;
+  "state_hash"?: string;
+  "video_sha256"?: string;
+  [key: string]: unknown;
+}
+
+export interface MaterializationJob {
+  "accepted_working_state_revision"?: string | null;
+  "affected_entity_ids"?: string[];
+  "case_id": string;
+  "completed_at_utc"?: string | null;
+  "created_at_utc"?: string | null;
+  "error"?: string | null;
+  "job_id": string;
+  "latest_reviewed"?: MediaVersion | null;
+  "materialization"?: Record<string, unknown>;
+  "requested_policy"?: string | null;
+  "session_id"?: string;
+  "started_at_utc"?: string | null;
+  "status": "queued" | "running" | "completed" | "failed" | "superseded";
+  "superseded_by"?: string | null;
+  "working_state"?: WorkingState;
+  [key: string]: unknown;
+}
+
+export interface Checkpoint {
+  "checkpoint_uuid": string;
+  "created_at_utc": string;
+  "name": string;
+  "note"?: string;
+  "state_hash": string;
+  [key: string]: unknown;
+}
+
+export interface History {
+  "events": Record<string, unknown>[];
+  "ok": true;
+  "schema_version": string;
   [key: string]: unknown;
 }
 

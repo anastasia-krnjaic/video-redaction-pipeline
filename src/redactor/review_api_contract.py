@@ -111,7 +111,7 @@ def final_review_workspace_schema() -> dict[str, Any]:
             },
             "MediaVersion": {
                 "type": "object",
-                "additionalProperties": False,
+                "additionalProperties": True,
                 "required": ["label", "path", "role", "source_frame_start", "source_frame_end"],
                 "properties": {
                     "label": {"type": "string"},
@@ -121,6 +121,8 @@ def final_review_workspace_schema() -> dict[str, Any]:
                             "original",
                             "automatic",
                             "current_result",
+                            "correction_preview",
+                            "checkpoint",
                             "latest_reviewed",
                             "final_reviewed",
                         ]
@@ -229,6 +231,7 @@ def final_review_workspace_schema() -> dict[str, Any]:
                     "ok",
                     "session",
                     "summary",
+                    "working_state",
                 ],
                 "properties": {
                     "attribution": {"$ref": "#/definitions/Attribution"},
@@ -242,6 +245,7 @@ def final_review_workspace_schema() -> dict[str, Any]:
                     "ok": {"const": True},
                     "session": {"$ref": "#/definitions/Session"},
                     "summary": dict_value,
+                    "working_state": {"$ref": "#/definitions/WorkingState"},
                 },
             },
             "Attribution": {
@@ -307,6 +311,12 @@ def final_review_workspace_schema() -> dict[str, Any]:
                     "possible_duplicate_suggestions": {"type": "array", "items": dict_value},
                     "privacy_action": {"type": "string"},
                     "representative_case_frame": integer_or_null,
+                    "representative_bbox": {
+                        "type": ["array", "null"],
+                        "items": {"type": "number"},
+                        "minItems": 4,
+                        "maxItems": 4,
+                    },
                     "representative_source_frame": integer_or_null,
                     "representative_thumbnail_path": string_or_null,
                     "review_entity_state": {"type": "string"},
@@ -320,7 +330,21 @@ def final_review_workspace_schema() -> dict[str, Any]:
                 "properties": {
                     "case_id": {"type": "string"},
                     "entity_id": {"type": "string"},
-                    "policy": {"enum": ["redact", "keep_visible", "not_sensitive"]},
+                    "policy": {
+                        "enum": ["redact", "keep_visible", "not_sensitive", "review_required"]
+                    },
+                },
+            },
+            "BulkEntityPolicyAction": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["case_id", "entity_ids", "policy"],
+                "properties": {
+                    "case_id": {"type": "string"},
+                    "entity_ids": {"type": "array", "items": {"type": "string"}},
+                    "policy": {
+                        "enum": ["redact", "keep_visible", "not_sensitive", "review_required"]
+                    },
                 },
             },
             "EntityMergeCandidate": {
@@ -398,9 +422,110 @@ def final_review_workspace_schema() -> dict[str, Any]:
                 "additionalProperties": True,
                 "properties": {
                     "corrected_preview": string_or_null,
+                    "draft_hash": string_or_null,
                     "frame_end": integer_or_null,
                     "frame_start": integer_or_null,
                     "latest_reviewed": string_or_null,
+                    "preview_token": string_or_null,
+                },
+            },
+            "WorkingState": {
+                "type": "object",
+                "additionalProperties": True,
+                "required": [
+                    "baseline",
+                    "current_event_chain_head",
+                    "manual_corrections",
+                    "materialized_latest_reviewed",
+                    "object_policy_overrides",
+                    "schema_version",
+                    "state_hash",
+                    "task_decisions",
+                ],
+                "properties": {
+                    "active_correction_ids": {"type": "array", "items": {"type": "string"}},
+                    "active_manual_tasks": {
+                        "type": "array",
+                        "items": {"$ref": "#/definitions/Task"},
+                    },
+                    "active_projection_hash": {"type": "string"},
+                    "baseline": dict_value,
+                    "checkpoints": {"type": "array", "items": {"$ref": "#/definitions/Checkpoint"}},
+                    "current_event_chain_head": string_or_null,
+                    "manual_corrections": array_value,
+                    "materialized_latest_reviewed": {
+                        "type": "object",
+                        "additionalProperties": {"$ref": "#/definitions/MediaVersion"},
+                    },
+                    "object_policy_overrides": {
+                        "type": "object",
+                        "additionalProperties": {"$ref": "#/definitions/Entity"},
+                    },
+                    "schema_version": {"type": "string"},
+                    "state_hash": {"type": "string"},
+                    "suppressions": array_value,
+                    "sweep_acknowledgements": dict_value,
+                    "task_decisions": dict_value,
+                },
+            },
+            "MaterializationStatus": {
+                "type": "object",
+                "additionalProperties": True,
+                "required": ["case_id", "latest_reviewed", "materialized", "schema_version"],
+                "properties": {
+                    "case_id": {"type": "string"},
+                    "effective_regions_hash": {"type": "string"},
+                    "latest_reviewed": {"$ref": "#/definitions/MediaVersion"},
+                    "materialized": {"type": "boolean"},
+                    "schema_version": {"type": "string"},
+                    "state_hash": {"type": "string"},
+                    "video_sha256": {"type": "string"},
+                },
+            },
+            "MaterializationJob": {
+                "type": "object",
+                "additionalProperties": True,
+                "required": ["case_id", "job_id", "schema_version", "status"],
+                "properties": {
+                    "accepted_working_state_revision": string_or_null,
+                    "affected_entity_ids": {"type": "array", "items": {"type": "string"}},
+                    "case_id": {"type": "string"},
+                    "completed_at_utc": string_or_null,
+                    "created_at_utc": string_or_null,
+                    "error": string_or_null,
+                    "job_id": {"type": "string"},
+                    "latest_reviewed": {
+                        "anyOf": [{"$ref": "#/definitions/MediaVersion"}, {"type": "null"}]
+                    },
+                    "materialization": dict_value,
+                    "requested_policy": string_or_null,
+                    "session_id": {"type": "string"},
+                    "started_at_utc": string_or_null,
+                    "status": {"enum": ["queued", "running", "completed", "failed", "superseded"]},
+                    "superseded_by": string_or_null,
+                    "working_state": {"$ref": "#/definitions/WorkingState"},
+                },
+            },
+            "Checkpoint": {
+                "type": "object",
+                "additionalProperties": True,
+                "required": ["checkpoint_uuid", "created_at_utc", "name", "state_hash"],
+                "properties": {
+                    "checkpoint_uuid": {"type": "string"},
+                    "created_at_utc": {"type": "string"},
+                    "name": {"type": "string"},
+                    "note": {"type": "string"},
+                    "state_hash": {"type": "string"},
+                },
+            },
+            "History": {
+                "type": "object",
+                "additionalProperties": True,
+                "required": ["events", "ok", "schema_version"],
+                "properties": {
+                    "events": {"type": "array", "items": dict_value},
+                    "ok": {"const": True},
+                    "schema_version": {"type": "string"},
                 },
             },
             "AuditEvent": {
@@ -460,13 +585,42 @@ def final_review_workspace_schema() -> dict[str, Any]:
             "GET /api/v1/cases/{case_id}": {"response": "#/definitions/Case"},
             "GET /api/v1/entities": {"response": "#/definitions/EntityIndex"},
             "GET /api/v1/session-state?session_id=...": {"response": "#/definitions/SessionState"},
+            "GET /api/v1/working-state?session_id=...": {"response": "#/definitions/WorkingState"},
+            "GET /api/v1/history?session_id=...": {"response": "#/definitions/History"},
+            "GET /api/v1/checkpoints?session_id=...": {"response": "#/definitions/Checkpoint"},
+            "GET /api/v1/materialization-jobs/{job_id}": {
+                "response": "#/definitions/MaterializationJob"
+            },
+            "GET /api/v1/cases/{case_id}/versions?session_id=...": {
+                "response": "#/definitions/MediaVersion"
+            },
             "POST /api/v1/sessions": {"response": "#/definitions/Session"},
             "POST /api/v1/decisions": {"request": "#/definitions/TaskDecision"},
+            "POST /api/v1/object-policy": {
+                "request": "#/definitions/EntityPolicyAction",
+                "response": "#/definitions/MaterializationJob",
+            },
+            "POST /api/v1/bulk-object-policy": {
+                "request": "#/definitions/BulkEntityPolicyAction",
+                "response": "#/definitions/MaterializationJob",
+            },
             "POST /api/v1/entity-events": {"request": "#/definitions/EntityPolicyAction"},
             "POST /api/v1/entities/merge": {"request": "#/definitions/EntityMergeEvent"},
             "POST /api/v1/corrections": {
                 "request": "#/definitions/Correction",
                 "response": "#/definitions/CorrectionPreview",
+            },
+            "POST /api/v1/corrections/preview": {
+                "request": "#/definitions/Correction",
+                "response": "#/definitions/CorrectionPreview",
+            },
+            "POST /api/v1/checkpoints": {"response": "#/definitions/Checkpoint"},
+            "POST /api/v1/checkpoints/restore": {"response": "#/definitions/WorkingState"},
+            "POST /api/v1/checkpoints/restart-review": {"response": "#/definitions/WorkingState"},
+            "POST /api/v1/checkpoints/reset": {"response": "#/definitions/WorkingState"},
+            "POST /api/v1/checkpoints/delete": {"response": "#/definitions/Checkpoint"},
+            "POST /api/v1/materialization-jobs/retry": {
+                "response": "#/definitions/MaterializationJob"
             },
             "POST /api/v1/finalize": {"response": "#/definitions/FinalizationStatus"},
         },

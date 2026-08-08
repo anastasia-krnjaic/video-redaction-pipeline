@@ -1,5 +1,24 @@
 # System Overview Changelog
 
+## v032 — 2026-08-07
+
+Implemented Final Review Frontend v1.3.1 correctness fixes:
+
+- documented `artifacts/final_pipeline_package_frontend_v1_3_1/` as the current React package generated from the preserved v1.3 reference package;
+- made Restart case review a case-scoped active projection reset while preserving append-only History, checkpoints, and the other case;
+- recorded debounced/coalesced Latest reviewed materialization jobs with stale-revision protection and a materialization audit artifact;
+- limited normal video selectors to Original, Automatic, and Latest reviewed, with correction previews remaining transient;
+- documented guided Manual redaction interpolation with exact start/end source-frame keyframes and stale keyframe pruning.
+
+## v031 — 2026-08-07
+
+Implemented Final Review Frontend v1.3 workflow fixes:
+
+- documented `artifacts/final_pipeline_package_frontend_v1_3/` as the current React package generated from the accepted v1.2 package baseline;
+- recorded persisted review-task navigation and auto-advance after saved Correct, Needs correction, and Unsure decisions;
+- documented backend-owned same-category entity merges, temporary source-bbox focus visualization, and entity-policy materialization jobs;
+- added checkpoint tombstone deletion and source-frame-keyed Manual redaction modes for Single frame, Fixed box across interval, and Interpolate between keyframes.
+
 ## v030 — 2026-08-07
 
 Implemented Final Review Frontend Foundation v1:

@@ -13,6 +13,12 @@ local.env
 # Generated artifacts
 artifacts/*
 !artifacts/.gitkeep
+frontend/dist/
+frontend/test-results/
+frontend/playwright-report/
+node_modules/
+frontend/node_modules/
+*.tsbuildinfo
 
 # Local model files
 models/**

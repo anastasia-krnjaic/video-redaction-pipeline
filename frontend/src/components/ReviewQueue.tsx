@@ -1,10 +1,10 @@
-import { useMemo, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import type { Case } from '../types/api';
 import type { QueueBucket, TaskWithDecision } from '../types/domain';
 import { bucketCounts } from '../state/reviewState';
 import { ReviewTaskCard } from './ReviewTaskCard';
 
-const buckets: QueueBucket[] = ['Open', 'Needs correction', 'Unsure / Escalated', 'Completed', 'Resolved'];
+const buckets: QueueBucket[] = ['Open', 'Needs correction', 'Unsure / Escalated', 'Completed'];
 
 interface Props {
   bucket: QueueBucket;
@@ -12,10 +12,10 @@ interface Props {
   pendingTaskId?: string;
   selectedTaskId?: string | null;
   tasks: TaskWithDecision[];
+  openComplete?: boolean;
   onBucketChange: (bucket: QueueBucket) => void;
   onDecision: (task: TaskWithDecision, action: string) => void;
   onSelectTask: (task: TaskWithDecision) => void;
-  onOpenEntities: () => void;
 }
 
 export function ReviewQueue({
@@ -23,8 +23,8 @@ export function ReviewQueue({
   manifest,
   onBucketChange,
   onDecision,
-  onOpenEntities,
   onSelectTask,
+  openComplete,
   pendingTaskId,
   selectedTaskId,
   tasks,
@@ -32,6 +32,14 @@ export function ReviewQueue({
   const listRef = useRef<HTMLDivElement>(null);
   const counts = useMemo(() => bucketCounts(tasks), [tasks]);
   const visibleTasks = tasks.filter((task) => task.bucket === bucket);
+
+  useEffect(() => {
+    if (!selectedTaskId) return;
+    const selectedCard = Array.from(listRef.current?.querySelectorAll<HTMLElement>('.task-card') || []).find(
+      (card) => card.dataset.taskId === selectedTaskId,
+    );
+    selectedCard?.scrollIntoView({ block: 'nearest' });
+  }, [bucket, selectedTaskId]);
 
   return (
     <aside className="side-panel" aria-label={`${manifest.display_name} review queue`}>
@@ -42,13 +50,10 @@ export function ReviewQueue({
             <span>Open</span>
           </div>
           <div className="stat">
-            <strong>{counts['Needs correction'] + counts['Unsure / Escalated']}</strong>
-            <span>Needs attention</span>
+            <strong>{counts.Completed}</strong>
+            <span>Completed</span>
           </div>
         </div>
-        <button type="button" onClick={onOpenEntities}>
-          Entities
-        </button>
       </div>
       <div className="filter-row" role="tablist" aria-label="Review queue buckets">
         {buckets.map((item) => (
@@ -75,6 +80,11 @@ export function ReviewQueue({
               onSelect={onSelectTask}
             />
           ))
+        ) : openComplete && bucket === 'Open' ? (
+          <div className="completion-state" role="status">
+            <strong>All open review items are complete.</strong>
+            <p className="muted">Next: review Needs correction, review Unsure / Escalated, complete the full-video sweep, or check finalization.</p>
+          </div>
         ) : (
           <p className="muted empty-state">No tasks in this bucket.</p>
         )}

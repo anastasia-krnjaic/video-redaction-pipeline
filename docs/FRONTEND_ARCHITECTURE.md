@@ -28,13 +28,19 @@ The frozen reference package remains:
 artifacts/final_pipeline_package_v2_3_4/
 ```
 
-The React package is generated at:
+The current React package is generated at:
 
 ```text
-artifacts/final_pipeline_package_frontend_v1/
+artifacts/final_pipeline_package_frontend_v1_3/
 ```
 
-For exact backend parity, the React package copies the frozen v2.3.4 backend package as its base, then writes:
+Frontend v1.3.1 is generated at:
+
+```text
+artifacts/final_pipeline_package_frontend_v1_3_1/
+```
+
+For backend/privacy parity, the v1.3.1 package copies the accepted v1.3 React package as its base, then writes:
 
 ```text
 app/                         React/Vite SPA
@@ -85,6 +91,14 @@ The React app is split into:
 - `CorrectionEditor`.
 
 Frame logic is centralized in `useVideoController` and `src/utils/frame.ts`.
+
+## Review State And Materialization
+
+Review decisions, object policies, entity merges, corrections, checkpoints, and History remain Python-owned append-only session state. React may optimistically show an object policy only after the backend accepts the event.
+
+Entity policy changes, correction saves, checkpoint restores, and Restart case review enqueue Python materialization jobs. The server serializes jobs per case, debounces rapid accepted mutations, coalesces queued work to the newest active projection revision, caches already materialized state hashes, and rejects stale render results. React polls `/api/v1/materialization-jobs/{job_id}` and swaps in a revisioned Latest reviewed media URL only after the job completes.
+
+Entity merges are not assembled in React. The merge endpoint creates one canonical merged review entity, retires the selected aliases, preserves child/source evidence, and records the hash-chained event.
 
 ## Media
 

@@ -15,25 +15,25 @@ It gives the simplest visual walkthrough: what the system does, what the current
 For review, serve:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_frontend_v1 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_frontend_v1_3_3 --open
 ```
 
 The workspace shows one case at a time:
 
 - Original video context
 - Current combined result where source-compatible
-- One large versioned player with Original / Automatic / Latest reviewed
+- One large versioned player with exactly Original / Automatic / Latest reviewed
 - Timeline-linked guided risk-review tasks
 - Full-video sweep controls
 - Compact object list with representative Person/Plate thumbnails
-- Audit trail and local session export
+- History and local session export
 
 The React app loads under `/app/day`; the frozen generated v2.3.4 workspace is
 available at `/legacy.html` as a fallback. Both use the same Python-owned
-backend package data, media Range serving, sessions, corrections, audit trail,
+backend package data, media Range serving, sessions, corrections, History,
 and finalization gates.
 
-The Day and Night cases each show only Original and Current result by default. The Day case uses a canonical interval from `artifacts/day_primary.mp4`; its Current result is rendered from lineage-proven frozen face and plate evidence rather than concatenated old clips.
+The Day and Night cases each show Original, Automatic, and Latest reviewed. When there are no active reviewer changes, Latest reviewed resolves to the Automatic baseline. The Day case uses a canonical interval from `artifacts/day_primary.mp4`; its Automatic result is rendered from lineage-proven frozen face and plate evidence rather than concatenated old clips.
 
 Click **Start review** to create a local anonymous session. Reviewer name is
 requested only when exporting or finalizing. Use the app's fullscreen controls,
@@ -45,7 +45,7 @@ visible.
 - **Original:** unredacted source context.
 - **Face-only reviewed reference:** current accepted face reference output.
 - **Plate-only automatic preview:** accepted plate tracks rendered automatically. This is review-required, not final.
-- **Current result:** compatible face and plate regions rendered together for review where available. This remains non-final while blockers exist.
+- **Automatic:** compatible face and plate regions rendered together for review where available. This remains non-final while blockers exist.
 - **Final reviewed:** appears only after every required task is green, corrections are verified, sweep acknowledgement exists, hashes match, and media validation passes.
 
 ## Detector, Tracking, Review, And Rendering

@@ -43,7 +43,7 @@ The frozen backend reference package is:
 artifacts/final_pipeline_package_v2_3_4/
 ```
 
-Generate the React frontend package without changing backend/privacy artifacts:
+Generate the current React frontend package without changing backend/privacy artifacts:
 
 ```bash
 cd frontend
@@ -51,8 +51,9 @@ npm ci
 npm run build
 cd ..
 PYTHONPATH=src .venv/bin/python -m redactor.cli build-final-review-workspace \
-  --output-dir artifacts/final_pipeline_package_frontend_v1 \
+  --output-dir artifacts/final_pipeline_package_frontend_v1_3_3 \
   --frontend react \
+  --react-reference-package artifacts/final_pipeline_package_frontend_v1_3_2 \
   --skip-frontend-build \
   --overwrite
 ```
@@ -61,10 +62,12 @@ Serve it locally:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m redactor.cli serve-final-review-workspace \
-  artifacts/final_pipeline_package_frontend_v1 --open
+  artifacts/final_pipeline_package_frontend_v1_3_3 --open
 ```
 
 React assets are served from `/app/`; the legacy generated workspace remains available at `/legacy.html`. The stable API contract is checked in at `docs/api/final_review_workspace_v1.schema.json` and served at `/api/v1/schema`.
+
+Frontend v1.3.3 keeps the v1.3.2 backend/media baseline intact while fixing destructive Reset all edits restoration for entity merges/policies and reserving a fixed entity-card operation status slot so pending media updates do not shift the Review objects modal layout.
 
 Frontend details:
 

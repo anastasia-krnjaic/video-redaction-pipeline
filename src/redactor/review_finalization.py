@@ -31,7 +31,6 @@ from redactor.review_sessions import (
     BLOCKING_ACTIONS,
     GREEN_ACTIONS,
     append_event,
-    load_current_decisions,
     load_events,
     validate_event_hash_chain,
 )
@@ -49,14 +48,16 @@ def finalization_blockers(
     blockers: list[str] = []
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
+    from redactor import review_working_state
+
+    working_state = review_working_state.derive_working_state(package_root, session_dir)
     tasks_payload = load_json(package_root / "reviewer_tasks.json")
     tasks = [
         task
         for task in tasks_payload.get("tasks", [])
         if task.get("case_id") == case_id and not task.get("technical_only")
     ]
-    decisions = load_current_decisions(session_dir)
-    events = load_events(session_dir)
+    decisions = dict(working_state.get("task_decisions") or {})
     for task in tasks:
         task_id = str(task["review_task_id"])
         decision = decisions.get(task_id)
@@ -73,10 +74,10 @@ def finalization_blockers(
         if task.get("correction_required") and action not in GREEN_ACTIONS:
             blockers.append(f"{task_id}: correction has not been verified")
 
-    for event in events:
-        if event.get("case_id") != case_id or event.get("event_type") != "manual_issue_created":
+    for task in list(working_state.get("active_manual_tasks") or []):
+        if dict(task).get("case_id") != case_id:
             continue
-        task = dict((event.get("after_state") or {}).get("task") or {})
+        task = dict(task)
         task_id = str(task.get("review_task_id") or "")
         if not task_id:
             blockers.append(f"{case_id}: manual issue is missing a task id")
@@ -88,10 +89,10 @@ def finalization_blockers(
         if str(decision.get("action")) not in GREEN_ACTIONS:
             blockers.append(f"{task_id}: reviewer-added issue remains unresolved")
 
-    if not has_sweep_acknowledgement(session_dir, case_id):
+    if case_id not in dict(working_state.get("sweep_acknowledgements") or {}):
         blockers.append(f"{case_id}: full-video sweep has not been acknowledged")
 
-    blockers.extend(object_policy_blockers(events, decisions, case_id=case_id))
+    blockers.extend(object_policy_blockers(working_state, decisions, case_id=case_id))
 
     chain = validate_event_hash_chain(session_dir)
     if not chain["passed"]:
@@ -126,10 +127,17 @@ def finalization_blockers(
     if not region_path.exists():
         blockers.append(f"{case_id}: current privacy-region provenance is missing")
 
-    corrections = latest_corrections(
-        load_corrections_jsonl(session_dir / "corrections.jsonl"),
-        case_id=case_id,
+    active_correction_ids = set(
+        str(item) for item in list(working_state.get("active_correction_ids") or [])
     )
+    corrections = [
+        correction
+        for correction in latest_corrections(
+            load_corrections_jsonl(session_dir / "corrections.jsonl"),
+            case_id=case_id,
+        )
+        if correction.correction_id in active_correction_ids
+    ]
     for correction in corrections:
         blockers.extend(correction_verification_blockers(correction))
 
@@ -143,29 +151,25 @@ def finalization_blockers(
 
 
 def object_policy_blockers(
-    events: list[dict[str, Any]],
+    working_state: dict[str, Any],
     decisions: dict[str, dict[str, Any]],
     *,
     case_id: str,
 ) -> list[str]:
-    latest_policy: dict[str, dict[str, Any]] = {}
-    for event in events:
-        if event.get("case_id") != case_id:
-            continue
-        if event.get("event_type") != "entity_policy_changed":
-            continue
-        entity_id = str((event.get("after_state") or {}).get("entity_id") or "")
-        if not entity_id:
-            entity_id = str((event.get("after_state") or {}).get("object_uuid") or "")
-        if not entity_id:
-            continue
-        latest_policy[entity_id] = event
-
     blockers: list[str] = []
-    for entity_id, event in sorted(latest_policy.items()):
-        after = dict(event.get("after_state") or {})
+    for entity_id, raw_entity in sorted(
+        dict(working_state.get("object_policy_overrides") or {}).items()
+    ):
+        after = dict(raw_entity or {})
+        if after.get("current_status") == "merged":
+            continue
+        if str(after.get("case_id") or "") != case_id:
+            continue
+        if after.get("reviewer_override") is not True:
+            continue
         policy = str(
-            after.get("default_privacy_policy")
+            after.get("current_policy")
+            or after.get("default_privacy_policy")
             or after.get("privacy_action")
             or after.get("policy")
             or ""
@@ -216,18 +220,25 @@ def finalize_reviewed_case(
     if source_path is None:
         raise ValueError("case source path is required for finalization")
 
-    base_regions_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
-    base_regions = load_privacy_region_records(base_regions_path)
-    corrections = latest_corrections(
-        load_corrections_jsonl(session_dir / "corrections.jsonl"),
+    from redactor import review_working_state
+
+    final_regions, provenance = review_working_state.compute_effective_privacy_regions(
+        package_root,
+        session_dir,
         case_id=case_id,
     )
-    final_regions, provenance = apply_corrections(
-        base_regions,
-        corrections,
-        case_id=case_id,
-        source_frame_offset=manifest.source_frame_start,
+    working_state = review_working_state.derive_working_state(package_root, session_dir)
+    active_correction_ids = set(
+        str(item) for item in list(working_state.get("active_correction_ids") or [])
     )
+    corrections = [
+        correction
+        for correction in latest_corrections(
+            load_corrections_jsonl(session_dir / "corrections.jsonl"),
+            case_id=case_id,
+        )
+        if correction.correction_id in active_correction_ids
+    ]
     regions_by_frame = privacy_rendering.regions_by_frame(final_regions)
 
     case_media_dir = package_root / "media" / case_id

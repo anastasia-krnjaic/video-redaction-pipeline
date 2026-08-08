@@ -42,3 +42,17 @@ export function taskTimestamp(manifest: Case, task: Task): string {
 export function sourceSpan(task: Pick<Task, 'source_frame_start' | 'source_frame_end'>): string {
   return `${task.source_frame_start}-${task.source_frame_end}`;
 }
+
+export function timelineRatioToFrame(manifest: Case, ratio: number): number {
+  const maxFrame = Math.max(0, manifest.frame_count - 1);
+  return clamp(Math.round(clamp(ratio, 0, 1) * maxFrame), 0, maxFrame);
+}
+
+export function timelinePercent(manifest: Case, caseFrame: number): number {
+  const maxFrame = Math.max(1, manifest.frame_count - 1);
+  return (clamp(caseFrame, 0, maxFrame) / maxFrame) * 100;
+}
+
+export function timelineTooltip(manifest: Case, task: Task): string {
+  return `${task.title} · source ${sourceSpan(task)} · ${taskTimestamp(manifest, task)}`;
+}

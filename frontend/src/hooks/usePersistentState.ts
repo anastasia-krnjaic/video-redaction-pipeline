@@ -7,21 +7,31 @@ export function storageKey(key: string): string {
 }
 
 export function usePersistentState<T>(key: string, initialValue: T): [T, (value: T) => void] {
-  const [value, setValue] = useState<T>(() => {
-    const raw = window.localStorage.getItem(storageKey(key));
-    if (raw === null) return initialValue;
+  const loadValue = (nextKey: string, fallback: T): T => {
+    const raw = window.localStorage.getItem(storageKey(nextKey));
+    if (raw === null) return fallback;
     try {
       return JSON.parse(raw) as T;
     } catch {
       return raw as T;
     }
-  });
+  };
+  const [state, setState] = useState<{ key: string; value: T }>(() => ({
+    key,
+    value: loadValue(key, initialValue),
+  }));
 
   useEffect(() => {
-    window.localStorage.setItem(storageKey(key), JSON.stringify(value));
-  }, [key, value]);
+    setState({ key, value: loadValue(key, initialValue) });
+  }, [key, initialValue]);
 
-  return [value, setValue];
+  useEffect(() => {
+    if (state.key === key) {
+      window.localStorage.setItem(storageKey(key), JSON.stringify(state.value));
+    }
+  }, [key, state]);
+
+  return [state.value, (value: T) => setState({ key, value })];
 }
 
 export function readStoredString(key: string): string | null {

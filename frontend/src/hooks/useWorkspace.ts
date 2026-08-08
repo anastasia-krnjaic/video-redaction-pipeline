@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { loadSessionState, loadWorkspace } from '../api/client';
-import type { AuditEvent, Session, TaskDecision, WorkspaceSummary, Attribution } from '../types/api';
+import type { AuditEvent, Session, TaskDecision, WorkspaceSummary, Attribution, WorkingState } from '../types/api';
 import { readStoredString, removeStoredValue, writeStoredString } from './usePersistentState';
 
 export interface WorkspaceLoadState {
@@ -12,11 +12,13 @@ export interface WorkspaceLoadState {
   decisions: Record<string, TaskDecision>;
   events: AuditEvent[];
   corrections: Record<string, unknown>[];
+  workingState?: WorkingState;
   setSession: (session: Session | null) => void;
   setAttribution: (attribution: Attribution) => void;
   setDecisions: (decisions: Record<string, TaskDecision>) => void;
   setEvents: (events: AuditEvent[]) => void;
   setCorrections: (corrections: Record<string, unknown>[]) => void;
+  setWorkingState: (state?: WorkingState) => void;
   refreshSession: (sessionId?: string) => Promise<void>;
   setError: (error?: string) => void;
 }
@@ -30,6 +32,7 @@ export function useWorkspace(): WorkspaceLoadState {
   const [decisions, setDecisions] = useState<Record<string, TaskDecision>>({});
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [corrections, setCorrections] = useState<Record<string, unknown>[]>([]);
+  const [workingState, setWorkingState] = useState<WorkingState>();
 
   const refreshSession = useMemo(
     () => async (sessionId?: string) => {
@@ -41,6 +44,7 @@ export function useWorkspace(): WorkspaceLoadState {
       setDecisions(payload.decisions || {});
       setEvents(payload.events || []);
       setCorrections(payload.corrections || []);
+      setWorkingState(payload.working_state);
       writeStoredString('session_id', payload.session.session_id);
     },
     [session?.session_id],
@@ -71,6 +75,7 @@ export function useWorkspace(): WorkspaceLoadState {
             setDecisions(payload.decisions || {});
             setEvents(payload.events || []);
             setCorrections(payload.corrections || []);
+            setWorkingState(payload.working_state);
           } catch {
             removeStoredValue('session_id');
           }
@@ -96,11 +101,13 @@ export function useWorkspace(): WorkspaceLoadState {
     decisions,
     events,
     corrections,
+    workingState,
     setSession,
     setAttribution,
     setDecisions,
     setEvents,
     setCorrections,
+    setWorkingState,
     refreshSession,
     setError,
   };

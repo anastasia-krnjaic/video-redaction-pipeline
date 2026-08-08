@@ -71,7 +71,7 @@ Night face and night plate references share the same source video, so the worksp
 
 The system does not claim that a clean automatic pass proves every privacy target was found. Some misses are silent: if a face or plate produces no detector, tracker, or review evidence, software alone may not know it was present.
 
-The final package therefore includes a local case-based review workspace. It shows Original and Current result side by side, keeps raw machine signals in a technical audit, and presents concise reviewer tasks for unresolved intervals, uncertain tracks, provenance changes, and deterministic spot checks. Reviewers can also add a privacy issue found during full-video sweep and save category-independent keyframe corrections.
+The final package therefore includes a local case-based review workspace. It shows one source-frame-aware player with Original, Automatic, and Latest reviewed versions, keeps raw machine signals in technical History details, and presents concise reviewer tasks for unresolved intervals, uncertain tracks, provenance changes, and deterministic spot checks. Reviewers can also add a privacy issue found during full-video sweep and save source-frame-keyed manual redactions.
 
 Reviewer decisions and corrections are stored as local append-only events with hash-chain validation. Reviewer identity is declared locally; it is not enterprise authentication.
 

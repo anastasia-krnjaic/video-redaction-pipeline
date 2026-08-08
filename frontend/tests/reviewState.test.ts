@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Entity, Task, TaskDecision } from '../src/types/api';
-import { ACTIONS, effectiveEntities, filteredEntities, taskBucket } from '../src/state/reviewState';
-import { entitiesOverlap, entityGap, mergeCandidates } from '../src/components/EntityMergeDialog';
+import { ACTIONS, bucketCounts, effectiveEntities, filteredEntities, taskBucket, tasksForCase } from '../src/state/reviewState';
 
 const task: Task = {
   case_id: 'day',
@@ -52,6 +51,26 @@ describe('review state helpers', () => {
     expect(taskBucket(task, decision(ACTIONS.looksCorrect))).toBe('Completed');
     expect(taskBucket(task, decision(ACTIONS.needsCorrection))).toBe('Needs correction');
     expect(taskBucket(task, decision(ACTIONS.unsure))).toBe('Unsure / Escalated');
+    expect(taskBucket({ ...task, decision_state: 'resolved' })).toBe('Completed');
+  });
+
+  it('keeps the normal review buckets to the simplified four-state lifecycle', () => {
+    const tasks = tasksForCase([
+      task,
+      { ...task, review_task_id: 'task_2', decision_state: 'resolved' },
+      { ...task, review_task_id: 'task_3' },
+    ], {
+      task_1: decision(ACTIONS.needsCorrection),
+      task_3: { ...decision(ACTIONS.unsure), task_id: 'task_3' },
+    }, 'day');
+    const counts = bucketCounts(tasks);
+    expect(counts).toEqual({
+      Open: 0,
+      'Needs correction': 1,
+      'Unsure / Escalated': 1,
+      Completed: 1,
+    });
+    expect(Object.keys(counts)).not.toContain('Resolved');
   });
 
   it('filters effective entities and hides retired merge targets', () => {
@@ -60,9 +79,29 @@ describe('review state helpers', () => {
     expect(filteredEntities([entityA, entityB], 'unresolved').map((entity) => entity.entity_id)).toEqual(['b']);
   });
 
-  it('keeps merge candidates same-category and non-overlapping', () => {
-    expect(entitiesOverlap(entityA, entityB)).toBe(false);
-    expect(entityGap(entityA, entityB)).toBe(15);
-    expect(mergeCandidates(entityA, [entityA, entityB]).map((entity) => entity.entity_id)).toEqual(['b']);
+  it('includes event-created canonical merge entities in the active registry', () => {
+    const merged = {
+      ...entityA,
+      entity_id: 'merged',
+      label: 'Merged Person',
+      source_entity_ids: ['a', 'b'],
+    };
+    const effective = effectiveEntities([entityA, entityB], {
+      a: { entity_id: 'a', current_status: 'merged' } as Entity,
+      b: { entity_id: 'b', current_status: 'merged' } as Entity,
+      merged,
+    });
+    expect(effective.map((entity: Entity) => entity.entity_id)).toEqual(['merged']);
+  });
+
+  it('does not leak event-created entities between cases', () => {
+    const nightEntity = {
+      ...entityA,
+      case_id: 'night',
+      entity_id: 'night-merged',
+      label: 'Night merged person',
+    };
+    const effective = effectiveEntities([entityA, entityB], { 'night-merged': nightEntity });
+    expect(effective.map((entity: Entity) => entity.entity_id)).toEqual(['a', 'b']);
   });
 });

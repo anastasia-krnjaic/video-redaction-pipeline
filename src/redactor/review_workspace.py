@@ -9,6 +9,8 @@ import re
 import shutil
 import subprocess
 import threading
+import time
+import uuid
 import webbrowser
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
@@ -35,6 +37,7 @@ from redactor import (
     review_api_contract,
     review_finalization,
     review_sessions,
+    review_working_state,
 )
 from redactor.detection import rational_to_float
 from redactor.privacy_records import (
@@ -46,6 +49,7 @@ from redactor.privacy_records import (
 )
 
 SCHEMA_VERSION = "final_review_workspace.v2.3.4"
+FRONTEND_MILESTONE_VERSION = "v1.3.3"
 DAY_PARENT_PATH = Path("artifacts/day_primary.mp4")
 DAY_CANONICAL_SOURCE_FRAME_START = 1828
 DAY_CANONICAL_SOURCE_FRAME_END = 5694
@@ -137,6 +141,7 @@ def build_workspace_package(
     behavior_parity_source = preserve_previous_workspace_behavior(package_root)
     raw_signals = load_raw_audit_signals(v1_package_root / "audit" / "audit_tasks.json")
     tasks = aggregate_reviewer_tasks(raw_signals)
+    tasks, task_chunking_audit = chunk_reviewer_tasks_for_package(package_root, tasks)
     write_json(
         package_root / "raw_audit_signals.json",
         {"raw_signals": raw_signals, "schema_version": SCHEMA_VERSION},
@@ -155,11 +160,16 @@ def build_workspace_package(
         },
     )
     write_json(package_root / "audit_schema.json", audit_schema())
+    write_json(package_root / "review_task_chunking_audit.json", task_chunking_audit)
     write_json(
         package_root / "audit_decisions.template.json",
         {"decisions": [], "schema_version": "case_review_decisions_export.v1"},
     )
     entity_audit = write_entity_index(package_root)
+    focus_overlay_audit = write_entity_focus_overlay_audit(package_root)
+    write_merge_audit_shells(package_root)
+    write_manual_correction_persistence_audit_shell(package_root)
+    review_working_state.write_reset_baseline_state_audit_shell(package_root)
     write_workspace_assets(package_root, frontend=frontend, build_frontend=build_frontend)
     version_alignment_audit = write_version_alignment_audit(package_root)
     if not version_alignment_audit["passed"]:
@@ -173,9 +183,16 @@ def build_workspace_package(
             "night": night_manifest["case_manifest_path"],
         },
         "created_at_utc": media.utc_timestamp(),
+        "entity_focus_overlay_audit": "entity_focus_overlay_audit.json",
+        "frontend_milestone_version": FRONTEND_MILESTONE_VERSION,
         "manual_firefox_acceptance_checklist": "manual_firefox_acceptance_checklist.md",
+        "manual_correction_persistence_audit": "manual_correction_persistence_audit.json",
+        "merged_entity_naming_audit": "merged_entity_naming_audit.json",
+        "merged_entity_policy_audit": "merged_entity_policy_audit.json",
         "model_validation": "model_validation.json",
         "previous_behavior_parity_source": "previous_behavior_parity_source.json",
+        "reset_baseline_state_audit": "reset_baseline_state_audit.json",
+        "review_task_chunking_audit": "review_task_chunking_audit.json",
         "schema_version": SCHEMA_VERSION,
         "selected_frontend": frontend,
         "timeline_marker_audit": "timeline_marker_audit.json",
@@ -190,6 +207,7 @@ def build_workspace_package(
     return {
         "day": day_lineage,
         "entity_audit": entity_audit,
+        "entity_focus_overlay_audit": focus_overlay_audit,
         "media_url_audit": media_url_audit,
         "model_validation": model_validation,
         "night": night_manifest,
@@ -220,15 +238,64 @@ def build_react_workspace_package_from_reference(
     if package_root.exists() and overwrite:
         shutil.rmtree(package_root)
     shutil.copytree(reference_root, package_root)
+    purge_session_local_state(package_root)
+    apply_review_entity_coverage_patch(package_root)
+    focus_overlay_audit = write_entity_focus_overlay_audit(package_root)
+    role_alignment_audit = ensure_frame_aligned_review_roles(package_root)
+    object_policy_audit = write_object_policy_lineage_audit(package_root)
+    write_merge_audit_shells(package_root)
+    write_manual_correction_persistence_audit_shell(package_root)
+    review_working_state.write_reset_baseline_state_audit_shell(package_root)
+    existing_chunking_audit_path = package_root / "review_task_chunking_audit.json"
+    existing_chunking_audit = (
+        read_json_file(existing_chunking_audit_path)
+        if existing_chunking_audit_path.exists()
+        else {}
+    )
+    if existing_chunking_audit.get("passed") is True:
+        task_chunking_audit = existing_chunking_audit
+    else:
+        task_chunking_audit = apply_reviewer_task_chunking_to_package(package_root)
+    tasks = read_json_file(package_root / "reviewer_tasks.json").get("tasks") or []
+    existing_timeline_audit_path = package_root / "timeline_marker_audit.json"
+    if existing_chunking_audit.get("passed") is True and existing_timeline_audit_path.exists():
+        timeline_marker_audit = read_json_file(existing_timeline_audit_path)
+    else:
+        timeline_marker_audit = write_timeline_marker_audit(package_root, list(tasks))
+    write_json(
+        package_root / "materialization_job_audit.json",
+        {
+            "cases": {},
+            "created_at_utc": media.utc_timestamp(),
+            "schema_version": "materialization_job_audit.v1",
+        },
+    )
+    write_json(
+        package_root / "materialization_timing_audit.json",
+        {
+            "created_at_utc": media.utc_timestamp(),
+            "jobs": [],
+            "schema_version": "materialization_timing_audit.v1",
+            "summary_by_case": {},
+        },
+    )
     write_react_workspace_assets(package_root, build_frontend=build_frontend)
     workspace_manifest_path = package_root / "workspace_manifest.json"
     workspace_manifest = read_json_file(workspace_manifest_path)
     workspace_manifest.update(
         {
             "api_schema_version": review_api_contract.API_SCHEMA_VERSION,
+            "entity_focus_overlay_audit": "entity_focus_overlay_audit.json",
             "frontend_build_manifest": "frontend_build_manifest.json",
+            "frontend_milestone_version": FRONTEND_MILESTONE_VERSION,
             "legacy_fallback": "legacy.html",
+            "manual_correction_persistence_audit": "manual_correction_persistence_audit.json",
+            "materialization_timing_audit": "materialization_timing_audit.json",
+            "merged_entity_naming_audit": "merged_entity_naming_audit.json",
+            "merged_entity_policy_audit": "merged_entity_policy_audit.json",
             "react_app_root": "app/",
+            "reset_baseline_state_audit": "reset_baseline_state_audit.json",
+            "review_task_chunking_audit": "review_task_chunking_audit.json",
             "selected_frontend": "react",
         }
     )
@@ -240,9 +307,159 @@ def build_react_workspace_package_from_reference(
     return {
         "frontend": "react",
         "media_url_audit": media_url_audit,
+        "object_policy_lineage_audit": object_policy_audit,
+        "entity_focus_overlay_audit": focus_overlay_audit,
         "reference_root": reference_root.as_posix(),
+        "role_alignment_audit": role_alignment_audit,
+        "task_chunking_audit": task_chunking_audit,
+        "timeline_marker_audit": timeline_marker_audit,
         "schema_version": SCHEMA_VERSION,
     }
+
+
+def purge_session_local_state(package_root: Path) -> None:
+    for relative_path in ("sessions",):
+        path = package_root / relative_path
+        if path.exists():
+            shutil.rmtree(path)
+
+
+def ensure_frame_aligned_review_roles(package_root: Path) -> dict[str, Any]:
+    audit_cases: dict[str, Any] = {}
+    for case_path in sorted((package_root / "cases").glob("*.json")):
+        manifest = case_manifests.load_case_manifest(case_path)
+        roles = list(manifest.video_roles)
+        by_role = {role.role: role for role in roles}
+        added: list[str] = []
+        source_role = by_role.get("automatic") or by_role.get("current_result")
+        if source_role is not None and "automatic" not in by_role:
+            roles.append(
+                replace(
+                    source_role,
+                    label="Automatic",
+                    role="automatic",
+                    sha256=media.sha256_file(package_root / source_role.path),
+                )
+            )
+            added.append("automatic")
+        by_role = {role.role: role for role in roles}
+        source_role = (
+            by_role.get("latest_reviewed")
+            or by_role.get("automatic")
+            or by_role.get("current_result")
+        )
+        if source_role is not None and "latest_reviewed" not in by_role:
+            source_path = package_root / source_role.path
+            latest_path = package_root / "media" / manifest.case_id / "latest_reviewed_result.mp4"
+            if not latest_path.exists() and source_path.exists():
+                shutil.copy2(source_path, latest_path)
+            role_path = latest_path if latest_path.exists() else source_path
+            roles.append(
+                case_manifests.VideoRole(
+                    label="Latest reviewed",
+                    path=role_path.relative_to(package_root).as_posix(),
+                    role="latest_reviewed",
+                    sha256=media.sha256_file(role_path)
+                    if role_path.exists()
+                    else source_role.sha256,
+                    source_frame_end=manifest.source_frame_end,
+                    source_frame_start=manifest.source_frame_start,
+                )
+            )
+            added.append("latest_reviewed")
+        role_order = {
+            "original": 0,
+            "automatic": 1,
+            "current_result": 2,
+            "latest_reviewed": 3,
+            "final_reviewed": 4,
+        }
+        roles = sorted(roles, key=lambda role: (role_order.get(role.role, 99), role.label))
+        case_manifests.write_case_manifest(case_path, replace(manifest, video_roles=tuple(roles)))
+        audit_cases[manifest.case_id] = {
+            "added_roles": added,
+            "roles": [role.to_dict() for role in roles],
+            "schema_version": "case_review_role_alignment.v1",
+        }
+    audit = {
+        "cases": audit_cases,
+        "created_at_utc": media.utc_timestamp(),
+        "passed": all(
+            {"original", "automatic", "latest_reviewed"}.issubset(
+                {role["role"] for role in case["roles"]}
+            )
+            for case in audit_cases.values()
+        ),
+        "schema_version": "frame_aligned_review_roles_audit.v1",
+    }
+    write_json(package_root / "frame_aligned_review_roles_audit.json", audit)
+    if not audit["passed"]:
+        raise ValueError("review role alignment failed")
+    return audit
+
+
+def write_object_policy_lineage_audit(package_root: Path) -> dict[str, Any]:
+    index = read_json_file(package_root / "review_entities.json")
+    cases = dict(index.get("cases") or {})
+    audit_cases: dict[str, Any] = {}
+    for case_id, entities_value in sorted(cases.items()):
+        manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
+        entities = [dict(entity) for entity in list(entities_value or [])]
+        rows: list[dict[str, Any]] = []
+        for row in face_policy_coverage_rows(
+            package_root=package_root,
+            case_id=str(case_id),
+            manifest=manifest,
+            entities=entities,
+        ):
+            mapped = row.get("review_entity_uuid")
+            policy = row.get("policy")
+            rows.append(
+                {
+                    "child_fragments": child_fragments_for_policy_track(
+                        entities,
+                        str(row.get("track_id")),
+                    ),
+                    "assignment_provenance": row.get("assignment_provenance"),
+                    "mapping": "exact" if mapped else "unresolved",
+                    "resulting_initial_action": policy if mapped else None,
+                    "review_entity": mapped,
+                    "source_policy": policy,
+                    "source_span": [row.get("source_frame_start"), row.get("source_frame_end")],
+                    "source_track": row.get("track_id"),
+                    "valid_source_evidence": row.get("valid_source_evidence"),
+                }
+            )
+        missing = [
+            row
+            for row in rows
+            if row["valid_source_evidence"]
+            and row["source_policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+            and row["assignment_provenance"] == "explicit_case_policy"
+            and row["review_entity"] is None
+        ]
+        audit_cases[str(case_id)] = {
+            "missing_source_backed_tracks": missing,
+            "policy_lineage": rows,
+            "schema_version": "object_policy_lineage_case_audit.v1",
+        }
+    audit = {
+        "cases": audit_cases,
+        "created_at_utc": media.utc_timestamp(),
+        "passed": not any(case["missing_source_backed_tracks"] for case in audit_cases.values()),
+        "schema_version": "object_policy_lineage_audit.v1",
+    }
+    write_json(package_root / "object_policy_lineage_audit.json", audit)
+    if not audit["passed"]:
+        raise ValueError("source-backed object policy lineage is incomplete")
+    return audit
+
+
+def child_fragments_for_policy_track(entities: list[dict[str, Any]], track_id: str) -> list[str]:
+    for entity in entities:
+        if track_id in {str(item) for item in entity.get("automatic_source_track_ids") or []}:
+            return [str(item) for item in entity.get("attached_fragment_track_ids") or []]
+    return []
 
 
 def build_day_case(package_root: Path, *, model_paths: FrozenModelPaths) -> dict[str, Any]:
@@ -1272,6 +1489,7 @@ def render_correction_interval_preview(
     *,
     session_dir: Path,
     correction: Any,
+    include_unsaved_correction: bool = False,
 ) -> dict[str, Any]:
     manifest_path = package_root / "cases" / f"{correction.case_id}.json"
     if not manifest_path.exists():
@@ -1301,9 +1519,13 @@ def render_correction_interval_preview(
             "reason": "current privacy-region provenance missing",
         }
     base_regions = review_finalization.load_privacy_region_records(base_regions_path)
+    correction_records = review_finalization.load_corrections_jsonl(
+        session_dir / "corrections.jsonl"
+    )
+    if include_unsaved_correction:
+        correction_records = [*correction_records, correction]
     corrections = review_finalization.latest_corrections(
-        review_finalization.load_corrections_jsonl(session_dir / "corrections.jsonl"),
-        case_id=correction.case_id,
+        correction_records, case_id=correction.case_id
     )
     final_regions, _ = review_finalization.apply_corrections(
         base_regions,
@@ -1623,6 +1845,775 @@ def write_entity_index(package_root: Path) -> dict[str, Any]:
     write_json(package_root / "review_entity_thumbnail_audit.json", audit)
     write_text(package_root / "before_after_summary.md", before_after_summary(metrics_by_case))
     return audit
+
+
+def apply_review_entity_coverage_patch(package_root: Path) -> dict[str, Any]:
+    index_path = package_root / "review_entities.json"
+    if not index_path.exists():
+        return {"cases": {}, "schema_version": "review_entity_coverage_audit.v1"}
+    index = read_json_file(index_path)
+    cases = dict(index.get("cases") or {})
+    audit_cases: dict[str, Any] = {}
+    changed = False
+    for case_id, entities_value in sorted(cases.items()):
+        case_path = package_root / "cases" / f"{case_id}.json"
+        if not case_path.exists():
+            continue
+        manifest = case_manifests.load_case_manifest(case_path)
+        entities = [dict(entity) for entity in list(entities_value or [])]
+        before_count = len(entities)
+        case_changed = False
+        representative_bbox_enriched_entity_ids: list[str] = []
+        for entity in entities:
+            bbox = representative_bbox(entity)
+            if bbox and entity.get("representative_bbox") != bbox:
+                entity["representative_bbox"] = bbox
+                representative_bbox_enriched_entity_ids.append(str(entity.get("entity_id") or ""))
+                case_changed = True
+                changed = True
+        policy_rows = face_policy_coverage_rows(
+            package_root=package_root,
+            case_id=case_id,
+            manifest=manifest,
+            entities=entities,
+        )
+        added_keep_track_ids: set[str] = set()
+        for row in policy_rows:
+            if (
+                row["policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+                and row["assignment_provenance"] == "explicit_case_policy"
+                and row["valid_source_evidence"]
+                and row["review_entity_uuid"] is None
+            ):
+                entity = source_backed_keep_entity_payload(
+                    package_root=package_root,
+                    case_id=case_id,
+                    manifest=manifest,
+                    existing=entities,
+                    row=row,
+                )
+                entities.append(entity)
+                row["review_entity_uuid"] = entity["entity_id"]
+                row["review_entity_added"] = True
+                added_keep_track_ids.add(str(row["track_id"]))
+                case_changed = True
+                changed = True
+            if (
+                row["policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+                and row["assignment_provenance"] == "explicit_case_policy"
+                and row["valid_source_evidence"]
+                and row["review_entity_uuid"] is not None
+            ):
+                packaged_source = copy_face_policy_source_evidence(
+                    package_root=package_root,
+                    case_id=case_id,
+                    source_dir=Path(str(row["face_policy_source"])),
+                )
+                for entity in entities:
+                    if entity.get("entity_id") == row["review_entity_uuid"]:
+                        provenance = dict(entity.get("created_provenance") or {})
+                        if provenance.get("face_policy_source") != packaged_source:
+                            entity["created_provenance"] = provenance | {
+                                "face_policy_source": packaged_source
+                            }
+                            case_changed = True
+                            changed = True
+        refreshed_rows = face_policy_coverage_rows(
+            package_root=package_root,
+            case_id=case_id,
+            manifest=manifest,
+            entities=entities,
+        )
+        missing_source_backed = [
+            row
+            for row in refreshed_rows
+            if row["valid_source_evidence"]
+            and row["policy"]
+            in {privacy_entities.POLICY_KEEP_VISIBLE, privacy_entities.POLICY_REDACT}
+            and row["review_entity_uuid"] is None
+        ]
+        missing_keep = [
+            row
+            for row in missing_source_backed
+            if row["policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+            and row["assignment_provenance"] == "explicit_case_policy"
+        ]
+        if missing_keep:
+            missing = ", ".join(str(row["track_id"]) for row in missing_keep)
+            raise ValueError(
+                f"explicit keep-policy face tracks omitted from review entity registry: {case_id} {missing}"
+            )
+        cases[case_id] = entities
+        audit_cases[case_id] = {
+            "after_entity_count": len(entities),
+            "before_entity_count": before_count,
+            "explicit_keep_tracks_added": [
+                row
+                for row in refreshed_rows
+                if row["policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+                and str(row["track_id"]) in added_keep_track_ids
+            ],
+            "explicit_keep_tracks": [
+                row
+                for row in refreshed_rows
+                if row["policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+            ],
+            "face_census_tracks": refreshed_rows,
+            "missing_source_backed_tracks": missing_source_backed,
+            "redacted_tracks": [
+                row for row in refreshed_rows if row["policy"] == privacy_entities.POLICY_REDACT
+            ],
+            "representative_bbox_enriched_entity_ids": representative_bbox_enriched_entity_ids,
+            "schema_version": "review_entity_coverage_case_audit.v1",
+            "sampled_false_merge_audit": {
+                "sampled_suspected_false_merge_count": 0,
+                "strategy": "No automatic visual-similarity merge was introduced for this coverage patch.",
+            },
+        }
+        if case_changed:
+            write_json(
+                package_root / "entities" / f"{case_id}.json",
+                {
+                    "case_id": case_id,
+                    "entities": entities,
+                    "entity_count": len(entities),
+                    "schema_version": "review_entities.v2",
+                    "unresolved_evidence": read_json_file(
+                        package_root / "entities" / f"{case_id}_unresolved_evidence.json"
+                    )
+                    if (package_root / "entities" / f"{case_id}_unresolved_evidence.json").exists()
+                    else {
+                        "fragment_count": 0,
+                        "fragments": [],
+                        "schema_version": "review_unresolved_evidence.v1",
+                    },
+                },
+            )
+    if changed:
+        index["cases"] = cases
+        for registry_name in (
+            "review_entities.json",
+            "review_objects.json",
+            "privacy_entities.json",
+        ):
+            registry_path = package_root / registry_name
+            if registry_path.exists():
+                registry = read_json_file(registry_path)
+                registry["cases"] = cases
+                write_json(registry_path, registry)
+    audit = {
+        "cases": audit_cases,
+        "created_at_utc": media.utc_timestamp(),
+        "summary": {
+            "after_counts": {
+                case_id: case["after_entity_count"] for case_id, case in sorted(audit_cases.items())
+            },
+            "before_counts": {
+                case_id: case["before_entity_count"]
+                for case_id, case in sorted(audit_cases.items())
+            },
+            "entity_count_delta": {
+                case_id: case["after_entity_count"] - case["before_entity_count"]
+                for case_id, case in sorted(audit_cases.items())
+            },
+            "explicit_keep_tracks": {
+                case_id: case["explicit_keep_tracks"]
+                for case_id, case in sorted(audit_cases.items())
+            },
+            "explicit_keep_tracks_added": {
+                case_id: case["explicit_keep_tracks_added"]
+                for case_id, case in sorted(audit_cases.items())
+            },
+            "missing_source_backed_tracks": {
+                case_id: case["missing_source_backed_tracks"]
+                for case_id, case in sorted(audit_cases.items())
+            },
+            "representative_bbox_enriched": {
+                case_id: case["representative_bbox_enriched_entity_ids"]
+                for case_id, case in sorted(audit_cases.items())
+            },
+            "sampled_false_merge_audit": {
+                case_id: case["sampled_false_merge_audit"]
+                for case_id, case in sorted(audit_cases.items())
+            },
+        },
+        "passed": not any(
+            case.get("missing_source_backed_tracks")
+            for case in audit_cases.values()
+            if any(
+                row["policy"] == privacy_entities.POLICY_KEEP_VISIBLE
+                and row["assignment_provenance"] == "explicit_case_policy"
+                for row in case.get("missing_source_backed_tracks", [])
+            )
+        ),
+        "root_cause": (
+            "The v1 registry was derived from rendered privacy regions. Explicit keep-policy face "
+            "tracks are intentionally not rendered, so source-backed keep tracks could be absent "
+            "from reviewer-facing People."
+        ),
+        "schema_version": "review_entity_coverage_audit.v1",
+    }
+    write_json(package_root / "review_entity_coverage_audit.json", audit)
+    return audit
+
+
+def write_entity_focus_overlay_audit(package_root: Path) -> dict[str, Any]:
+    index_path = package_root / "review_entities.json"
+    if not index_path.exists():
+        audit = {
+            "cases": {},
+            "created_at_utc": media.utc_timestamp(),
+            "passed": True,
+            "schema_version": "entity_focus_overlay_audit.v1",
+        }
+        write_json(package_root / "entity_focus_overlay_audit.json", audit)
+        return audit
+    index = read_json_file(index_path)
+    cases = dict(index.get("cases") or {})
+    audit_cases: dict[str, Any] = {}
+    changed = False
+    for case_id, entities_value in sorted(cases.items()):
+        case_path = package_root / "cases" / f"{case_id}.json"
+        if not case_path.exists():
+            continue
+        manifest = case_manifests.load_case_manifest(case_path)
+        entities = [dict(entity) for entity in list(entities_value or [])]
+        enriched_ids: list[str] = []
+        missing: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
+        for entity in entities:
+            entity_id = str(entity.get("entity_id") or "")
+            label = str(entity.get("label") or entity.get("display_name") or entity_id)
+            bbox = representative_bbox(entity)
+            frame = entity.get("representative_source_frame")
+            source = "existing_representative_bbox" if bbox else None
+            if bbox is None or not isinstance(frame, int):
+                fallback = focus_representative_from_source_evidence(
+                    package_root=package_root,
+                    manifest=manifest,
+                    entity=entity,
+                )
+                if fallback is not None:
+                    if bbox is None:
+                        entity["representative_bbox"] = fallback["bbox_xyxy"]
+                        bbox = list(fallback["bbox_xyxy"])
+                        enriched_ids.append(entity_id)
+                        changed = True
+                    if not isinstance(frame, int):
+                        entity["representative_source_frame"] = fallback[
+                            "representative_source_frame"
+                        ]
+                        frame = int(fallback["representative_source_frame"])
+                        changed = True
+                    source = str(fallback["source"])
+            ready = bbox is not None and isinstance(frame, int)
+            row = {
+                "category": entity.get("category"),
+                "current_policy": entity.get("current_policy") or entity.get("privacy_action"),
+                "entity_id": entity_id,
+                "focus_ready": ready,
+                "label": label,
+                "representative_bbox": bbox,
+                "representative_source_frame": frame if isinstance(frame, int) else None,
+                "source": source,
+            }
+            rows.append(row)
+            if not ready:
+                missing.append(
+                    {
+                        "category": entity.get("category"),
+                        "entity_id": entity_id,
+                        "label": label,
+                        "reason": "no_source_backed_representative_geometry",
+                    }
+                )
+        cases[case_id] = entities
+        audit_cases[case_id] = {
+            "enriched_entity_ids": enriched_ids,
+            "focus_ready_count": sum(1 for row in rows if row["focus_ready"]),
+            "missing_entities": missing,
+            "missing_geometry_count": len(missing),
+            "rows": rows,
+            "schema_version": "entity_focus_overlay_case_audit.v1",
+            "total_entities": len(entities),
+        }
+        if enriched_ids:
+            entity_payload_path = package_root / "entities" / f"{case_id}.json"
+            if entity_payload_path.exists():
+                payload = read_json_file(entity_payload_path)
+                payload["entities"] = entities
+                payload["entity_count"] = len(entities)
+                write_json(entity_payload_path, payload)
+    if changed:
+        index["cases"] = cases
+        for registry_name in (
+            "review_entities.json",
+            "review_objects.json",
+            "privacy_entities.json",
+        ):
+            registry_path = package_root / registry_name
+            if registry_path.exists():
+                registry = read_json_file(registry_path)
+                registry["cases"] = cases
+                write_json(registry_path, registry)
+    audit = {
+        "cases": audit_cases,
+        "created_at_utc": media.utc_timestamp(),
+        "passed": True,
+        "schema_version": "entity_focus_overlay_audit.v1",
+        "summary": {
+            "enriched_entity_ids": {
+                case_id: case["enriched_entity_ids"]
+                for case_id, case in sorted(audit_cases.items())
+            },
+            "focus_ready_count": {
+                case_id: case["focus_ready_count"] for case_id, case in sorted(audit_cases.items())
+            },
+            "missing_geometry_count": {
+                case_id: case["missing_geometry_count"]
+                for case_id, case in sorted(audit_cases.items())
+            },
+            "total_entities": {
+                case_id: case["total_entities"] for case_id, case in sorted(audit_cases.items())
+            },
+        },
+    }
+    write_json(package_root / "entity_focus_overlay_audit.json", audit)
+    return audit
+
+
+def focus_representative_from_source_evidence(
+    *,
+    package_root: Path,
+    manifest: case_manifests.CaseManifest,
+    entity: dict[str, Any],
+) -> dict[str, Any] | None:
+    preferred_source_frame = entity.get("representative_source_frame")
+    preferred_case_frame = (
+        int(preferred_source_frame) - manifest.source_frame_start
+        if isinstance(preferred_source_frame, int)
+        else None
+    )
+    source_records = review_working_state.source_backed_entity_regions(
+        package_root=package_root,
+        manifest=manifest,
+        entity=entity,
+    )
+    if source_records:
+        selected = select_focus_record(source_records, preferred_case_frame)
+        return {
+            "bbox_xyxy": list(selected.bbox_xyxy),
+            "representative_source_frame": manifest.source_frame_start + selected.source_frame,
+            "source": "source_policy_track_geometry",
+        }
+    region_path = package_root / "regions" / f"{manifest.case_id}_current_regions.jsonl"
+    if region_path.exists():
+        baseline_records = [
+            record
+            for record in review_finalization.load_privacy_region_records(region_path)
+            if review_working_state.region_belongs_to_entity(record, entity)
+        ]
+        if baseline_records:
+            selected = select_focus_record(baseline_records, preferred_case_frame)
+            return {
+                "bbox_xyxy": list(selected.bbox_xyxy),
+                "representative_source_frame": manifest.source_frame_start + selected.source_frame,
+                "source": "automatic_privacy_region",
+            }
+    return None
+
+
+def select_focus_record(
+    records: list[PrivacyRegionRecord],
+    preferred_case_frame: int | None,
+) -> PrivacyRegionRecord:
+    if preferred_case_frame is None:
+        return sorted(records, key=focus_record_sort_key)[0]
+    return min(
+        records,
+        key=lambda record: (
+            abs(record.source_frame - preferred_case_frame),
+            focus_record_sort_key(record),
+        ),
+    )
+
+
+def focus_record_sort_key(record: PrivacyRegionRecord) -> tuple[int, int]:
+    x1, y1, x2, y2 = record.bbox_xyxy
+    area = max(1, x2 - x1) * max(1, y2 - y1)
+    return (-area, record.source_frame)
+
+
+def write_merge_audit_shells(package_root: Path) -> None:
+    write_json(
+        package_root / "merged_entity_naming_audit.json",
+        {
+            "created_at_utc": media.utc_timestamp(),
+            "events": [],
+            "schema_version": "merged_entity_naming_audit.v1",
+        },
+    )
+    write_json(
+        package_root / "merged_entity_policy_audit.json",
+        {
+            "created_at_utc": media.utc_timestamp(),
+            "events": [],
+            "schema_version": "merged_entity_policy_audit.v1",
+        },
+    )
+
+
+def write_manual_correction_persistence_audit_shell(package_root: Path) -> None:
+    write_json(
+        package_root / "manual_correction_persistence_audit.json",
+        {
+            "created_at_utc": media.utc_timestamp(),
+            "events": [],
+            "schema_version": "manual_correction_persistence_audit.v1",
+        },
+    )
+
+
+def append_merged_entity_audits(
+    package_root: Path,
+    *,
+    case_id: str,
+    canonical: dict[str, Any],
+    retired_entities: list[dict[str, Any]],
+) -> None:
+    naming_path = package_root / "merged_entity_naming_audit.json"
+    policy_path = package_root / "merged_entity_policy_audit.json"
+    if not naming_path.exists() or not policy_path.exists():
+        write_merge_audit_shells(package_root)
+    retired_ids = [str(entity.get("entity_id") or "") for entity in retired_entities]
+    source_track_ids = unique_sorted(
+        item
+        for entity in [canonical, *retired_entities]
+        for item in list(entity.get("automatic_source_track_ids") or [])
+    )
+    naming = read_json_file(naming_path)
+    naming.setdefault("events", []).append(
+        {
+            "case_id": case_id,
+            "category": canonical.get("category"),
+            "display_label": canonical.get("label") or canonical.get("display_name"),
+            "merged_display_sequence": canonical.get("merged_display_sequence"),
+            "merged_entity_id": canonical.get("entity_id"),
+            "retired_entity_ids": retired_ids,
+            "schema_version": "merged_entity_naming_event.v1",
+            "source_track_ids": source_track_ids,
+        }
+    )
+    write_json(naming_path, naming)
+    policy = read_json_file(policy_path)
+    policy.setdefault("events", []).append(
+        {
+            "case_id": case_id,
+            "category": canonical.get("category"),
+            "initialization": canonical.get("merge_policy_initialization"),
+            "merged_entity_id": canonical.get("entity_id"),
+            "resulting_policy": canonical.get("current_policy"),
+            "retired_entity_policies": {
+                str(entity.get("entity_id") or ""): review_working_state.inherited_policy(entity)
+                for entity in retired_entities
+            },
+            "schema_version": "merged_entity_policy_event.v1",
+        }
+    )
+    write_json(policy_path, policy)
+
+
+def face_policy_coverage_rows(
+    *,
+    package_root: Path,
+    case_id: str,
+    manifest: case_manifests.CaseManifest,
+    entities: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    track_to_entity = {
+        str(track_id): entity.get("entity_id")
+        for entity in entities
+        for track_id in entity.get("automatic_source_track_ids", [])
+    }
+    rows: dict[str, dict[str, Any]] = {}
+    for source_dir in face_policy_source_dirs(package_root, case_id, manifest):
+        census = read_json_file(source_dir / "track_census.json")
+        policy = (
+            read_json_file(source_dir / "privacy_policy.json")
+            if (source_dir / "privacy_policy.json").exists()
+            else {}
+        )
+        assignments = {
+            str(item.get("track_id")): item
+            for item in policy.get("assignments", [])
+            if item.get("track_id") is not None
+        }
+        for track in census.get("tracks", []):
+            track_id = str(track.get("track_id"))
+            if not track_id or track_id == "None":
+                continue
+            assignment = assignments.get(track_id, {})
+            raw_policy = str(
+                assignment.get("decision") or track.get("policy_assignment") or ""
+            ).lower()
+            normalized_policy = {
+                "keep": privacy_entities.POLICY_KEEP_VISIBLE,
+                "keep_visible": privacy_entities.POLICY_KEEP_VISIBLE,
+                "redact": privacy_entities.POLICY_REDACT,
+                "review": privacy_entities.POLICY_REVIEW_REQUIRED,
+            }.get(raw_policy, raw_policy)
+            if normalized_policy not in {
+                privacy_entities.POLICY_KEEP_VISIBLE,
+                privacy_entities.POLICY_REDACT,
+                privacy_entities.POLICY_REVIEW_REQUIRED,
+            }:
+                continue
+            observed = list(track.get("observed_frames") or [])
+            predicted = list(track.get("predicted_frames") or [])
+            interpolated = list(track.get("interpolated_frames") or [])
+            valid_source_evidence = bool(observed or predicted or interpolated)
+            row = {
+                "assignment_provenance": str(
+                    assignment.get("provenance") or track.get("assignment_provenance") or ""
+                ),
+                "face_policy_source": display_source_path(source_dir),
+                "first_frame": track.get("first_frame"),
+                "last_frame": track.get("last_frame"),
+                "missing_source_backed_track": valid_source_evidence
+                and normalized_policy
+                in {privacy_entities.POLICY_KEEP_VISIBLE, privacy_entities.POLICY_REDACT}
+                and track_to_entity.get(track_id) is None,
+                "observed_frame_count": len(observed),
+                "policy": normalized_policy,
+                "quality_status": track.get("quality_status"),
+                "representative_frame": track.get("representative_frame")
+                if track.get("representative_frame") is not None
+                else (observed or predicted or interpolated or [track.get("first_frame") or 0])[0],
+                "review_entity_uuid": track_to_entity.get(track_id),
+                "source_frame_end": manifest.source_frame_start + int(track.get("last_frame") or 0),
+                "source_frame_start": manifest.source_frame_start
+                + int(track.get("first_frame") or 0),
+                "track_id": track_id,
+                "valid_source_evidence": valid_source_evidence,
+            }
+            rows.setdefault(track_id, row)
+    return sorted(
+        rows.values(),
+        key=lambda row: int(row["track_id"]) if str(row["track_id"]).isdigit() else 999999,
+    )
+
+
+def face_policy_source_dirs(
+    package_root: Path,
+    case_id: str,
+    manifest: case_manifests.CaseManifest,
+) -> list[Path]:
+    candidates: list[Path] = []
+    local = package_root / "technical" / f"{case_id}_pipeline" / "face_policy"
+    if (local / "track_census.json").exists():
+        candidates.append(local)
+    artifacts_root = Path("artifacts")
+    if artifacts_root.exists():
+        candidates.extend(
+            path.parent for path in artifacts_root.glob(f"*/{case_id}/**/track_census.json")
+        )
+    source_hash = manifest.source_video_hash
+    matched: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen or not (candidate / "track_census.json").exists():
+            continue
+        seen.add(candidate)
+        source_manifest_path = candidate / "source_manifest.json"
+        census = read_json_file(candidate / "track_census.json")
+        source_manifest = (
+            read_json_file(source_manifest_path) if source_manifest_path.exists() else {}
+        )
+        candidate_hash = source_manifest.get("source_video_hash") or census.get("source_video_hash")
+        if source_hash and candidate_hash and str(candidate_hash) != str(source_hash):
+            continue
+        if not (candidate / "privacy_policy.json").exists():
+            continue
+        matched.append(candidate)
+    return sorted(matched)
+
+
+def display_source_path(path: Path) -> str:
+    resolved = path.resolve()
+    for root in (Path.cwd().resolve(),):
+        try:
+            return resolved.relative_to(root).as_posix()
+        except ValueError:
+            continue
+    return path.as_posix()
+
+
+def source_backed_keep_entity_payload(
+    *,
+    package_root: Path,
+    case_id: str,
+    manifest: case_manifests.CaseManifest,
+    existing: list[dict[str, Any]],
+    row: dict[str, Any],
+) -> dict[str, Any]:
+    track_id = str(row["track_id"])
+    object_uuid = stable_hash(
+        {
+            "case_id": case_id,
+            "category": CATEGORY_FACE,
+            "schema_version": "review_source_backed_keep_entity_uuid.v1",
+            "track_id": track_id,
+        }
+    )[:32]
+    entity_id = f"entity_{object_uuid}"
+    source_dir = Path(str(row["face_policy_source"]))
+    packaged_source = copy_face_policy_source_evidence(
+        package_root=package_root,
+        case_id=case_id,
+        source_dir=source_dir,
+    )
+    thumbnail_path = copy_source_backed_track_thumbnail(
+        package_root=package_root,
+        case_id=case_id,
+        entity_id=entity_id,
+        source_dir=source_dir,
+        track_id=track_id,
+    )
+    representative_case_frame = int(row.get("representative_frame") or row.get("first_frame") or 0)
+    representative_source_frame = manifest.source_frame_start + representative_case_frame
+    representative_box = source_backed_track_bbox(
+        source_dir=source_dir,
+        track_id=track_id,
+        preferred_frame=representative_case_frame,
+    )
+    return {
+        "automatic_source_track_ids": [track_id],
+        "case_id": case_id,
+        "category": CATEGORY_FACE,
+        "created_provenance": {
+            "assignment_provenance": row.get("assignment_provenance"),
+            "face_policy_source": packaged_source,
+            "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+            "source": "review_entity_coverage_patch",
+            "track_id": track_id,
+        },
+        "current_policy": privacy_entities.POLICY_KEEP_VISIBLE,
+        "current_status": privacy_entities.STATUS_ACTIVE,
+        "default_privacy_policy": privacy_entities.POLICY_KEEP_VISIBLE,
+        "display_name": next_payload_entity_label(CATEGORY_FACE, existing),
+        "entity_id": entity_id,
+        "entity_uuid": object_uuid,
+        "evidence_summary": {
+            "face_census_track": True,
+            "policy_assignment": privacy_entities.POLICY_KEEP_VISIBLE,
+            "region_count": 0,
+            "review_observation_count": int(row.get("observed_frame_count") or 0),
+            "review_observed_span_frames": int(row.get("last_frame") or 0)
+            - int(row.get("first_frame") or 0)
+            + 1,
+            "tracklet_count": 1,
+        },
+        "first_visible_source_frame": row.get("source_frame_start"),
+        "geometry_locked": False,
+        "label": next_payload_entity_label(CATEGORY_FACE, existing),
+        "last_visible_source_frame": row.get("source_frame_end"),
+        "locked": False,
+        "member_detector_tracker_ids": [track_id],
+        "merge_split_lineage": [],
+        "object_uuid": object_uuid,
+        "privacy_action": privacy_entities.POLICY_KEEP_VISIBLE,
+        "representative_case_frame": representative_case_frame,
+        "representative_bbox": representative_box,
+        "representative_source_frame": representative_source_frame,
+        "representative_thumbnail_path": thumbnail_path,
+        "review_entity_state": "confirmed",
+        "review_state": "ready",
+        "reviewed_region_track_ids": [],
+        "schema_version": privacy_entities.SCHEMA_VERSION,
+        "visibility_state": "visible",
+    }
+
+
+def source_backed_track_bbox(
+    *,
+    source_dir: Path,
+    track_id: str,
+    preferred_frame: int,
+) -> list[int] | None:
+    tracks_path = source_dir / "tracking" / "tracks.jsonl"
+    if not tracks_path.exists():
+        return None
+    fallback: list[int] | None = None
+    for frame_payload in load_jsonl_dicts(tracks_path):
+        frame_index = int(frame_payload.get("frame_index") or 0)
+        for box in list(frame_payload.get("track_boxes") or []):
+            if str(box.get("track_id") or "") != str(track_id):
+                continue
+            bbox = box.get("bbox_xyxy")
+            if not isinstance(bbox, list) or len(bbox) != 4:
+                continue
+            parsed = [int(value) for value in bbox]
+            if frame_index == preferred_frame:
+                return parsed
+            fallback = fallback or parsed
+    return fallback
+
+
+def copy_face_policy_source_evidence(
+    *,
+    package_root: Path,
+    case_id: str,
+    source_dir: Path,
+) -> str:
+    target = package_root / "technical" / f"{case_id}_pipeline" / "face_policy"
+    for relative in (
+        Path("track_census.json"),
+        Path("privacy_policy.json"),
+        Path("source_manifest.json"),
+        Path("tracking") / "tracks.jsonl",
+    ):
+        src = source_dir / relative
+        if src.exists():
+            dst = target / relative
+            if src.resolve() == dst.resolve():
+                continue
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+    return target.relative_to(package_root).as_posix()
+
+
+def next_payload_entity_label(category: str, existing: list[dict[str, Any]]) -> str:
+    prefix = "Person" if category == CATEGORY_FACE else "Plate"
+    used: set[int] = set()
+    for entity in existing:
+        if entity.get("category") != category:
+            continue
+        parts = str(entity.get("label") or entity.get("display_name") or "").split()
+        if len(parts) == 2 and parts[0] == prefix and parts[1].isdigit():
+            used.add(int(parts[1]))
+    index = 1
+    while index in used:
+        index += 1
+    return f"{prefix} {index:02d}"
+
+
+def copy_source_backed_track_thumbnail(
+    *,
+    package_root: Path,
+    case_id: str,
+    entity_id: str,
+    source_dir: Path,
+    track_id: str,
+) -> str | None:
+    if not track_id.isdigit():
+        return None
+    source = source_dir / "tracking" / "track_contact_sheets" / f"track_{int(track_id):03d}.jpg"
+    if not source.exists():
+        return None
+    target = package_root / "entities" / case_id / "thumbnails" / f"{entity_id}.jpg"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    return target.relative_to(package_root).as_posix()
 
 
 def review_entity_profile() -> dict[str, Any]:
@@ -3146,6 +4137,173 @@ def aggregate_reviewer_tasks(raw_signals: list[dict[str, Any]]) -> list[dict[str
     )
 
 
+def apply_reviewer_task_chunking_to_package(package_root: Path) -> dict[str, Any]:
+    tasks_path = package_root / "reviewer_tasks.json"
+    payload = read_json_file(tasks_path)
+    tasks, audit = chunk_reviewer_tasks_for_package(
+        package_root,
+        [dict(task) for task in list(payload.get("tasks") or [])],
+    )
+    payload["tasks"] = tasks
+    payload["task_count"] = len(tasks)
+    payload["chunking_audit"] = "review_task_chunking_audit.json"
+    write_json(tasks_path, payload)
+    write_json(package_root / "review_task_chunking_audit.json", audit)
+    return audit
+
+
+def chunk_reviewer_tasks_for_package(
+    package_root: Path,
+    tasks: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    manifests = {
+        path.stem: case_manifests.load_case_manifest(path)
+        for path in sorted((package_root / "cases").glob("*.json"))
+    }
+    chunked: list[dict[str, Any]] = []
+    rows: list[dict[str, Any]] = []
+    max_duration_seconds = 0.0
+    for task in tasks:
+        case_id = str(task.get("case_id") or "")
+        manifest = manifests.get(case_id)
+        if task.get("technical_only") or manifest is None:
+            chunked.append(task)
+            continue
+        children, row = chunk_reviewer_task(task, manifest)
+        chunked.extend(children)
+        rows.append(row)
+        for child in children:
+            fps = rational_to_float(manifest.fps) or 30.0
+            max_duration_seconds = max(
+                max_duration_seconds,
+                (int(child["source_frame_end"]) - int(child["source_frame_start"]) + 1) / fps,
+            )
+    chunked = sorted(
+        chunked,
+        key=lambda item: (
+            item.get("technical_only", False),
+            item.get("case_id"),
+            task_sort_rank(item),
+            item.get("source_frame_start"),
+            item.get("review_task_id"),
+        ),
+    )
+    audit = {
+        "cases": {
+            case_id: {
+                "chunked_parent_count": sum(1 for row in rows if row["case_id"] == case_id),
+                "child_task_count": sum(
+                    row["child_count"] for row in rows if row["case_id"] == case_id
+                ),
+                "fps": manifest.fps,
+            }
+            for case_id, manifest in manifests.items()
+        },
+        "created_at_utc": media.utc_timestamp(),
+        "hard_max_seconds": 5.0,
+        "max_child_duration_seconds": round(max_duration_seconds, 6),
+        "passed": all(
+            not child.get("duration_violation") for row in rows for child in row["children"]
+        ),
+        "parents": rows,
+        "schema_version": "review_task_chunking_audit.v1",
+        "target_seconds": 3.0,
+    }
+    return chunked, audit
+
+
+def chunk_reviewer_task(
+    task: dict[str, Any],
+    manifest: case_manifests.CaseManifest,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    fps = rational_to_float(manifest.fps) or 30.0
+    hard_max_frames = max(1, int(math.floor(fps * 5.0)))
+    target_frames = max(1, min(hard_max_frames, int(round(fps * 3.0))))
+    context_frames = max(0, int(round(fps * 0.5)))
+    start = int(task.get("source_frame_start") or 0)
+    end = int(task.get("source_frame_end") or start)
+    duration_frames = end - start + 1
+    if duration_frames <= hard_max_frames:
+        return [task], {
+            "case_id": manifest.case_id,
+            "child_count": 1,
+            "children": [
+                {
+                    "duration_seconds": duration_frames / fps,
+                    "duration_violation": False,
+                    "review_task_id": task.get("review_task_id"),
+                    "source_frame_end": end,
+                    "source_frame_start": start,
+                }
+            ],
+            "parent_review_task_id": task.get("review_task_id"),
+            "split": False,
+            "source_frame_end": end,
+            "source_frame_start": start,
+        }
+    children: list[dict[str, Any]] = []
+    frame = start
+    while frame <= end:
+        child_end = min(end, frame + target_frames - 1)
+        children.append({"start": frame, "end": child_end})
+        frame = child_end + 1
+    total = len(children)
+    parent_id = str(task.get("review_task_id") or f"{manifest.case_id}_task")
+    parent_title = str(task.get("title") or "Review interval")
+    child_tasks: list[dict[str, Any]] = []
+    child_rows: list[dict[str, Any]] = []
+    for index, child in enumerate(children, start=1):
+        child_start = int(child["start"])
+        child_end = int(child["end"])
+        child_id = f"{parent_id}_part_{index:02d}_of_{total:02d}"
+        duration_seconds = (child_end - child_start + 1) / fps
+        child_task = dict(task) | {
+            "child_index": index,
+            "child_total": total,
+            "parent_raw_signal_ids": list(task.get("raw_signal_ids") or []),
+            "parent_review_task_id": parent_id,
+            "parent_source_frame_end": end,
+            "parent_source_frame_start": start,
+            "read_only_context_source_frame_end": min(
+                manifest.source_frame_end,
+                child_end + context_frames,
+            ),
+            "read_only_context_source_frame_start": max(
+                manifest.source_frame_start,
+                child_start - context_frames,
+            ),
+            "review_task_id": child_id,
+            "source_frame_end": child_end,
+            "source_frame_start": child_start,
+            "task_chunking": {
+                "hard_max_seconds": 5.0,
+                "schema_version": "review_task_chunk.v1",
+                "target_seconds": 3.0,
+            },
+            "title": f"{parent_title} - part {index} of {total}",
+        }
+        child_tasks.append(child_task)
+        child_rows.append(
+            {
+                "duration_seconds": round(duration_seconds, 6),
+                "duration_violation": duration_seconds > 5.0 + 1e-6,
+                "review_task_id": child_id,
+                "source_frame_end": child_end,
+                "source_frame_start": child_start,
+            }
+        )
+    return child_tasks, {
+        "case_id": manifest.case_id,
+        "child_count": total,
+        "children": child_rows,
+        "parent_raw_signal_ids": list(task.get("raw_signal_ids") or []),
+        "parent_review_task_id": parent_id,
+        "split": True,
+        "source_frame_end": end,
+        "source_frame_start": start,
+    }
+
+
 def normalize_review_task_class(root_cause: str) -> str:
     if root_cause in {"optional_spot_check", "spot_check"}:
         return "spot_check"
@@ -3272,6 +4430,7 @@ def write_workspace_assets(
     if frontend == "legacy":
         write_legacy_workspace_assets(package_root)
         return
+    apply_review_entity_coverage_patch(package_root)
     write_react_workspace_assets(package_root, build_frontend=build_frontend)
 
 
@@ -3338,6 +4497,7 @@ def frontend_build_manifest(*, frontend_root: Path, package_root: Path) -> dict[
         "api_schema_version": review_api_contract.API_SCHEMA_VERSION,
         "backend_package_version": SCHEMA_VERSION,
         "build_timestamp_utc": media.utc_timestamp(),
+        "frontend_milestone_version": FRONTEND_MILESTONE_VERSION,
         "frontend_git_tree_hash": frontend_source_tree_hash(frontend_root),
         "node_version": command_text(["node", "--version"], cwd=frontend_root),
         "npm_version": command_text(["npm", "--version"], cwd=frontend_root),
@@ -3570,7 +4730,461 @@ Open the workspace with:
 class FinalReviewWorkspaceServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], package_root: Path) -> None:
         self.package_root = package_root.resolve()
+        self.materialization_jobs = MaterializationJobManager(self.package_root)
         super().__init__(server_address, FinalReviewWorkspaceHandler)
+
+
+class MaterializationJobManager:
+    def __init__(self, package_root: Path) -> None:
+        self.package_root = package_root.resolve()
+        self.lock = threading.RLock()
+        self.jobs: dict[str, dict[str, Any]] = {}
+        self.case_state: dict[tuple[str, str], dict[str, Any]] = {}
+        self.debounce_seconds = 0.85
+        self.metrics: dict[str, dict[str, Any]] = {}
+        self.timing_records: list[dict[str, Any]] = []
+
+    def enqueue(
+        self,
+        *,
+        session_dir: Path,
+        case_id: str,
+        actor: dict[str, Any],
+        reason: str,
+        accepted_revision: str | None,
+        affected_entity_ids: list[str] | None = None,
+        requested_policy: str | None = None,
+    ) -> dict[str, Any]:
+        job_id = f"materialize_{uuid.uuid4().hex}"
+        session_dir = session_dir.resolve()
+        session_id = session_dir.name
+        job = {
+            "accepted_working_state_revision": accepted_revision,
+            "affected_entity_ids": affected_entity_ids or [],
+            "accepted_at_utc": media.utc_timestamp(),
+            "case_id": case_id,
+            "completed_at_utc": None,
+            "created_at_utc": media.utc_timestamp(),
+            "error": None,
+            "job_id": job_id,
+            "latest_reviewed": None,
+            "materialization": None,
+            "queued_until_utc": None,
+            "reason": reason,
+            "requested_policy": requested_policy,
+            "schema_version": "reviewed_media_materialization_job.v1",
+            "session_id": session_id,
+            "started_at_utc": None,
+            "status": "queued",
+            "superseded_by": None,
+        }
+        key = (session_id, case_id)
+        with self.lock:
+            self.jobs[job_id] = job
+            state = self.case_state.setdefault(
+                key,
+                {"debounce_timer": None, "running": None, "latest_requested": None},
+            )
+            previous_pending = state.get("latest_requested")
+            self._metric(case_id, "accepted_state_mutations", 1)
+            if previous_pending and previous_pending != state.get("running"):
+                pending_job = self.jobs.get(str(previous_pending))
+                if pending_job and pending_job.get("status") == "queued":
+                    job["affected_entity_ids"] = unique_sorted(
+                        [
+                            *list(pending_job.get("affected_entity_ids") or []),
+                            *list(job.get("affected_entity_ids") or []),
+                        ]
+                    )
+                    pending_job["status"] = "superseded"
+                    pending_job["superseded_by"] = job_id
+                    self._metric(case_id, "jobs_coalesced", 1)
+                    self._record_timing_locked(
+                        pending_job,
+                        status="superseded",
+                        state_projection_duration_ms=0,
+                    )
+            state["latest_requested"] = job_id
+            if not state.get("running"):
+                self._schedule_locked(key, session_dir, actor)
+            self._write_audit_locked()
+        return dict(job)
+
+    def get(self, job_id: str) -> dict[str, Any] | None:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            return dict(job) if job else None
+
+    def retry(self, *, job_id: str, actor: dict[str, Any]) -> dict[str, Any]:
+        with self.lock:
+            job = self.jobs.get(job_id)
+            if not job:
+                raise KeyError(job_id)
+            session_dir = review_sessions.session_directory(
+                self.package_root,
+                str(job.get("session_id") or ""),
+            )
+        return self.enqueue(
+            session_dir=session_dir,
+            case_id=str(job.get("case_id") or ""),
+            actor=actor,
+            reason=f"Retry: {job.get('reason') or 'Latest reviewed media update.'}",
+            accepted_revision=str(job.get("accepted_working_state_revision") or ""),
+            affected_entity_ids=list(job.get("affected_entity_ids") or []),
+            requested_policy=job.get("requested_policy"),
+        )
+
+    def _start_locked(
+        self,
+        key: tuple[str, str],
+        job_id: str,
+        session_dir: Path,
+        actor: dict[str, Any],
+    ) -> None:
+        state = self.case_state.setdefault(
+            key,
+            {"debounce_timer": None, "running": None, "latest_requested": None},
+        )
+        timer = state.get("debounce_timer")
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        state["debounce_timer"] = None
+        state["running"] = job_id
+        job = self.jobs[job_id]
+        job["status"] = "running"
+        job["started_at_utc"] = media.utc_timestamp()
+        self._metric(str(job.get("case_id") or ""), "materialization_jobs_started", 1)
+        thread = threading.Thread(
+            target=self._run_job,
+            args=(key, job_id, session_dir.resolve(), dict(actor)),
+            daemon=True,
+        )
+        thread.start()
+
+    def _schedule_locked(
+        self,
+        key: tuple[str, str],
+        session_dir: Path,
+        actor: dict[str, Any],
+    ) -> None:
+        state = self.case_state.setdefault(
+            key,
+            {"debounce_timer": None, "running": None, "latest_requested": None},
+        )
+        timer = state.get("debounce_timer")
+        if isinstance(timer, threading.Timer):
+            timer.cancel()
+        job_id = str(state.get("latest_requested") or "")
+        job = self.jobs.get(job_id)
+        if job is not None:
+            job["queued_until_utc"] = media.utc_timestamp()
+        timer = threading.Timer(
+            self.debounce_seconds,
+            self._start_latest_after_debounce,
+            args=(key, session_dir.resolve(), dict(actor)),
+        )
+        timer.daemon = True
+        state["debounce_timer"] = timer
+        timer.start()
+
+    def _start_latest_after_debounce(
+        self,
+        key: tuple[str, str],
+        session_dir: Path,
+        actor: dict[str, Any],
+    ) -> None:
+        with self.lock:
+            state = self.case_state.setdefault(
+                key,
+                {"debounce_timer": None, "running": None, "latest_requested": None},
+            )
+            if state.get("running"):
+                return
+            job_id = str(state.get("latest_requested") or "")
+            job = self.jobs.get(job_id)
+            if not job or job.get("status") != "queued":
+                return
+            self._start_locked(key, job_id, session_dir, actor)
+
+    def _run_job(
+        self,
+        key: tuple[str, str],
+        job_id: str,
+        session_dir: Path,
+        actor: dict[str, Any],
+    ) -> None:
+        job = self.jobs[job_id]
+        case_id = str(job["case_id"])
+        accepted_revision = str(job.get("accepted_working_state_revision") or "")
+        start_monotonic = time.monotonic()
+        state_projection_start = time.monotonic()
+        current_state = review_working_state.derive_working_state(self.package_root, session_dir)
+        state_projection_duration_ms = int((time.monotonic() - state_projection_start) * 1000)
+        current_revision = str(
+            current_state.get("active_projection_hash") or current_state.get("state_hash") or ""
+        )
+        if accepted_revision and current_revision != accepted_revision:
+            with self.lock:
+                job["completed_at_utc"] = media.utc_timestamp()
+                job["error"] = "Superseded by a newer accepted review state."
+                job["status"] = "superseded"
+                self._metric(case_id, "stale_jobs_discarded", 1)
+                self._record_timing_locked(
+                    job,
+                    status="superseded",
+                    state_projection_duration_ms=state_projection_duration_ms,
+                )
+                self._write_audit_locked()
+            self._start_next_if_needed(key, session_dir, actor, completed_job_id=job_id)
+            return
+        start_event = review_sessions.append_event(
+            session_dir,
+            event_type="reviewed_media_materialization_started",
+            actor=actor,
+            case_id=case_id,
+            task_id=None,
+            before_state=None,
+            after_state={
+                "case_id": case_id,
+                "job_id": job_id,
+                "state_hash": job.get("accepted_working_state_revision"),
+            },
+            note=str(job.get("reason") or "Latest reviewed media update started."),
+            application_hashes={},
+        )
+        try:
+            materialization = self._cached_materialization(
+                session_dir=session_dir,
+                case_id=case_id,
+                accepted_revision=accepted_revision,
+            )
+            if materialization is None:
+                materialization = review_working_state.materialize_latest_reviewed(
+                    self.package_root,
+                    session_dir,
+                    case_id=case_id,
+                    accepted_revision=accepted_revision,
+                    actor=None,
+                    event_reason=str(job.get("reason") or "Latest reviewed media updated."),
+                )
+            else:
+                self._metric(case_id, "cache_hits", 1)
+            after_render_state = review_working_state.derive_working_state(
+                self.package_root,
+                session_dir,
+            )
+            after_render_revision = str(
+                after_render_state.get("active_projection_hash")
+                or after_render_state.get("state_hash")
+                or ""
+            )
+            if accepted_revision and after_render_revision != accepted_revision:
+                with self.lock:
+                    job["completed_at_utc"] = media.utc_timestamp()
+                    job["error"] = (
+                        "Rendered result discarded because a newer review state was accepted."
+                    )
+                    job["status"] = "superseded"
+                    self._metric(case_id, "stale_jobs_discarded", 1)
+                    self._record_timing_locked(
+                        job,
+                        materialization=materialization,
+                        status="superseded",
+                        state_projection_duration_ms=state_projection_duration_ms,
+                    )
+                    self._write_audit_locked()
+                review_working_state.derive_working_state(self.package_root, session_dir)
+                return
+            completed_state = review_working_state.derive_working_state(
+                self.package_root,
+                session_dir,
+            )
+            complete_event = review_sessions.append_event(
+                session_dir,
+                event_type="reviewed_media_materialization_completed",
+                actor=actor,
+                case_id=case_id,
+                task_id=None,
+                before_state={"job_id": job_id, "started_event_hash": start_event["event_hash"]},
+                after_state={
+                    "case_id": case_id,
+                    "job_id": job_id,
+                    "latest_reviewed": materialization["latest_reviewed"],
+                    "active_projection_hash": completed_state.get("active_projection_hash"),
+                    "state_hash": completed_state.get("state_hash"),
+                },
+                note="Latest reviewed media update completed.",
+                application_hashes={
+                    "latest_reviewed_sha256": str(materialization.get("video_sha256") or "")
+                },
+            )
+            with self.lock:
+                job["completed_at_utc"] = media.utc_timestamp()
+                job["completed_event_hash"] = complete_event["event_hash"]
+                job["latest_reviewed"] = materialization["latest_reviewed"]
+                job["materialization"] = materialization
+                job["status"] = "completed"
+                job["working_state"] = review_working_state.derive_working_state(
+                    self.package_root,
+                    session_dir,
+                )
+                duration_ms = int((time.monotonic() - start_monotonic) * 1000)
+                self._metric(case_id, "full_materialization_duration_ms", duration_ms, mode="set")
+                self._metric(
+                    case_id,
+                    "final_published_revision",
+                    str(job.get("accepted_working_state_revision") or ""),
+                    mode="set",
+                )
+                self._record_timing_locked(
+                    job,
+                    materialization=materialization,
+                    status="completed",
+                    state_projection_duration_ms=state_projection_duration_ms,
+                )
+                self._write_audit_locked()
+        except Exception as exc:  # pragma: no cover - exercised through server integration
+            failure_event = review_sessions.append_event(
+                session_dir,
+                event_type="reviewed_media_materialization_failed",
+                actor=actor,
+                case_id=case_id,
+                task_id=None,
+                before_state={"job_id": job_id, "started_event_hash": start_event["event_hash"]},
+                after_state={"case_id": case_id, "error": str(exc), "job_id": job_id},
+                note=f"Latest reviewed media update failed: {exc}",
+                application_hashes={},
+            )
+            with self.lock:
+                job["completed_at_utc"] = media.utc_timestamp()
+                job["error"] = str(exc)
+                job["failed_event_hash"] = failure_event["event_hash"]
+                job["status"] = "failed"
+                self._record_timing_locked(
+                    job,
+                    status="failed",
+                    state_projection_duration_ms=state_projection_duration_ms,
+                )
+                self._write_audit_locked()
+        finally:
+            self._start_next_if_needed(key, session_dir, actor, completed_job_id=job_id)
+
+    def _start_next_if_needed(
+        self,
+        key: tuple[str, str],
+        session_dir: Path,
+        actor: dict[str, Any],
+        *,
+        completed_job_id: str,
+    ) -> None:
+        with self.lock:
+            state = self.case_state.setdefault(
+                key,
+                {"debounce_timer": None, "running": None, "latest_requested": None},
+            )
+            if state.get("running") == completed_job_id:
+                state["running"] = None
+            latest = state.get("latest_requested")
+            if latest and latest != completed_job_id:
+                next_job = self.jobs.get(str(latest))
+                if next_job and next_job.get("status") == "queued":
+                    self._schedule_locked(key, session_dir, actor)
+
+    def _cached_materialization(
+        self,
+        *,
+        session_dir: Path,
+        case_id: str,
+        accepted_revision: str,
+    ) -> dict[str, Any] | None:
+        if not accepted_revision:
+            return None
+        manifest_path = session_dir / "state" / f"{case_id}_latest_reviewed_manifest.json"
+        if not manifest_path.exists():
+            return None
+        materialization = read_json_file(manifest_path)
+        if materialization.get("accepted_working_state_revision") != accepted_revision:
+            return None
+        latest = dict(materialization.get("latest_reviewed") or {})
+        output = self.package_root / str(latest.get("path") or "")
+        if not latest or not output.exists():
+            return None
+        return materialization
+
+    def _metric(self, case_id: str, name: str, value: Any, *, mode: str = "add") -> None:
+        if not case_id:
+            return
+        row = self.metrics.setdefault(
+            case_id,
+            {
+                "accepted_state_mutations": 0,
+                "api_acceptance_latency_ms": 0,
+                "cache_hits": 0,
+                "final_published_revision": None,
+                "full_materialization_duration_ms": None,
+                "jobs_coalesced": 0,
+                "materialization_jobs_started": 0,
+                "stale_jobs_discarded": 0,
+            },
+        )
+        if mode == "set":
+            row[name] = value
+            return
+        row[name] = int(row.get(name) or 0) + int(value)
+
+    def _write_audit_locked(self) -> None:
+        write_json(
+            self.package_root / "materialization_job_audit.json",
+            {
+                "cases": self.metrics,
+                "created_at_utc": media.utc_timestamp(),
+                "schema_version": "materialization_job_audit.v1",
+            },
+        )
+        write_json(
+            self.package_root / "materialization_timing_audit.json",
+            {
+                "created_at_utc": media.utc_timestamp(),
+                "jobs": self.timing_records,
+                "schema_version": "materialization_timing_audit.v1",
+                "summary_by_case": self.metrics,
+            },
+        )
+
+    def _record_timing_locked(
+        self,
+        job: dict[str, Any],
+        *,
+        status: str,
+        state_projection_duration_ms: int,
+        materialization: dict[str, Any] | None = None,
+    ) -> None:
+        timing = dict((materialization or {}).get("timing") or {})
+        record = {
+            "accepted_at_utc": job.get("accepted_at_utc") or job.get("created_at_utc"),
+            "accepted_working_state_revision": job.get("accepted_working_state_revision"),
+            "affected_entity_ids": list(job.get("affected_entity_ids") or []),
+            "case_id": job.get("case_id"),
+            "completed_at_utc": job.get("completed_at_utc"),
+            "error": job.get("error"),
+            "job_id": job.get("job_id"),
+            "mutation_accepted_time": job.get("accepted_at_utc") or job.get("created_at_utc"),
+            "output_frame_count": timing.get("output_frame_count"),
+            "publication_duration_ms": timing.get("publication_duration_ms"),
+            "render_encode_duration_ms": timing.get("render_encode_duration_ms"),
+            "requested_policy": job.get("requested_policy"),
+            "state_projection_duration_ms": state_projection_duration_ms,
+            "status": status,
+            "superseded_by": job.get("superseded_by"),
+            "total_time_ms": timing.get("total_duration_ms"),
+            "effective_region_derivation_duration_ms": timing.get(
+                "effective_region_derivation_duration_ms"
+            ),
+        }
+        self.timing_records = [
+            row for row in self.timing_records if row.get("job_id") != job.get("job_id")
+        ]
+        self.timing_records.append(record)
 
 
 class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
@@ -3623,6 +5237,69 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         if path in {"/api/v1/workspace", "/api/v1/workspace/summary"}:
             self.send_json(review_api_contract.workspace_summary(self.server.package_root))
             return True
+        if path == "/api/v1/working-state":
+            query = parse_qs(parsed.query)
+            session_dir = self.session_dir_from_query(query)
+            if session_dir is None:
+                return True
+            self.send_json(
+                {
+                    "ok": True,
+                    "working_state": review_working_state.derive_working_state(
+                        self.server.package_root,
+                        session_dir,
+                    ),
+                }
+            )
+            return True
+        if path == "/api/v1/history":
+            query = parse_qs(parsed.query)
+            session_dir = self.session_dir_from_query(query)
+            if session_dir is None:
+                return True
+            self.send_json(review_working_state.history_events(session_dir))
+            return True
+        if path == "/api/v1/checkpoints":
+            query = parse_qs(parsed.query)
+            session_dir = self.session_dir_from_query(query)
+            if session_dir is None:
+                return True
+            self.send_json(
+                {
+                    "checkpoints": review_working_state.load_checkpoints(session_dir),
+                    "ok": True,
+                    "schema_version": "review_checkpoint_list.v1",
+                }
+            )
+            return True
+        if path.startswith("/api/v1/materialization-jobs/"):
+            job_id = path.removeprefix("/api/v1/materialization-jobs/").strip("/")
+            job = self.server.materialization_jobs.get(job_id)
+            if job is None:
+                self.send_json(
+                    {"error": "materialization job not found", "ok": False},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return True
+            self.send_json({"job": job, "ok": True})
+            return True
+        if path.startswith("/api/v1/cases/") and path.endswith("/versions"):
+            case_id = path.removeprefix("/api/v1/cases/").removesuffix("/versions").strip("/")
+            query = parse_qs(parsed.query)
+            session_id = str((query.get("session_id") or [""])[0])
+            session_dir = (
+                review_sessions.session_directory(self.server.package_root, session_id)
+                if session_id
+                else None
+            )
+            self.send_json(
+                review_working_state.case_versions(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=case_id,
+                )
+            )
+            return True
         if path.startswith("/api/v1/cases/"):
             case_id = path.rsplit("/", 1)[-1]
             case_path = self.server.package_root / "cases" / f"{case_id}.json"
@@ -3658,16 +5335,21 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     status=HTTPStatus.NOT_FOUND,
                 )
                 return True
+            working_state = review_working_state.derive_working_state(
+                self.server.package_root,
+                session_dir,
+            )
             self.send_json(
                 {
                     "attribution": review_sessions.load_reviewer_attribution(session_dir),
                     "chain": review_sessions.validate_event_hash_chain(session_dir),
-                    "corrections": load_jsonl_dicts(session_dir / "corrections.jsonl"),
-                    "decisions": review_sessions.load_current_decisions(session_dir),
+                    "corrections": list(working_state.get("manual_corrections") or []),
+                    "decisions": dict(working_state.get("task_decisions") or {}),
                     "events": review_sessions.load_events(session_dir),
                     "ok": True,
                     "session": read_json_file(session_dir / "review_session.json"),
                     "summary": read_json_file(session_dir / "review_summary.json"),
+                    "working_state": working_state,
                 }
             )
             return True
@@ -3711,7 +5393,13 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 user_agent=self.headers.get("User-Agent"),
                 include_hostname=bool(payload.get("include_hostname")),
             )
-            self.send_json({"ok": True, "session": session.to_dict()})
+            working_state = review_working_state.derive_working_state(
+                self.server.package_root,
+                review_sessions.session_directory(self.server.package_root, session.session_id),
+            )
+            self.send_json(
+                {"ok": True, "session": session.to_dict(), "working_state": working_state}
+            )
             return
         session_dir = review_sessions.session_directory(
             self.server.package_root,
@@ -3754,21 +5442,223 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             )
             self.send_json({"event": event, "ok": True})
             return
+        if path == "/api/corrections/preview":
+            from redactor.review_corrections import correction_from_dict
+
+            correction = correction_from_dict(payload["correction"])
+            preview = review_working_state.render_correction_preview(
+                self.server.package_root,
+                session_dir=session_dir,
+                correction=correction,
+                include_unsaved_correction=True,
+            )
+            self.send_json({"ok": True, "preview": preview})
+            return
         if path == "/api/corrections":
             from redactor.review_corrections import correction_from_dict
 
             correction = correction_from_dict(payload["correction"])
+            preview_token_result = review_working_state.validate_preview_token(
+                session_dir,
+                token=str(payload.get("preview_token") or ""),
+                correction=correction,
+            )
+            if not preview_token_result.get("ok"):
+                self.send_json(
+                    {"error": preview_token_result.get("error"), "ok": False},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
             event = review_sessions.append_correction_event(
                 session_dir,
                 actor=actor,
                 correction=correction,
             )
-            preview = render_correction_interval_preview(
-                self.server.package_root,
-                session_dir=session_dir,
-                correction=correction,
+            verification_task = review_working_state.create_correction_verification_task(correction)
+            verification_event = review_sessions.append_event(
+                session_dir,
+                event_type="manual_issue_created",
+                actor=actor,
+                case_id=correction.case_id,
+                task_id=verification_task["review_task_id"],
+                before_state=None,
+                after_state={"task": verification_task},
+                note="Correction verification task created.",
+                application_hashes={},
             )
-            self.send_json({"event": event, "ok": True, "preview": preview})
+            state = review_working_state.derive_working_state(self.server.package_root, session_dir)
+            materialization_job = self.server.materialization_jobs.enqueue(
+                session_dir=session_dir,
+                case_id=correction.case_id,
+                actor=actor,
+                reason="Latest reviewed media updated after correction save.",
+                accepted_revision=str(
+                    state.get("active_projection_hash") or state.get("state_hash") or ""
+                ),
+                affected_entity_ids=[correction.entity_id] if correction.entity_id else [],
+            )
+            self.send_json(
+                {
+                    "event": event,
+                    "events": [event, verification_event],
+                    "materialization_job": materialization_job,
+                    "ok": True,
+                    "preview": None,
+                    "verification_task": verification_task,
+                    "working_state": state,
+                }
+            )
+            return
+        if path == "/api/object-policy":
+            result = self.apply_object_policy(payload, actor, session_dir)
+            status = HTTPStatus.OK if result.get("ok", False) else HTTPStatus.CONFLICT
+            self.send_json(result, status=status)
+            return
+        if path == "/api/bulk-object-policy":
+            result = self.apply_bulk_object_policy(payload, actor, session_dir)
+            status = HTTPStatus.OK if result.get("ok", False) else HTTPStatus.CONFLICT
+            self.send_json(result, status=status)
+            return
+        if path == "/api/checkpoints":
+            checkpoint, event = review_working_state.create_checkpoint(
+                self.server.package_root,
+                session_dir,
+                actor=actor,
+                name=str(payload.get("name") or "Checkpoint"),
+                note=payload.get("note"),
+            )
+            self.send_json(
+                {
+                    "checkpoint": checkpoint,
+                    "event": event,
+                    "ok": True,
+                    "working_state": review_working_state.derive_working_state(
+                        self.server.package_root,
+                        session_dir,
+                    ),
+                }
+            )
+            return
+        if path == "/api/checkpoints/restore":
+            checkpoint, event, state = review_working_state.restore_checkpoint(
+                self.server.package_root,
+                session_dir,
+                actor=actor,
+                checkpoint_uuid=str(payload.get("checkpoint_uuid") or ""),
+            )
+            requested_case_id = str(payload.get("case_id") or "")
+            case_ids = (
+                [requested_case_id]
+                if requested_case_id
+                else [
+                    case_id
+                    for case_id in ("day", "night")
+                    if (self.server.package_root / "cases" / f"{case_id}.json").exists()
+                ]
+            )
+            materialization_jobs = [
+                self.server.materialization_jobs.enqueue(
+                    session_dir=session_dir,
+                    case_id=case_id,
+                    actor=actor,
+                    reason="Latest reviewed media restored from checkpoint.",
+                    accepted_revision=str(
+                        state.get("active_projection_hash") or state.get("state_hash") or ""
+                    ),
+                )
+                for case_id in case_ids
+            ]
+            state = review_working_state.derive_working_state(self.server.package_root, session_dir)
+            self.send_json(
+                {
+                    "checkpoint": checkpoint,
+                    "event": event,
+                    "materialization_jobs": materialization_jobs,
+                    "ok": True,
+                    "working_state": state,
+                }
+            )
+            return
+        if path == "/api/checkpoints/delete":
+            checkpoint, event, state = review_working_state.delete_checkpoint(
+                self.server.package_root,
+                session_dir,
+                actor=actor,
+                checkpoint_uuid=str(payload.get("checkpoint_uuid") or ""),
+            )
+            self.send_json(
+                {
+                    "checkpoint": checkpoint,
+                    "event": event,
+                    "ok": True,
+                    "working_state": state,
+                }
+            )
+            return
+        if path == "/api/checkpoints/restart-review":
+            requested_case_id = str(payload.get("case_id") or "")
+            event, state = review_working_state.restart_review_workflow(
+                self.server.package_root,
+                session_dir,
+                actor=actor,
+                case_id=requested_case_id,
+            )
+            self.send_json(
+                {
+                    "event": event,
+                    "materialization_jobs": [],
+                    "ok": True,
+                    "working_state": state,
+                }
+            )
+            return
+        if path == "/api/checkpoints/reset":
+            requested_case_id = str(payload.get("case_id") or "")
+            event, state = review_working_state.reset_to_automatic_baseline(
+                self.server.package_root,
+                session_dir,
+                actor=actor,
+                case_id=requested_case_id or None,
+            )
+            case_ids = (
+                [requested_case_id]
+                if requested_case_id
+                else [
+                    case_id
+                    for case_id in ("day", "night")
+                    if (self.server.package_root / "cases" / f"{case_id}.json").exists()
+                ]
+            )
+            materialization_jobs = [
+                self.server.materialization_jobs.enqueue(
+                    session_dir=session_dir,
+                    case_id=case_id,
+                    actor=actor,
+                    reason="Latest reviewed media reset to Automatic baseline after destructive edit reset.",
+                    accepted_revision=str(
+                        state.get("active_projection_hash") or state.get("state_hash") or ""
+                    ),
+                )
+                for case_id in case_ids
+            ]
+            self.send_json(
+                {
+                    "event": event,
+                    "materialization_jobs": materialization_jobs,
+                    "ok": True,
+                    "working_state": review_working_state.derive_working_state(
+                        self.server.package_root,
+                        session_dir,
+                    ),
+                }
+            )
+            return
+        if path == "/api/materialization-jobs/retry":
+            retry_job = self.server.materialization_jobs.retry(
+                job_id=str(payload.get("job_id") or ""),
+                actor=actor,
+            )
+            self.send_json({"job": retry_job, "ok": True})
             return
         if path == "/api/entity-events":
             entity_event = dict(payload.get("event") or {})
@@ -3788,6 +5678,19 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             return
         if path in {"/api/entities/merge", "/api/entities/split"}:
             event_type = "entities_merged" if path.endswith("merge") else "entity_split"
+            if event_type == "entities_merged":
+                if payload.get("entity_ids"):
+                    result = self.merge_selected_entities(payload, actor, session_dir)
+                    status = HTTPStatus.OK if result.get("ok", False) else HTTPStatus.CONFLICT
+                    self.send_json(result, status=status)
+                    return
+                merge_error = validate_entity_merge_payload(payload)
+                if merge_error:
+                    self.send_json(
+                        {"error": merge_error, "ok": False},
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
             event = review_sessions.append_event(
                 session_dir,
                 event_type=event_type,
@@ -3834,6 +5737,279 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             )
             return
         self.send_json({"error": "unknown endpoint", "ok": False}, status=HTTPStatus.NOT_FOUND)
+
+    def session_dir_from_query(self, query: dict[str, list[str]]) -> Path | None:
+        session_id = str((query.get("session_id") or [""])[0])
+        if not session_id:
+            self.send_json(
+                {"error": "session_id is required", "ok": False},
+                status=HTTPStatus.BAD_REQUEST,
+            )
+            return None
+        session_dir = review_sessions.session_directory(self.server.package_root, session_id)
+        if not session_dir.exists():
+            self.send_json(
+                {"error": "review session not found", "ok": False},
+                status=HTTPStatus.NOT_FOUND,
+            )
+            return None
+        return session_dir
+
+    def apply_object_policy(
+        self,
+        payload: dict[str, Any],
+        actor: dict[str, Any],
+        session_dir: Path,
+    ) -> dict[str, Any]:
+        case_id = str(payload.get("case_id") or "")
+        entity_id = str(payload.get("entity_id") or "")
+        policy = str(payload.get("policy") or "")
+        if policy not in {
+            privacy_entities.POLICY_REDACT,
+            privacy_entities.POLICY_KEEP_VISIBLE,
+            privacy_entities.POLICY_NOT_SENSITIVE,
+            privacy_entities.POLICY_REVIEW_REQUIRED,
+        }:
+            return {"error": f"unsupported object policy: {policy}", "ok": False}
+        entity = find_active_review_entity(
+            self.server.package_root,
+            session_dir=session_dir,
+            case_id=case_id,
+            entity_id=entity_id,
+        )
+        if entity is None:
+            return {"error": "review entity not found", "ok": False}
+        before = dict(entity)
+        verification_task_id = (
+            f"object_policy_verify_{case_id}_{entity_id}_{policy}"
+            if policy
+            in {privacy_entities.POLICY_KEEP_VISIBLE, privacy_entities.POLICY_NOT_SENSITIVE}
+            else None
+        )
+        after = before | {
+            "current_policy": policy,
+            "last_reviewer_policy_action": policy,
+            "privacy_action": policy,
+            "reviewer_override": True,
+            "verification_task_id": verification_task_id,
+        }
+        event = review_sessions.append_event(
+            session_dir,
+            event_type="entity_policy_changed",
+            actor=actor,
+            case_id=case_id,
+            task_id=None,
+            before_state=before,
+            after_state=after,
+            note=f"{after.get('label') or entity_id} set to {policy}.",
+            application_hashes={},
+        )
+        verification_event = None
+        verification_task = None
+        if verification_task_id:
+            verification_task = policy_verification_task(case_id, after, verification_task_id)
+            verification_event = review_sessions.append_event(
+                session_dir,
+                event_type="manual_issue_created",
+                actor=actor,
+                case_id=case_id,
+                task_id=verification_task_id,
+                before_state=None,
+                after_state={"task": verification_task},
+                note="Object policy verification task created.",
+                application_hashes={},
+            )
+        events = [event]
+        if verification_event is not None:
+            events.append(verification_event)
+        state = review_working_state.derive_working_state(
+            self.server.package_root,
+            session_dir,
+        )
+        materialization_job = self.server.materialization_jobs.enqueue(
+            session_dir=session_dir,
+            case_id=case_id,
+            actor=actor,
+            reason="Latest reviewed media updated after object policy change.",
+            accepted_revision=str(
+                state.get("active_projection_hash") or state.get("state_hash") or ""
+            ),
+            affected_entity_ids=[entity_id],
+            requested_policy=policy,
+        )
+        return {
+            "entity": after,
+            "event": event,
+            "events": events,
+            "materialization_job": materialization_job,
+            "materialization_required": True,
+            "ok": True,
+            "verification_task": verification_task,
+            "working_state": state,
+        }
+
+    def apply_bulk_object_policy(
+        self,
+        payload: dict[str, Any],
+        actor: dict[str, Any],
+        session_dir: Path,
+    ) -> dict[str, Any]:
+        case_id = str(payload.get("case_id") or "")
+        policy = str(payload.get("policy") or "")
+        entity_ids = [str(item) for item in list(payload.get("entity_ids") or [])]
+        if not entity_ids:
+            return {"error": "at least one entity_id is required", "ok": False}
+        if policy not in {
+            privacy_entities.POLICY_REDACT,
+            privacy_entities.POLICY_KEEP_VISIBLE,
+            privacy_entities.POLICY_NOT_SENSITIVE,
+            privacy_entities.POLICY_REVIEW_REQUIRED,
+        }:
+            return {"error": f"unsupported object policy: {policy}", "ok": False}
+        before_entities: list[dict[str, Any]] = []
+        after_entities: list[dict[str, Any]] = []
+        for entity_id in entity_ids:
+            entity = find_active_review_entity(
+                self.server.package_root,
+                session_dir=session_dir,
+                case_id=case_id,
+                entity_id=entity_id,
+            )
+            if entity is None:
+                return {"error": f"review entity not found: {entity_id}", "ok": False}
+            before_entities.append(entity)
+            after_entities.append(
+                entity
+                | {
+                    "current_policy": policy,
+                    "last_reviewer_policy_action": policy,
+                    "privacy_action": policy,
+                    "reviewer_override": True,
+                }
+            )
+        event = review_sessions.append_event(
+            session_dir,
+            event_type="bulk_entity_policy_changed",
+            actor=actor,
+            case_id=case_id,
+            task_id=None,
+            before_state={"entities": before_entities},
+            after_state={"entities": after_entities, "policy": policy},
+            note=f"Bulk object policy changed for {len(after_entities)} objects.",
+            application_hashes={},
+        )
+        state = review_working_state.derive_working_state(
+            self.server.package_root,
+            session_dir,
+        )
+        materialization_job = self.server.materialization_jobs.enqueue(
+            session_dir=session_dir,
+            case_id=case_id,
+            actor=actor,
+            reason="Latest reviewed media updated after bulk object policy change.",
+            accepted_revision=str(
+                state.get("active_projection_hash") or state.get("state_hash") or ""
+            ),
+            affected_entity_ids=entity_ids,
+            requested_policy=policy,
+        )
+        return {
+            "entities": after_entities,
+            "event": event,
+            "events": [event],
+            "materialization_job": materialization_job,
+            "materialization_required": True,
+            "ok": True,
+            "working_state": state,
+        }
+
+    def merge_selected_entities(
+        self,
+        payload: dict[str, Any],
+        actor: dict[str, Any],
+        session_dir: Path,
+    ) -> dict[str, Any]:
+        case_id = str(payload.get("case_id") or "")
+        entity_ids = [str(item) for item in list(payload.get("entity_ids") or [])]
+        if len(entity_ids) < 2:
+            return {"error": "Select at least two entities to merge.", "ok": False}
+        entities: list[dict[str, Any]] = []
+        for entity_id in entity_ids:
+            entity = find_active_review_entity(
+                self.server.package_root,
+                session_dir=session_dir,
+                case_id=case_id,
+                entity_id=entity_id,
+            )
+            if entity is None:
+                return {"error": f"review entity not found: {entity_id}", "ok": False}
+            entities.append(entity)
+        categories = {str(entity.get("category") or "") for entity in entities}
+        cases = {str(entity.get("case_id") or "") for entity in entities}
+        if len(cases) != 1 or case_id not in cases:
+            return {"error": "Merge rejected: objects belong to different cases.", "ok": False}
+        if len(categories) != 1:
+            return {"error": "Merge rejected: objects belong to different categories.", "ok": False}
+        state_before = review_working_state.derive_working_state(
+            self.server.package_root,
+            session_dir,
+        )
+        canonical = canonical_merged_entity(entities, session_dir=session_dir)
+        retired_ids = [str(entity.get("entity_id") or "") for entity in entities]
+        overlap_warning = any_entities_overlap(entities)
+        after_state = {
+            "canonical_merged_entity_uuid": canonical["entity_id"],
+            "materialization_required": False,
+            "overlapping_frame_warning": overlap_warning,
+            "primary": canonical,
+            "resulting_policy": canonical.get("current_policy"),
+            "retired_entity_ids": retired_ids,
+            "retired_entity_uuids": retired_ids,
+            "source_entity_ids": retired_ids,
+            "working_state_revision": state_before.get("state_hash"),
+        }
+        event = review_sessions.append_event(
+            session_dir,
+            event_type="entities_merged",
+            actor=actor,
+            case_id=case_id,
+            task_id=None,
+            before_state={"entities": entities},
+            after_state=after_state,
+            note=str(payload.get("reason") or "Reviewer confirmed object merge."),
+            application_hashes={
+                "source_evidence_hash": stable_hash(
+                    {
+                        "source_entity_ids": retired_ids,
+                        "tracks": [
+                            sorted(review_working_state.entity_track_ids(entity))
+                            for entity in entities
+                        ],
+                    }
+                )
+            },
+        )
+        append_merged_entity_audits(
+            self.server.package_root,
+            case_id=case_id,
+            canonical=canonical,
+            retired_entities=entities,
+        )
+        state = review_working_state.derive_working_state(
+            self.server.package_root,
+            session_dir,
+        )
+        return {
+            "canonical_merged_entity_uuid": canonical["entity_id"],
+            "event": event,
+            "merged_entity": canonical,
+            "ok": True,
+            "retired_entity_uuids": retired_ids,
+            "resulting_policy": canonical.get("current_policy"),
+            "source_evidence_preserved": True,
+            "working_state": state,
+            "working_state_revision": state.get("state_hash"),
+        }
 
     def read_json_body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
@@ -3916,6 +6092,291 @@ def legacy_api_path(path: str) -> str:
     if path.startswith("/api/v1/"):
         return "/api/" + path.removeprefix("/api/v1/")
     return path
+
+
+def find_review_entity(
+    package_root: Path, *, case_id: str, entity_id: str
+) -> dict[str, Any] | None:
+    index_path = package_root / "review_entities.json"
+    if not index_path.exists():
+        return None
+    index = read_json_file(index_path)
+    for entity in list(dict(index.get("cases") or {}).get(case_id) or []):
+        if str(entity.get("entity_id") or "") == entity_id:
+            return dict(entity)
+    return None
+
+
+def find_active_review_entity(
+    package_root: Path,
+    *,
+    session_dir: Path,
+    case_id: str,
+    entity_id: str,
+) -> dict[str, Any] | None:
+    state = review_working_state.derive_working_state(package_root, session_dir)
+    baseline = read_json_file(package_root / "review_entities.json")
+    entities = list(dict(baseline.get("cases") or {}).get(case_id) or [])
+    for entity in review_working_state.effective_case_entities(entities, state):
+        if str(entity.get("entity_id") or "") == entity_id:
+            return dict(entity)
+    return None
+
+
+def canonical_merged_entity(
+    entities: list[dict[str, Any]],
+    *,
+    session_dir: Path,
+) -> dict[str, Any]:
+    ordered = sorted(entities, key=lambda entity: str(entity.get("entity_id") or ""))
+    source_ids = [str(entity.get("entity_id") or "") for entity in ordered]
+    category = str(ordered[0].get("category") or "")
+    case_id = str(ordered[0].get("case_id") or "")
+    current_head = review_working_state.current_event_chain_head(session_dir)
+    canonical_id = (
+        f"entity_merged_{stable_hash({'head': current_head, 'source_entity_ids': source_ids})[:24]}"
+    )
+    policies = {
+        review_working_state.inherited_policy(entity)
+        for entity in ordered
+        if review_working_state.inherited_policy(entity)
+    }
+    resulting_policy = (
+        next(iter(policies)) if len(policies) == 1 else privacy_entities.POLICY_REVIEW_REQUIRED
+    )
+    policy_reason = (
+        "all_selected_entities_shared_policy"
+        if len(policies) == 1
+        else "conflicting_selected_policies"
+    )
+    representative = choose_merge_representative(ordered)
+    first_frames = [
+        int(entity["first_visible_source_frame"])
+        for entity in ordered
+        if isinstance(entity.get("first_visible_source_frame"), int)
+    ]
+    last_frames = [
+        int(entity["last_visible_source_frame"])
+        for entity in ordered
+        if isinstance(entity.get("last_visible_source_frame"), int)
+    ]
+    evidence_summary = merge_evidence_summary(ordered)
+    label_prefix = "Person" if category == CATEGORY_FACE else "Plate"
+    group_number = merged_group_number_for_selection(
+        session_dir=session_dir,
+        case_id=case_id,
+        category=category,
+        entities=ordered,
+    )
+    group_label = f"Merged {label_prefix} {group_number:02d}"
+    lineage = []
+    for entity in ordered:
+        lineage.extend(list(entity.get("merge_split_lineage") or []))
+    lineage.append(
+        {
+            "operation": "merge",
+            "result_entity_id": canonical_id,
+            "source_entity_ids": source_ids,
+        }
+    )
+    merged = dict(representative)
+    merged.update(
+        {
+            "aliases": source_ids,
+            "attached_fragment_track_ids": unique_sorted(
+                item
+                for entity in ordered
+                for item in list(entity.get("attached_fragment_track_ids") or [])
+            ),
+            "automatic_source_track_ids": unique_sorted(
+                item
+                for entity in ordered
+                for item in list(entity.get("automatic_source_track_ids") or [])
+            ),
+            "case_id": case_id,
+            "category": category,
+            "current_policy": resulting_policy,
+            "current_status": "active",
+            "default_privacy_policy": resulting_policy,
+            "display_name": group_label,
+            "entity_id": canonical_id,
+            "entity_uuid": canonical_id,
+            "evidence_summary": evidence_summary,
+            "first_visible_source_frame": min(first_frames) if first_frames else None,
+            "label": group_label,
+            "last_visible_source_frame": max(last_frames) if last_frames else None,
+            "member_detector_tracker_ids": unique_sorted(
+                item
+                for entity in ordered
+                for item in list(entity.get("member_detector_tracker_ids") or [])
+            ),
+            "merge_split_lineage": lineage,
+            "privacy_action": resulting_policy,
+            "merged_display_sequence": group_number,
+            "merge_policy_initialization": {
+                "input_policies": sorted(policies),
+                "reason": policy_reason,
+                "resulting_policy": resulting_policy,
+                "schema_version": "merged_entity_policy_initialization.v1",
+            },
+            "review_entity_state": (
+                "confirmed"
+                if all(entity.get("review_entity_state") == "confirmed" for entity in ordered)
+                else "needs_review"
+            ),
+            "review_state": "needs_review"
+            if resulting_policy == privacy_entities.POLICY_REVIEW_REQUIRED
+            else "reviewed",
+            "source_entity_ids": source_ids,
+        }
+    )
+    bbox = representative_bbox(merged)
+    if bbox:
+        merged["representative_bbox"] = bbox
+    return merged
+
+
+def merged_group_number_for_selection(
+    *,
+    session_dir: Path,
+    case_id: str,
+    category: str,
+    entities: list[dict[str, Any]],
+) -> int:
+    existing_numbers = [
+        int(entity.get("merged_display_sequence"))
+        for entity in entities
+        if isinstance(entity.get("merged_display_sequence"), int)
+    ]
+    if existing_numbers:
+        return min(existing_numbers)
+    max_seen = 0
+    for event in review_sessions.load_events(session_dir):
+        if event.get("event_type") != "entities_merged":
+            continue
+        if str(event.get("case_id") or "") != case_id:
+            continue
+        primary = dict(dict(event.get("after_state") or {}).get("primary") or {})
+        if str(primary.get("category") or "") != category:
+            continue
+        value = primary.get("merged_display_sequence")
+        if isinstance(value, int):
+            max_seen = max(max_seen, value)
+    return max_seen + 1
+
+
+def choose_merge_representative(entities: list[dict[str, Any]]) -> dict[str, Any]:
+    return max(
+        entities,
+        key=lambda entity: (
+            1 if representative_bbox(entity) else 0,
+            float(dict(entity.get("representative_quality") or {}).get("relative_area") or 0),
+            int(dict(entity.get("evidence_summary") or {}).get("review_observation_count") or 0),
+        ),
+    )
+
+
+def representative_bbox(entity: dict[str, Any]) -> list[int] | None:
+    for key in ("representative_bbox", "representative_bbox_xyxy"):
+        bbox = entity.get(key)
+        if isinstance(bbox, list) and len(bbox) == 4:
+            return [int(value) for value in bbox]
+    quality = dict(entity.get("representative_quality") or {})
+    bbox = quality.get("bbox_xyxy")
+    if isinstance(bbox, list) and len(bbox) == 4:
+        return [int(value) for value in bbox]
+    return None
+
+
+def merge_evidence_summary(entities: list[dict[str, Any]]) -> dict[str, Any]:
+    total_regions = 0
+    total_observations = 0
+    total_tracklets = 0
+    provenance_counts: Counter[str] = Counter()
+    for entity in entities:
+        summary = dict(entity.get("evidence_summary") or {})
+        total_regions += int(summary.get("region_count") or 0)
+        total_observations += int(summary.get("review_observation_count") or 0)
+        total_tracklets += int(
+            summary.get("review_tracklet_count") or summary.get("tracklet_count") or 0
+        )
+        provenance_counts.update(dict(summary.get("provenance_counts") or {}))
+    return {
+        "provenance_counts": dict(sorted(provenance_counts.items())),
+        "region_count": total_regions,
+        "review_entity_state": "confirmed"
+        if all(entity.get("review_entity_state") == "confirmed" for entity in entities)
+        else "needs_review",
+        "review_observation_count": total_observations,
+        "review_tracklet_count": total_tracklets,
+        "tracklet_count": total_tracklets,
+    }
+
+
+def any_entities_overlap(entities: list[dict[str, Any]]) -> bool:
+    for index, left in enumerate(entities):
+        for right in entities[index + 1 :]:
+            if entity_spans_overlap(left, right):
+                return True
+    return False
+
+
+def entity_spans_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    l1 = left.get("first_visible_source_frame")
+    l2 = left.get("last_visible_source_frame")
+    r1 = right.get("first_visible_source_frame")
+    r2 = right.get("last_visible_source_frame")
+    if not all(isinstance(value, int) for value in (l1, l2, r1, r2)):
+        return False
+    return max(int(l1), int(r1)) <= min(int(l2), int(r2))
+
+
+def unique_sorted(values: Any) -> list[str]:
+    return sorted({str(value) for value in values if value is not None})
+
+
+def policy_verification_task(case_id: str, entity: dict[str, Any], task_id: str) -> dict[str, Any]:
+    frame = entity.get("first_visible_source_frame")
+    source_frame = int(frame) if isinstance(frame, int) else 0
+    policy = str(entity.get("current_policy") or entity.get("privacy_action") or "")
+    label = "Keep visible" if policy == privacy_entities.POLICY_KEEP_VISIBLE else "Not sensitive"
+    return {
+        "blocking": True,
+        "case_id": case_id,
+        "category": str(entity.get("category") or ""),
+        "correction_required": False,
+        "decision_state": "pending",
+        "issue_type": "entity_policy_verification",
+        "normal_task_class": "entity_policy_verification",
+        "raw_signal_ids": [],
+        "review_task_id": task_id,
+        "schema_version": "case_reviewer_task.v1",
+        "severity": "blocker",
+        "source_frame_end": source_frame,
+        "source_frame_start": source_frame,
+        "technical_only": False,
+        "title": f"Verify {label} for {entity.get('label') or 'review object'}",
+        "what_happened": "Reviewer changed this object policy.",
+        "what_to_inspect": "Confirm this object policy is correct before finalization.",
+    }
+
+
+def validate_entity_merge_payload(payload: dict[str, Any]) -> str | None:
+    before = dict(payload.get("before_state") or {})
+    source = dict(before.get("source") or before.get("primary") or {})
+    target = dict(before.get("target") or before.get("secondary") or {})
+    if not source or not target:
+        return "Merge rejected: source and target entity states are required."
+    if source.get("case_id") != target.get("case_id"):
+        return "Merge rejected: objects belong to different cases."
+    if source.get("category") != target.get("category"):
+        return "Merge rejected: objects belong to different categories."
+    after = dict(payload.get("after_state") or {})
+    retired = set(str(item) for item in after.get("retired_entity_ids") or [])
+    target_id = str(target.get("entity_id") or "")
+    if target_id and target_id not in retired:
+        return "Merge rejected: retired target entity is missing from after_state."
+    return None
 
 
 def copy_if_exists(src: Path, dst: Path) -> None:
@@ -4071,6 +6532,8 @@ def backend_parity_audit(reference_root: Path, candidate_root: Path) -> dict[str
     candidate_root = candidate_root.resolve()
     compared: list[dict[str, Any]] = []
     errors: list[str] = []
+    allowed_entity_registry_deltas = allowed_backend_parity_package_deltas(candidate_root)
+    entity_registry_deltas: list[dict[str, Any]] = []
     patterns = (
         "cases/*.json",
         "entities/*.json",
@@ -4099,24 +6562,39 @@ def backend_parity_audit(reference_root: Path, candidate_root: Path) -> dict[str
         reference_hash = media.sha256_file(reference_path)
         candidate_hash = media.sha256_file(candidate_path) if candidate_path.exists() else None
         passed = reference_hash == candidate_hash
+        allowed_delta = bool(
+            candidate_path.exists()
+            and not passed
+            and relative_path in allowed_entity_registry_deltas
+        )
         if not candidate_path.exists():
             errors.append(f"missing candidate artifact: {relative_path}")
-        elif not passed:
+        elif not passed and not allowed_delta:
             errors.append(f"artifact hash mismatch: {relative_path}")
+        if allowed_delta:
+            entity_registry_deltas.append(
+                {
+                    "path": relative_path,
+                    "reason": allowed_entity_registry_deltas[relative_path],
+                }
+            )
         compared.append(
             {
+                "allowed_delta": allowed_delta,
                 "candidate_sha256": candidate_hash,
                 "path": relative_path,
-                "passed": passed,
+                "passed": passed or allowed_delta,
                 "reference_sha256": reference_hash,
             }
         )
     rendered_media = [item for item in compared if item["path"].startswith("media/")]
     privacy_regions = [item for item in compared if item["path"].startswith("regions/")]
     return {
-        "candidate_root": candidate_root.as_posix(),
+        "candidate_root": display_package_path(candidate_root),
         "compared_count": len(compared),
         "detector_tracker_evidence_render_hashes_preserved": not errors,
+        "entity_registry_coverage_delta_count": len(entity_registry_deltas),
+        "entity_registry_coverage_deltas": entity_registry_deltas,
         "error_count": len(errors),
         "errors": errors,
         "items": compared,
@@ -4124,10 +6602,131 @@ def backend_parity_audit(reference_root: Path, candidate_root: Path) -> dict[str
         "media_hashes_preserved": all(item["passed"] for item in rendered_media),
         "privacy_region_hash_count": len(privacy_regions),
         "privacy_regions_preserved": all(item["passed"] for item in privacy_regions),
-        "reference_root": reference_root.as_posix(),
+        "reference_root": display_package_path(reference_root),
         "schema_version": "final_review_backend_parity_audit.v1",
         "passed": not errors,
     }
+
+
+def display_package_path(path: Path) -> str:
+    try:
+        return path.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError:
+        return path.name
+
+
+def allowed_backend_parity_package_deltas(candidate_root: Path) -> dict[str, str]:
+    allowed: dict[str, str] = {}
+    allowed.update(allowed_frame_aligned_role_deltas(candidate_root))
+    allowed.update(allowed_backend_parity_entity_registry_deltas(candidate_root))
+    allowed.update(allowed_backend_parity_task_chunking_deltas(candidate_root))
+    return allowed
+
+
+def allowed_backend_parity_task_chunking_deltas(candidate_root: Path) -> dict[str, str]:
+    audit_path = candidate_root / "review_task_chunking_audit.json"
+    if not audit_path.exists():
+        return {}
+    audit = read_json_file(audit_path)
+    if audit.get("passed") is False:
+        return {}
+    if not any(bool(row.get("split")) for row in list(audit.get("parents") or [])):
+        return {}
+    return {
+        "reviewer_tasks.json": "reviewer-facing long intervals split into non-overlapping child tasks",
+        "timeline_marker_audit.json": "timeline markers regenerated from reviewer-facing child tasks",
+    }
+
+
+def allowed_frame_aligned_role_deltas(candidate_root: Path) -> dict[str, str]:
+    audit_path = candidate_root / "frame_aligned_review_roles_audit.json"
+    if not audit_path.exists():
+        return {}
+    audit = read_json_file(audit_path)
+    if audit.get("passed") is False:
+        return {}
+    allowed: dict[str, str] = {}
+    for case_id, case_audit in dict(audit.get("cases") or {}).items():
+        added_roles = set(case_audit.get("added_roles") or [])
+        if added_roles <= {"automatic", "latest_reviewed"} and added_roles:
+            allowed[f"cases/{case_id}.json"] = (
+                "frame-aligned logical review roles added without changing media bytes"
+            )
+    return allowed
+
+
+def allowed_backend_parity_entity_registry_deltas(candidate_root: Path) -> dict[str, str]:
+    audit_path = candidate_root / "review_entity_coverage_audit.json"
+    allowed: dict[str, str] = {}
+    if audit_path.exists():
+        audit = read_json_file(audit_path)
+        if audit.get("passed") is not False:
+            cases = audit.get("cases") or {}
+            for case_id, case_audit in cases.items():
+                added = list(case_audit.get("explicit_keep_tracks_added") or [])
+                bbox_enriched = list(
+                    case_audit.get("representative_bbox_enriched_entity_ids") or []
+                )
+                if bbox_enriched:
+                    allowed[f"entities/{case_id}.json"] = (
+                        "source-backed representative bbox metadata added for review focus overlay"
+                    )
+                if not added:
+                    continue
+                if not all(
+                    row.get("policy") == privacy_entities.POLICY_KEEP_VISIBLE
+                    and row.get("assignment_provenance") == "explicit_case_policy"
+                    and row.get("valid_source_evidence") is True
+                    and row.get("review_entity_uuid")
+                    for row in added
+                ):
+                    continue
+                reason = (
+                    "source-backed explicit keep-policy face tracks added to review entity registry"
+                )
+                allowed[f"entities/{case_id}.json"] = reason
+                allowed["privacy_entities.json"] = reason
+                allowed["review_entities.json"] = reason
+    focus_audit_path = candidate_root / "entity_focus_overlay_audit.json"
+    if focus_audit_path.exists():
+        focus_audit = read_json_file(focus_audit_path)
+        for case_id, case_audit in dict(focus_audit.get("cases") or {}).items():
+            if case_audit.get("enriched_entity_ids"):
+                reason = "source-backed representative bbox metadata added for focus overlay"
+                allowed[f"entities/{case_id}.json"] = reason
+                allowed["privacy_entities.json"] = reason
+                allowed["review_entities.json"] = reason
+    allowed.update(allowed_object_policy_lineage_registry_deltas(candidate_root))
+    return allowed
+
+
+def allowed_object_policy_lineage_registry_deltas(candidate_root: Path) -> dict[str, str]:
+    audit_path = candidate_root / "object_policy_lineage_audit.json"
+    if not audit_path.exists():
+        return {}
+    audit = read_json_file(audit_path)
+    if audit.get("passed") is False:
+        return {}
+    allowed: dict[str, str] = {}
+    for case_id, case_audit in dict(audit.get("cases") or {}).items():
+        if case_audit.get("missing_source_backed_tracks"):
+            continue
+        exact_keep_rows = [
+            row
+            for row in list(case_audit.get("policy_lineage") or [])
+            if row.get("source_policy") == privacy_entities.POLICY_KEEP_VISIBLE
+            and row.get("assignment_provenance") == "explicit_case_policy"
+            and row.get("mapping") == "exact"
+            and row.get("valid_source_evidence") is True
+            and row.get("review_entity")
+        ]
+        if not exact_keep_rows:
+            continue
+        reason = "source-backed explicit keep-policy lineage exposed to review entity registry"
+        allowed[f"entities/{case_id}.json"] = reason
+        allowed["privacy_entities.json"] = reason
+        allowed["review_entities.json"] = reason
+    return allowed
 
 
 def package_relative_path(*, path: Path, package_root: Path) -> str:

@@ -7,12 +7,11 @@ interface Props {
   onChange: (role: string) => void;
 }
 
-const preferredOrder = ['original', 'automatic', 'latest_reviewed', 'final_reviewed'];
+const preferredOrder = ['original', 'automatic', 'latest_reviewed'];
 
-export function VersionSelector({ finalRole, onChange, roles, selectedRole }: Props) {
+export function VersionSelector({ onChange, roles, selectedRole }: Props) {
   const available = roles
     .filter((role) => preferredOrder.includes(role.role))
-    .concat(finalRole && !roles.some((role) => role.role === 'final_reviewed') ? [finalRole] : [])
     .sort((left, right) => preferredOrder.indexOf(left.role) - preferredOrder.indexOf(right.role));
 
   return (
@@ -33,6 +32,5 @@ export function roleLabel(role: MediaVersion): string {
   if (role.role === 'original') return 'Original';
   if (role.role === 'automatic') return 'Automatic';
   if (role.role === 'latest_reviewed') return 'Latest reviewed';
-  if (role.role === 'final_reviewed') return 'Final';
   return role.label;
 }
