@@ -15,7 +15,7 @@ It gives the simplest visual walkthrough: what the system does, what the current
 For review, serve:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_frontend_v1_3_3 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_frontend_v1_5 --open
 ```
 
 The workspace shows one case at a time:
@@ -26,6 +26,7 @@ The workspace shows one case at a time:
 - Timeline-linked guided risk-review tasks
 - Full-video sweep controls
 - Compact object list with representative Person/Plate thumbnails
+- Manual redaction Save that persists into Latest reviewed after publication
 - History and local session export
 
 The React app loads under `/app/day`; the frozen generated v2.3.4 workspace is

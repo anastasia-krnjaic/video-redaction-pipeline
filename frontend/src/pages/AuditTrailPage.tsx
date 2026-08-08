@@ -50,8 +50,8 @@ function humanEvent(event: AuditEvent): string {
   if (event.event_type === 'entity_policy_changed') {
     return `${String(after.label || after.display_name || 'Review object')} set to ${policyText(String(after.current_policy || after.privacy_action || 'review_required'), String(after.category || ''))}`;
   }
-  if (event.event_type === 'correction_saved') {
-    return `Manual ${String(after.category || 'privacy')} correction saved, frames ${String(after.source_frame_start ?? '?')}-${String(after.source_frame_end ?? '?')}`;
+  if (event.event_type === 'manual_correction_saved' || event.event_type === 'correction_saved') {
+    return `Manual correction saved, frames ${String(after.source_frame_start ?? '?')}-${String(after.source_frame_end ?? '?')}`;
   }
   if (event.event_type === 'checkpoint_created') return `Checkpoint "${String(after.name || 'Checkpoint')}" created`;
   if (event.event_type === 'restore_checkpoint') return `Restored checkpoint "${String(after.name || 'Checkpoint')}"`;

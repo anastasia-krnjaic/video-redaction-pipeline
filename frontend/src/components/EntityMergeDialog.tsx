@@ -30,6 +30,7 @@ export function EntityMergeDialog({ entities, onCancel, onMerge, open }: Props) 
     setError('');
     try {
       await onMerge(entities);
+      onCancel();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

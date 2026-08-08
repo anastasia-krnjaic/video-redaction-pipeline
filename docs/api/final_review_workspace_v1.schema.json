@@ -380,6 +380,12 @@
             "null"
           ]
         },
+        "effective_regions_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "frame_end": {
           "type": [
             "integer",
@@ -398,7 +404,25 @@
             "null"
           ]
         },
+        "preview_sha256": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "preview_token": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source_video_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "working_state_revision": {
           "type": [
             "string",
             "null"
@@ -743,6 +767,22 @@
         "case_id": {
           "type": "string"
         },
+        "changed_segment_count": {
+          "type": "integer"
+        },
+        "changed_source_frame_count": {
+          "type": "integer"
+        },
+        "changed_source_frame_intervals": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "changed_source_frame_percentage": {
+          "type": "number"
+        },
         "completed_at_utc": {
           "type": [
             "string",
@@ -750,6 +790,12 @@
           ]
         },
         "created_at_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "current_stage": {
           "type": [
             "string",
             "null"
@@ -778,11 +824,33 @@
           "additionalProperties": true,
           "type": "object"
         },
+        "materialization_plan": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "planned_frames_to_encode": {
+          "type": "integer"
+        },
+        "planned_frames_to_render": {
+          "type": "integer"
+        },
+        "progress": {
+          "type": "number"
+        },
+        "published_working_state_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "requested_policy": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "reused_segment_count": {
+          "type": "integer"
         },
         "session_id": {
           "type": "string"
@@ -799,10 +867,20 @@
             "running",
             "completed",
             "failed",
-            "superseded"
+            "superseded",
+            "skipped_no_effective_region_change"
           ]
         },
         "superseded_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "target_effective_region_count": {
+          "type": "integer"
+        },
+        "target_effective_regions_hash": {
           "type": [
             "string",
             "null"

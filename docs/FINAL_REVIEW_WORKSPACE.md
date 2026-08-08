@@ -20,10 +20,10 @@ Frontend Foundation v1 generates a React + TypeScript package under:
 artifacts/final_pipeline_package_frontend_v1/
 ```
 
-Frontend v1.3.3 is generated under:
+Frontend v1.5 is generated under:
 
 ```text
-artifacts/final_pipeline_package_frontend_v1_3_3/
+artifacts/final_pipeline_package_frontend_v1_5/
 ```
 
 It does not change detectors, thresholds, tracking, evidence accumulation, recovery, or rendering configuration. It gives a reviewer one case at a time, a single versioned source-frame-aware player, timeline-linked tasks, local correction records, stable Person/Plate review objects with representative thumbnails, an append-only audit trail, and finalization gates.
@@ -34,7 +34,7 @@ Serve the package locally:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m redactor.cli serve-final-review-workspace \
-  artifacts/final_pipeline_package_frontend_v1_3_3 --open
+  artifacts/final_pipeline_package_frontend_v1_5 --open
 ```
 
 The server binds to `127.0.0.1`, serves only files under the package root, supports MP4 range requests for seeking, and writes review sessions only under the package `sessions/` directory.
@@ -93,7 +93,7 @@ Manual redaction drafts are keyed only by source frame. The interval modes are S
 
 Entity merges are backend-owned append-only events. The React modal selects multiple same-case, same-category entities, warns on overlap, and the backend creates one canonical active entity while retiring the selected aliases. Merged entities get stable case/category-scoped labels such as `Merged Person 01` and inherit a shared policy when all source entities agree; conflicting policies become Needs review. Entity thumbnail jumps pause the player, seek to the representative source frame, and show a temporary red source-bbox focus outline for source-backed redacted, kept-visible, needs-review, unresolved, merged, person, and plate entities. The focus outline is not rendered into media.
 
-Object policy changes, merges, correction saves, checkpoint restores, and destructive baseline resets return accepted working-state revisions plus local materialization job IDs when media publication is required. A per-case queue serializes renders, debounces rapid accepted mutations, coalesces queued updates to the newest active projection revision, caches already materialized state hashes, and records `materialization_timing_audit.json` while the frontend polls job status and keeps unrelated controls usable.
+Object policy changes, merges, correction saves, checkpoint restores, and destructive baseline resets return accepted working-state revisions plus local materialization job IDs only when media publication is required. The workspace computes deterministic effective privacy-region hashes before and after each media-aware mutation. If the hash is unchanged and current media is already compatible, media rendering is skipped and audited; if a compatible publication is already queued or running, that job is reused. v1.5 also records the exact source frames whose normalized effective region sets changed and exposes that plan through job progress. Publication still uses the proven full-render path unless a future segment renderer proves output parity.
 
 `Restart review` is a narrow case-scoped workflow action. It clears active review decisions, task buckets, task selection, sweep acknowledgement, and transient review progress for the selected case while preserving entity policy overrides, canonical merges, manual corrections, checkpoints, History, and Latest reviewed. `Reset all edits to Automatic baseline` is the separate destructive case-scoped action that removes active entity edits, merges, manual corrections, reviewer-created manual issues, review decisions, sweep acknowledgement, and the active Latest reviewed projection while preserving append-only History and checkpoints.
 
@@ -109,10 +109,12 @@ build fails if the displayed versions do not share source-frame mapping, frame
 count, FPS, resolution, and decoded-frame evidence at the audited sample frames.
 
 Manual redaction Preview is transient. It does not create a persistent
-Correction preview version, does not append a session event, and does not create
-a verification task until Save. Save persists the correction, creates the
-verification task, schedules Latest reviewed materialization, and preserves the
-current source frame.
+Correction preview version and does not create a verification task until Save.
+Preview records a hash-chained preview event and a token bound to the current
+case, session, source media, working-state revision, draft hash, and preview
+hash. Save validates that token, persists an immutable correction revision,
+appends `manual_correction_saved`, creates the verification task, schedules
+Latest reviewed materialization, and preserves the current source frame.
 
 Long raw review intervals are preserved in audit lineage but projected into
 non-overlapping reviewer-facing child tasks. The chunking target is about three

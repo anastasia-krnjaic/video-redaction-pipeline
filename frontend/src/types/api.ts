@@ -216,10 +216,14 @@ export interface Correction {
 export interface CorrectionPreview {
   "corrected_preview"?: string | null;
   "draft_hash"?: string | null;
+  "effective_regions_hash"?: string | null;
   "frame_end"?: number | null;
   "frame_start"?: number | null;
   "latest_reviewed"?: string | null;
+  "preview_sha256"?: string | null;
   "preview_token"?: string | null;
+  "source_video_hash"?: string | null;
+  "working_state_revision"?: string | null;
   [key: string]: unknown;
 }
 
@@ -256,17 +260,30 @@ export interface MaterializationJob {
   "accepted_working_state_revision"?: string | null;
   "affected_entity_ids"?: string[];
   "case_id": string;
+  "changed_segment_count"?: number;
+  "changed_source_frame_count"?: number;
+  "changed_source_frame_intervals"?: Record<string, unknown>[];
+  "changed_source_frame_percentage"?: number;
   "completed_at_utc"?: string | null;
   "created_at_utc"?: string | null;
+  "current_stage"?: string | null;
   "error"?: string | null;
   "job_id": string;
   "latest_reviewed"?: MediaVersion | null;
   "materialization"?: Record<string, unknown>;
+  "materialization_plan"?: Record<string, unknown>;
+  "planned_frames_to_encode"?: number;
+  "planned_frames_to_render"?: number;
+  "progress"?: number;
+  "published_working_state_revision"?: string | null;
   "requested_policy"?: string | null;
+  "reused_segment_count"?: number;
   "session_id"?: string;
   "started_at_utc"?: string | null;
-  "status": "queued" | "running" | "completed" | "failed" | "superseded";
+  "status": "queued" | "running" | "completed" | "failed" | "superseded" | "skipped_no_effective_region_change";
   "superseded_by"?: string | null;
+  "target_effective_region_count"?: number;
+  "target_effective_regions_hash"?: string | null;
   "working_state"?: WorkingState;
   [key: string]: unknown;
 }

@@ -49,7 +49,7 @@ from redactor.privacy_records import (
 )
 
 SCHEMA_VERSION = "final_review_workspace.v2.3.4"
-FRONTEND_MILESTONE_VERSION = "v1.3.3"
+FRONTEND_MILESTONE_VERSION = "v1.5"
 DAY_PARENT_PATH = Path("artifacts/day_primary.mp4")
 DAY_CANONICAL_SOURCE_FRAME_START = 1828
 DAY_CANONICAL_SOURCE_FRAME_END = 5694
@@ -4754,29 +4754,45 @@ class MaterializationJobManager:
         accepted_revision: str | None,
         affected_entity_ids: list[str] | None = None,
         requested_policy: str | None = None,
+        target_effective_region_count: int | None = None,
+        target_effective_regions_hash: str | None = None,
+        materialization_plan: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         job_id = f"materialize_{uuid.uuid4().hex}"
         session_dir = session_dir.resolve()
         session_id = session_dir.name
+        plan = dict(materialization_plan or {})
         job = {
             "accepted_working_state_revision": accepted_revision,
             "affected_entity_ids": affected_entity_ids or [],
             "accepted_at_utc": media.utc_timestamp(),
             "case_id": case_id,
+            "changed_segment_count": 0,
+            "changed_source_frame_count": plan.get("changed_source_frame_count", 0),
+            "changed_source_frame_intervals": plan.get("changed_source_frame_intervals", []),
+            "changed_source_frame_percentage": plan.get("changed_source_frame_percentage", 0.0),
             "completed_at_utc": None,
             "created_at_utc": media.utc_timestamp(),
+            "current_stage": "waiting",
             "error": None,
             "job_id": job_id,
             "latest_reviewed": None,
             "materialization": None,
+            "materialization_plan": plan,
+            "planned_frames_to_encode": plan.get("planned_frames_to_encode", 0),
+            "planned_frames_to_render": plan.get("planned_frames_to_render", 0),
+            "progress": 0.0,
             "queued_until_utc": None,
             "reason": reason,
             "requested_policy": requested_policy,
+            "reused_segment_count": 0,
             "schema_version": "reviewed_media_materialization_job.v1",
             "session_id": session_id,
             "started_at_utc": None,
             "status": "queued",
             "superseded_by": None,
+            "target_effective_region_count": target_effective_region_count,
+            "target_effective_regions_hash": target_effective_regions_hash,
         }
         key = (session_id, case_id)
         with self.lock:
@@ -4815,6 +4831,97 @@ class MaterializationJobManager:
             job = self.jobs.get(job_id)
             return dict(job) if job else None
 
+    def compatible_active_job(
+        self,
+        *,
+        session_dir: Path,
+        case_id: str,
+        target_effective_regions_hash: str,
+    ) -> dict[str, Any] | None:
+        session_id = session_dir.resolve().name
+        key = (session_id, case_id)
+        with self.lock:
+            state = self.case_state.get(key) or {}
+            for job_id in (state.get("running"), state.get("latest_requested")):
+                job = self.jobs.get(str(job_id or ""))
+                if not job:
+                    continue
+                if job.get("status") not in {"queued", "running"}:
+                    continue
+                if job.get("target_effective_regions_hash") == target_effective_regions_hash:
+                    self._metric(case_id, "jobs_coalesced", 1)
+                    self._write_audit_locked()
+                    return dict(job)
+        return None
+
+    def record_skipped_materialization(
+        self,
+        *,
+        session_dir: Path,
+        case_id: str,
+        accepted_revision: str | None,
+        affected_entity_ids: list[str] | None,
+        before_digest: dict[str, Any],
+        after_digest: dict[str, Any],
+        operation: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        job_id = f"materialize_skip_{uuid.uuid4().hex}"
+        job = {
+            "accepted_working_state_revision": accepted_revision,
+            "affected_entity_ids": affected_entity_ids or [],
+            "accepted_at_utc": media.utc_timestamp(),
+            "case_id": case_id,
+            "changed_segment_count": 0,
+            "changed_source_frame_count": 0,
+            "changed_source_frame_intervals": [],
+            "changed_source_frame_percentage": 0.0,
+            "completed_at_utc": media.utc_timestamp(),
+            "created_at_utc": media.utc_timestamp(),
+            "current_stage": "complete",
+            "error": None,
+            "job_id": job_id,
+            "latest_reviewed": None,
+            "materialization": None,
+            "materialization_plan": {},
+            "operation": operation,
+            "planned_frames_to_encode": 0,
+            "planned_frames_to_render": 0,
+            "progress": 1.0,
+            "reason": reason,
+            "reused_segment_count": 0,
+            "schema_version": "reviewed_media_materialization_job.v1",
+            "session_id": session_dir.resolve().name,
+            "started_at_utc": None,
+            "status": "skipped_no_effective_region_change",
+            "superseded_by": None,
+            "target_effective_region_count": after_digest.get("region_count"),
+            "target_effective_regions_hash": after_digest.get("effective_regions_hash"),
+        }
+        with self.lock:
+            self.jobs[job_id] = job
+            self._metric(case_id, "accepted_state_mutations", 1)
+            self._metric(case_id, "materialization_jobs_skipped", 1)
+            self._record_timing_locked(
+                job,
+                status="skipped_no_effective_region_change",
+                state_projection_duration_ms=0,
+                materialization={
+                    "timing": {
+                        "effective_region_derivation_duration_ms": int(
+                            before_digest.get("duration_ms") or 0
+                        )
+                        + int(after_digest.get("duration_ms") or 0),
+                        "output_frame_count": 0,
+                        "publication_duration_ms": 0,
+                        "render_encode_duration_ms": 0,
+                        "total_duration_ms": 0,
+                    }
+                },
+            )
+            self._write_audit_locked()
+        return dict(job)
+
     def retry(self, *, job_id: str, actor: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             job = self.jobs.get(job_id)
@@ -4832,6 +4939,9 @@ class MaterializationJobManager:
             accepted_revision=str(job.get("accepted_working_state_revision") or ""),
             affected_entity_ids=list(job.get("affected_entity_ids") or []),
             requested_policy=job.get("requested_policy"),
+            target_effective_region_count=job.get("target_effective_region_count"),
+            target_effective_regions_hash=job.get("target_effective_regions_hash"),
+            materialization_plan=dict(job.get("materialization_plan") or {}),
         )
 
     def _start_locked(
@@ -4853,6 +4963,8 @@ class MaterializationJobManager:
         job = self.jobs[job_id]
         job["status"] = "running"
         job["started_at_utc"] = media.utc_timestamp()
+        job["current_stage"] = "planning"
+        job["progress"] = 0.05
         self._metric(str(job.get("case_id") or ""), "materialization_jobs_started", 1)
         thread = threading.Thread(
             target=self._run_job,
@@ -4916,6 +5028,7 @@ class MaterializationJobManager:
         job = self.jobs[job_id]
         case_id = str(job["case_id"])
         accepted_revision = str(job.get("accepted_working_state_revision") or "")
+        target_effective_hash = str(job.get("target_effective_regions_hash") or "")
         start_monotonic = time.monotonic()
         state_projection_start = time.monotonic()
         current_state = review_working_state.derive_working_state(self.package_root, session_dir)
@@ -4923,10 +5036,27 @@ class MaterializationJobManager:
         current_revision = str(
             current_state.get("active_projection_hash") or current_state.get("state_hash") or ""
         )
-        if accepted_revision and current_revision != accepted_revision:
+        current_digest = review_working_state.effective_privacy_region_digest(
+            self.package_root,
+            session_dir,
+            case_id=case_id,
+        )
+        compatible_revision_drift = bool(
+            accepted_revision
+            and current_revision != accepted_revision
+            and target_effective_hash
+            and current_digest.get("effective_regions_hash") == target_effective_hash
+        )
+        if (
+            accepted_revision
+            and current_revision != accepted_revision
+            and not compatible_revision_drift
+        ):
             with self.lock:
                 job["completed_at_utc"] = media.utc_timestamp()
+                job["current_stage"] = "superseded"
                 job["error"] = "Superseded by a newer accepted review state."
+                job["progress"] = 1.0
                 job["status"] = "superseded"
                 self._metric(case_id, "stale_jobs_discarded", 1)
                 self._record_timing_locked(
@@ -4953,10 +5083,15 @@ class MaterializationJobManager:
             application_hashes={},
         )
         try:
+            with self.lock:
+                job["current_stage"] = "rendering_full_media"
+                job["progress"] = 0.15
+                self._write_audit_locked()
             materialization = self._cached_materialization(
                 session_dir=session_dir,
                 case_id=case_id,
                 accepted_revision=accepted_revision,
+                target_effective_regions_hash=target_effective_hash,
             )
             if materialization is None:
                 materialization = review_working_state.materialize_latest_reviewed(
@@ -4969,6 +5104,10 @@ class MaterializationJobManager:
                 )
             else:
                 self._metric(case_id, "cache_hits", 1)
+            with self.lock:
+                job["current_stage"] = "validating_publication"
+                job["progress"] = 0.85
+                self._write_audit_locked()
             after_render_state = review_working_state.derive_working_state(
                 self.package_root,
                 session_dir,
@@ -4978,12 +5117,28 @@ class MaterializationJobManager:
                 or after_render_state.get("state_hash")
                 or ""
             )
-            if accepted_revision and after_render_revision != accepted_revision:
+            after_render_digest = review_working_state.effective_privacy_region_digest(
+                self.package_root,
+                session_dir,
+                case_id=case_id,
+            )
+            render_target_stale = bool(
+                target_effective_hash
+                and after_render_digest.get("effective_regions_hash") != target_effective_hash
+            )
+            revision_stale_without_region_target = bool(
+                accepted_revision
+                and after_render_revision != accepted_revision
+                and not target_effective_hash
+            )
+            if revision_stale_without_region_target or render_target_stale:
                 with self.lock:
                     job["completed_at_utc"] = media.utc_timestamp()
+                    job["current_stage"] = "superseded"
                     job["error"] = (
                         "Rendered result discarded because a newer review state was accepted."
                     )
+                    job["progress"] = 1.0
                     job["status"] = "superseded"
                     self._metric(case_id, "stale_jobs_discarded", 1)
                     self._record_timing_locked(
@@ -5007,11 +5162,17 @@ class MaterializationJobManager:
                 task_id=None,
                 before_state={"job_id": job_id, "started_event_hash": start_event["event_hash"]},
                 after_state={
+                    "accepted_working_state_revision": accepted_revision,
                     "case_id": case_id,
+                    "effective_regions_hash": materialization.get("effective_regions_hash"),
                     "job_id": job_id,
                     "latest_reviewed": materialization["latest_reviewed"],
                     "active_projection_hash": completed_state.get("active_projection_hash"),
+                    "published_working_state_revision": completed_state.get(
+                        "active_projection_hash"
+                    ),
                     "state_hash": completed_state.get("state_hash"),
+                    "target_effective_regions_hash": target_effective_hash,
                 },
                 note="Latest reviewed media update completed.",
                 application_hashes={
@@ -5023,6 +5184,11 @@ class MaterializationJobManager:
                 job["completed_event_hash"] = complete_event["event_hash"]
                 job["latest_reviewed"] = materialization["latest_reviewed"]
                 job["materialization"] = materialization
+                job["published_working_state_revision"] = completed_state.get(
+                    "active_projection_hash"
+                )
+                job["current_stage"] = "complete"
+                job["progress"] = 1.0
                 job["status"] = "completed"
                 job["working_state"] = review_working_state.derive_working_state(
                     self.package_root,
@@ -5033,7 +5199,7 @@ class MaterializationJobManager:
                 self._metric(
                     case_id,
                     "final_published_revision",
-                    str(job.get("accepted_working_state_revision") or ""),
+                    str(job.get("published_working_state_revision") or ""),
                     mode="set",
                 )
                 self._record_timing_locked(
@@ -5057,8 +5223,10 @@ class MaterializationJobManager:
             )
             with self.lock:
                 job["completed_at_utc"] = media.utc_timestamp()
+                job["current_stage"] = "failed"
                 job["error"] = str(exc)
                 job["failed_event_hash"] = failure_event["event_hash"]
+                job["progress"] = 1.0
                 job["status"] = "failed"
                 self._record_timing_locked(
                     job,
@@ -5096,14 +5264,23 @@ class MaterializationJobManager:
         session_dir: Path,
         case_id: str,
         accepted_revision: str,
+        target_effective_regions_hash: str | None = None,
     ) -> dict[str, Any] | None:
-        if not accepted_revision:
+        if not accepted_revision and not target_effective_regions_hash:
             return None
         manifest_path = session_dir / "state" / f"{case_id}_latest_reviewed_manifest.json"
         if not manifest_path.exists():
             return None
         materialization = read_json_file(manifest_path)
-        if materialization.get("accepted_working_state_revision") != accepted_revision:
+        revision_matches = bool(
+            accepted_revision
+            and materialization.get("accepted_working_state_revision") == accepted_revision
+        )
+        region_hash_matches = bool(
+            target_effective_regions_hash
+            and materialization.get("effective_regions_hash") == target_effective_regions_hash
+        )
+        if not revision_matches and not region_hash_matches:
             return None
         latest = dict(materialization.get("latest_reviewed") or {})
         output = self.package_root / str(latest.get("path") or "")
@@ -5124,6 +5301,7 @@ class MaterializationJobManager:
                 "full_materialization_duration_ms": None,
                 "jobs_coalesced": 0,
                 "materialization_jobs_started": 0,
+                "materialization_jobs_skipped": 0,
                 "stale_jobs_discarded": 0,
             },
         )
@@ -5165,17 +5343,31 @@ class MaterializationJobManager:
             "accepted_working_state_revision": job.get("accepted_working_state_revision"),
             "affected_entity_ids": list(job.get("affected_entity_ids") or []),
             "case_id": job.get("case_id"),
+            "changed_segment_count": job.get("changed_segment_count"),
+            "changed_source_frame_count": job.get("changed_source_frame_count"),
+            "changed_source_frame_percentage": job.get("changed_source_frame_percentage"),
             "completed_at_utc": job.get("completed_at_utc"),
+            "current_stage": job.get("current_stage"),
             "error": job.get("error"),
+            "encoded_frame_count": timing.get("output_frame_count"),
             "job_id": job.get("job_id"),
+            "materialization_strategy": (
+                dict(job.get("materialization_plan") or {}).get("materialization_strategy")
+            ),
             "mutation_accepted_time": job.get("accepted_at_utc") or job.get("created_at_utc"),
             "output_frame_count": timing.get("output_frame_count"),
+            "planned_frames_to_encode": job.get("planned_frames_to_encode"),
+            "planned_frames_to_render": job.get("planned_frames_to_render"),
             "publication_duration_ms": timing.get("publication_duration_ms"),
+            "published_working_state_revision": job.get("published_working_state_revision"),
             "render_encode_duration_ms": timing.get("render_encode_duration_ms"),
             "requested_policy": job.get("requested_policy"),
+            "reused_segment_count": job.get("reused_segment_count"),
             "state_projection_duration_ms": state_projection_duration_ms,
             "status": status,
             "superseded_by": job.get("superseded_by"),
+            "target_effective_region_count": job.get("target_effective_region_count"),
+            "target_effective_regions_hash": job.get("target_effective_regions_hash"),
             "total_time_ms": timing.get("total_duration_ms"),
             "effective_region_derivation_duration_ms": timing.get(
                 "effective_region_derivation_duration_ms"
@@ -5452,16 +5644,56 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 correction=correction,
                 include_unsaved_correction=True,
             )
-            self.send_json({"ok": True, "preview": preview})
+            if not preview.get("ok"):
+                self.send_json(
+                    {"error": preview.get("reason") or "Correction preview failed.", "ok": False},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            event = review_sessions.append_correction_preview_event(
+                session_dir,
+                actor=actor,
+                correction=correction,
+                preview=preview,
+            )
+            self.send_json({"event": event, "ok": True, "preview": preview})
             return
         if path == "/api/corrections":
             from redactor.review_corrections import correction_from_dict
 
-            correction = correction_from_dict(payload["correction"])
+            correction_payload = dict(payload["correction"])
+            token = str(payload.get("preview_token") or "")
+            token_result = review_working_state.load_preview_token_payload(
+                session_dir,
+                token=token,
+            )
+            if not token_result.get("ok"):
+                self.send_json(
+                    {"error": token_result.get("error"), "ok": False},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            preview_payload = dict(token_result["preview"])
+            correction_payload.setdefault("correction_id", preview_payload.get("correction_id"))
+            correction = correction_from_dict(correction_payload)
+            before_state = review_working_state.derive_working_state(
+                self.server.package_root,
+                session_dir,
+            )
+            before_digest = review_working_state.effective_privacy_region_digest(
+                self.server.package_root,
+                session_dir,
+                case_id=correction.case_id,
+            )
             preview_token_result = review_working_state.validate_preview_token(
                 session_dir,
-                token=str(payload.get("preview_token") or ""),
+                token=token,
                 correction=correction,
+                current_working_state_revision=str(
+                    before_state.get("active_projection_hash")
+                    or before_state.get("state_hash")
+                    or ""
+                ),
             )
             if not preview_token_result.get("ok"):
                 self.send_json(
@@ -5469,10 +5701,67 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     status=HTTPStatus.CONFLICT,
                 )
                 return
+            if preview_token_result.get("already_accepted"):
+                state = before_state
+                materialization_plan = self.plan_materialization_for_case(
+                    session_dir=session_dir,
+                    case_id=correction.case_id,
+                    actor=actor,
+                    operation="manual_correction_saved",
+                    reason="Latest reviewed media updated after correction save retry.",
+                    accepted_revision=str(
+                        state.get("active_projection_hash") or state.get("state_hash") or ""
+                    ),
+                    before_digest=before_digest,
+                    after_state=state,
+                    affected_entity_ids=[correction.entity_id] if correction.entity_id else [],
+                )
+                existing_event = next(
+                    (
+                        event
+                        for event in reversed(review_sessions.load_events(session_dir))
+                        if event.get("event_type")
+                        in {
+                            review_sessions.EVENT_MANUAL_CORRECTION_SAVED,
+                            review_sessions.EVENT_CORRECTION_SAVED_LEGACY,
+                        }
+                        and dict(event.get("after_state") or {}).get("correction_id")
+                        == correction.correction_id
+                    ),
+                    None,
+                )
+                if existing_event is None:
+                    existing_event = {
+                        "after_state": correction.to_dict(),
+                        "case_id": correction.case_id,
+                        "event_id": preview_token_result["preview"].get("accepted_event_id"),
+                        "event_type": review_sessions.EVENT_MANUAL_CORRECTION_SAVED,
+                        "task_id": correction.task_id,
+                    }
+                self.send_json(
+                    {
+                        "event": existing_event,
+                        "events": [existing_event],
+                        "idempotent_retry": True,
+                        "materialization_job": materialization_plan["job"],
+                        "materialization_plan": materialization_plan["plan"],
+                        "materialization_required": materialization_plan["plan"][
+                            "materialization_required"
+                        ],
+                        "ok": True,
+                        "preview": None,
+                        "verification_task": review_working_state.create_correction_verification_task(
+                            correction
+                        ),
+                        "working_state": state,
+                    }
+                )
+                return
             event = review_sessions.append_correction_event(
                 session_dir,
                 actor=actor,
                 correction=correction,
+                before_state={"active_projection_hash": before_state.get("active_projection_hash")},
             )
             verification_task = review_working_state.create_correction_verification_task(correction)
             verification_event = review_sessions.append_event(
@@ -5487,21 +5776,35 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 application_hashes={},
             )
             state = review_working_state.derive_working_state(self.server.package_root, session_dir)
-            materialization_job = self.server.materialization_jobs.enqueue(
+            materialization_plan = self.plan_materialization_for_case(
                 session_dir=session_dir,
                 case_id=correction.case_id,
                 actor=actor,
+                operation="manual_correction_saved",
                 reason="Latest reviewed media updated after correction save.",
                 accepted_revision=str(
                     state.get("active_projection_hash") or state.get("state_hash") or ""
                 ),
+                before_digest=before_digest,
+                after_state=state,
                 affected_entity_ids=[correction.entity_id] if correction.entity_id else [],
+            )
+            review_working_state.mark_preview_token_accepted(
+                session_dir,
+                token=token,
+                correction=correction,
+                event=event,
+                materialization_plan=materialization_plan,
             )
             self.send_json(
                 {
                     "event": event,
                     "events": [event, verification_event],
-                    "materialization_job": materialization_job,
+                    "materialization_job": materialization_plan["job"],
+                    "materialization_plan": materialization_plan["plan"],
+                    "materialization_required": materialization_plan["plan"][
+                        "materialization_required"
+                    ],
                     "ok": True,
                     "preview": None,
                     "verification_task": verification_task,
@@ -5540,12 +5843,6 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             )
             return
         if path == "/api/checkpoints/restore":
-            checkpoint, event, state = review_working_state.restore_checkpoint(
-                self.server.package_root,
-                session_dir,
-                actor=actor,
-                checkpoint_uuid=str(payload.get("checkpoint_uuid") or ""),
-            )
             requested_case_id = str(payload.get("case_id") or "")
             case_ids = (
                 [requested_case_id]
@@ -5556,15 +5853,32 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     if (self.server.package_root / "cases" / f"{case_id}.json").exists()
                 ]
             )
-            materialization_jobs = [
-                self.server.materialization_jobs.enqueue(
+            before_digests = {
+                case_id: review_working_state.effective_privacy_region_digest(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=case_id,
+                )
+                for case_id in case_ids
+            }
+            checkpoint, event, state = review_working_state.restore_checkpoint(
+                self.server.package_root,
+                session_dir,
+                actor=actor,
+                checkpoint_uuid=str(payload.get("checkpoint_uuid") or ""),
+            )
+            materialization_plans = [
+                self.plan_materialization_for_case(
                     session_dir=session_dir,
                     case_id=case_id,
                     actor=actor,
+                    operation="restore_checkpoint",
                     reason="Latest reviewed media restored from checkpoint.",
                     accepted_revision=str(
                         state.get("active_projection_hash") or state.get("state_hash") or ""
                     ),
+                    before_digest=before_digests[case_id],
+                    after_state=state,
                 )
                 for case_id in case_ids
             ]
@@ -5573,7 +5887,10 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 {
                     "checkpoint": checkpoint,
                     "event": event,
-                    "materialization_jobs": materialization_jobs,
+                    "materialization_jobs": [
+                        plan["job"] for plan in materialization_plans if plan["job"]
+                    ],
+                    "materialization_plans": [plan["plan"] for plan in materialization_plans],
                     "ok": True,
                     "working_state": state,
                 }
@@ -5614,12 +5931,6 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             return
         if path == "/api/checkpoints/reset":
             requested_case_id = str(payload.get("case_id") or "")
-            event, state = review_working_state.reset_to_automatic_baseline(
-                self.server.package_root,
-                session_dir,
-                actor=actor,
-                case_id=requested_case_id or None,
-            )
             case_ids = (
                 [requested_case_id]
                 if requested_case_id
@@ -5629,22 +5940,42 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     if (self.server.package_root / "cases" / f"{case_id}.json").exists()
                 ]
             )
-            materialization_jobs = [
-                self.server.materialization_jobs.enqueue(
+            before_digests = {
+                case_id: review_working_state.effective_privacy_region_digest(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=case_id,
+                )
+                for case_id in case_ids
+            }
+            event, state = review_working_state.reset_to_automatic_baseline(
+                self.server.package_root,
+                session_dir,
+                actor=actor,
+                case_id=requested_case_id or None,
+            )
+            materialization_plans = [
+                self.plan_materialization_for_case(
                     session_dir=session_dir,
                     case_id=case_id,
                     actor=actor,
+                    operation="case_edits_reset_to_automatic_baseline",
                     reason="Latest reviewed media reset to Automatic baseline after destructive edit reset.",
                     accepted_revision=str(
                         state.get("active_projection_hash") or state.get("state_hash") or ""
                     ),
+                    before_digest=before_digests[case_id],
+                    after_state=state,
                 )
                 for case_id in case_ids
             ]
             self.send_json(
                 {
                     "event": event,
-                    "materialization_jobs": materialization_jobs,
+                    "materialization_jobs": [
+                        plan["job"] for plan in materialization_plans if plan["job"]
+                    ],
+                    "materialization_plans": [plan["plan"] for plan in materialization_plans],
                     "ok": True,
                     "working_state": review_working_state.derive_working_state(
                         self.server.package_root,
@@ -5755,6 +6086,106 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             return None
         return session_dir
 
+    def plan_materialization_for_case(
+        self,
+        *,
+        session_dir: Path,
+        case_id: str,
+        actor: dict[str, Any],
+        operation: str,
+        reason: str,
+        accepted_revision: str | None,
+        before_digest: dict[str, Any],
+        after_state: dict[str, Any],
+        affected_entity_ids: list[str] | None = None,
+        requested_policy: str | None = None,
+    ) -> dict[str, Any]:
+        after_digest = review_working_state.effective_privacy_region_digest(
+            self.server.package_root,
+            session_dir,
+            case_id=case_id,
+        )
+        change_summary = review_working_state.effective_region_change_summary(
+            self.server.package_root,
+            case_id=case_id,
+            before_digest=before_digest,
+            after_digest=after_digest,
+        )
+        after_hash = str(after_digest.get("effective_regions_hash") or "")
+        before_hash = str(before_digest.get("effective_regions_hash") or "")
+        published_hash = review_working_state.published_effective_regions_hash(
+            self.server.package_root,
+            after_state,
+            case_id=case_id,
+        )
+        materialization_required = bool(after_hash != before_hash or after_hash != published_hash)
+        manifest = case_manifests.load_case_manifest(
+            self.server.package_root / "cases" / f"{case_id}.json"
+        )
+        planned_full_render_frames = (
+            int(manifest.frame_count or 0) if materialization_required else 0
+        )
+        plan = {
+            "affected_source_frame_intervals": change_summary["changed_source_frame_intervals"],
+            "after_effective_regions_hash": after_hash,
+            "before_effective_regions_hash": before_hash,
+            "case_id": case_id,
+            "changed_source_frame_count": change_summary["changed_source_frame_count"],
+            "changed_source_frame_intervals": change_summary["changed_source_frame_intervals"],
+            "changed_source_frame_percentage": change_summary["changed_source_frame_percentage"],
+            "full_case_fallback_required": materialization_required,
+            "materialization_required": materialization_required,
+            "materialization_strategy": "full_render_fallback"
+            if materialization_required
+            else "no_op",
+            "operation": operation,
+            "planned_frames_to_encode": planned_full_render_frames,
+            "planned_frames_to_render": planned_full_render_frames,
+            "published_effective_regions_hash": published_hash,
+            "schema_version": "materialization_planning_result.v1",
+        }
+        if materialization_required:
+            compatible_job = None
+            if after_hash == before_hash:
+                compatible_job = self.server.materialization_jobs.compatible_active_job(
+                    session_dir=session_dir,
+                    case_id=case_id,
+                    target_effective_regions_hash=after_hash,
+                )
+            if compatible_job is not None:
+                return {
+                    "job": compatible_job,
+                    "plan": plan
+                    | {
+                        "reused_job_id": compatible_job["job_id"],
+                        "reuse_reason": "matching effective-region publication already pending",
+                    },
+                }
+            job = self.server.materialization_jobs.enqueue(
+                session_dir=session_dir,
+                case_id=case_id,
+                actor=actor,
+                reason=reason,
+                accepted_revision=accepted_revision,
+                affected_entity_ids=affected_entity_ids,
+                requested_policy=requested_policy,
+                target_effective_region_count=int(after_digest.get("region_count") or 0),
+                target_effective_regions_hash=after_hash,
+                materialization_plan=plan,
+            )
+            return {"job": job, "plan": plan}
+        skip = self.server.materialization_jobs.record_skipped_materialization(
+            session_dir=session_dir,
+            case_id=case_id,
+            accepted_revision=accepted_revision,
+            affected_entity_ids=affected_entity_ids,
+            before_digest=before_digest,
+            after_digest=after_digest,
+            operation=operation,
+            reason="Effective privacy regions unchanged; media publication skipped.",
+        )
+        return {"job": None, "plan": plan | {"skip_job_id": skip["job_id"]}}
+
     def apply_object_policy(
         self,
         payload: dict[str, Any],
@@ -5779,6 +6210,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         )
         if entity is None:
             return {"error": "review entity not found", "ok": False}
+        before_digest = review_working_state.effective_privacy_region_digest(
+            self.server.package_root,
+            session_dir,
+            case_id=case_id,
+        )
         before = dict(entity)
         verification_task_id = (
             f"object_policy_verify_{case_id}_{entity_id}_{policy}"
@@ -5826,14 +6262,17 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             self.server.package_root,
             session_dir,
         )
-        materialization_job = self.server.materialization_jobs.enqueue(
+        materialization_plan = self.plan_materialization_for_case(
             session_dir=session_dir,
             case_id=case_id,
             actor=actor,
+            operation="entity_policy_changed",
             reason="Latest reviewed media updated after object policy change.",
             accepted_revision=str(
                 state.get("active_projection_hash") or state.get("state_hash") or ""
             ),
+            before_digest=before_digest,
+            after_state=state,
             affected_entity_ids=[entity_id],
             requested_policy=policy,
         )
@@ -5841,8 +6280,9 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             "entity": after,
             "event": event,
             "events": events,
-            "materialization_job": materialization_job,
-            "materialization_required": True,
+            "materialization_job": materialization_plan["job"],
+            "materialization_plan": materialization_plan["plan"],
+            "materialization_required": materialization_plan["plan"]["materialization_required"],
             "ok": True,
             "verification_task": verification_task,
             "working_state": state,
@@ -5866,6 +6306,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             privacy_entities.POLICY_REVIEW_REQUIRED,
         }:
             return {"error": f"unsupported object policy: {policy}", "ok": False}
+        before_digest = review_working_state.effective_privacy_region_digest(
+            self.server.package_root,
+            session_dir,
+            case_id=case_id,
+        )
         before_entities: list[dict[str, Any]] = []
         after_entities: list[dict[str, Any]] = []
         for entity_id in entity_ids:
@@ -5902,14 +6347,17 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             self.server.package_root,
             session_dir,
         )
-        materialization_job = self.server.materialization_jobs.enqueue(
+        materialization_plan = self.plan_materialization_for_case(
             session_dir=session_dir,
             case_id=case_id,
             actor=actor,
+            operation="bulk_entity_policy_changed",
             reason="Latest reviewed media updated after bulk object policy change.",
             accepted_revision=str(
                 state.get("active_projection_hash") or state.get("state_hash") or ""
             ),
+            before_digest=before_digest,
+            after_state=state,
             affected_entity_ids=entity_ids,
             requested_policy=policy,
         )
@@ -5917,8 +6365,9 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             "entities": after_entities,
             "event": event,
             "events": [event],
-            "materialization_job": materialization_job,
-            "materialization_required": True,
+            "materialization_job": materialization_plan["job"],
+            "materialization_plan": materialization_plan["plan"],
+            "materialization_required": materialization_plan["plan"]["materialization_required"],
             "ok": True,
             "working_state": state,
         }
@@ -5950,6 +6399,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             return {"error": "Merge rejected: objects belong to different cases.", "ok": False}
         if len(categories) != 1:
             return {"error": "Merge rejected: objects belong to different categories.", "ok": False}
+        before_digest = review_working_state.effective_privacy_region_digest(
+            self.server.package_root,
+            session_dir,
+            case_id=case_id,
+        )
         state_before = review_working_state.derive_working_state(
             self.server.package_root,
             session_dir,
@@ -5999,9 +6453,25 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             self.server.package_root,
             session_dir,
         )
+        materialization_plan = self.plan_materialization_for_case(
+            session_dir=session_dir,
+            case_id=case_id,
+            actor=actor,
+            operation="entities_merged",
+            reason="Latest reviewed media updated after object merge.",
+            accepted_revision=str(
+                state.get("active_projection_hash") or state.get("state_hash") or ""
+            ),
+            before_digest=before_digest,
+            after_state=state,
+            affected_entity_ids=[canonical["entity_id"], *retired_ids],
+        )
         return {
             "canonical_merged_entity_uuid": canonical["entity_id"],
             "event": event,
+            "materialization_job": materialization_plan["job"],
+            "materialization_plan": materialization_plan["plan"],
+            "materialization_required": materialization_plan["plan"]["materialization_required"],
             "merged_entity": canonical,
             "ok": True,
             "retired_entity_uuids": retired_ids,
@@ -6013,6 +6483,9 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
 
     def read_json_body(self) -> dict[str, Any]:
         length = int(self.headers.get("Content-Length") or 0)
+        max_length = 4 * 1024 * 1024
+        if length > max_length:
+            raise ValueError(f"request body exceeds {max_length} bytes")
         body = self.rfile.read(length) if length else b"{}"
         return json.loads(body.decode("utf-8"))
 
@@ -6030,16 +6503,31 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             self.send_error(HTTPStatus.NOT_FOUND)
             return
         range_header = self.headers.get("Range") or ""
-        match = re.match(r"bytes=(\d*)-(\d*)", range_header)
-        if not match:
-            self.send_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+        match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+        if not match or "," in range_header:
+            self.send_range_error(file_path.stat().st_size)
             return
         size = file_path.stat().st_size
-        start = int(match.group(1) or 0)
-        end = int(match.group(2) or size - 1)
-        end = min(end, size - 1)
+        start_text, end_text = match.groups()
+        if not start_text and not end_text:
+            self.send_range_error(size)
+            return
+        if not start_text:
+            suffix_length = int(end_text)
+            if suffix_length <= 0:
+                self.send_range_error(size)
+                return
+            start = max(0, size - suffix_length)
+            end = size - 1
+        else:
+            start = int(start_text)
+            end = int(end_text) if end_text else size - 1
+            if start >= size:
+                self.send_range_error(size)
+                return
+            end = min(end, size - 1)
         if start > end:
-            self.send_error(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+            self.send_range_error(size)
             return
         self.send_response(HTTPStatus.PARTIAL_CONTENT)
         self.send_header(
@@ -6055,6 +6543,12 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 self.wfile.write(file.read(end - start + 1))
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
                 return
+
+    def send_range_error(self, size: int) -> None:
+        self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+        self.send_header("Content-Range", f"bytes */{size}")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def should_serve_spa(self) -> bool:
         parsed = urlparse(self.path)

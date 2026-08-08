@@ -1,8 +1,8 @@
 # Video Redaction Pipeline - System Overview
 
-- **Document version:** v031
-- **Last updated:** 2026-08-07
-- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus shared accumulated-evidence tracking, bounded gap recovery, and non-final automatic plate previews. Final Review Workspace v2.3.4 freezes the Python backend review behavior, and Frontend v1.3.3 layers React + TypeScript presentation over the same manifests, media, source-frame mappings, sessions, review entities, corrections, History, Range serving, finalization gates, and debounced reviewed-media materialization jobs.
+- **Document version:** v034
+- **Last updated:** 2026-08-08
+- **System status:** Face Pipeline v1 is integrated for full-video ADAS face detection, ordinary tracking, case-level privacy policy, privacy gap recovery, face redaction rendering from accepted privacy regions, automated evaluation against machine-readable face ground truth, and local Review Bundle packages. The prototype plate subsystem has one selected detector, Open Image Models YOLOv9-S-608, plus shared accumulated-evidence tracking, bounded gap recovery, and non-final automatic plate previews. Final Review Workspace v2.3.4 freezes the Python backend review behavior, Frontend v1.4.1 fixes manual-redaction Save persistence, and Frontend v1.5 layers exact changed-frame reviewed-media planning/progress over the full-render publication fallback.
 - **Canonical document:** `docs/SYSTEM_OVERVIEW.md`
 
 ## What The System Is For
@@ -11,7 +11,7 @@ This repository builds a local video-redaction pipeline. Its most complete path 
 
 The system is not a finished automatic redaction product, and it does not make a universal zero-leak claim. It produces structured evidence, diagnostic outputs, non-final previews, and approved face-redacted MP4s when the available privacy-region evidence passes final safety gates.
 
-The frozen case-based review backend package is `artifacts/final_pipeline_package_v2_3_4/`. It records the active component hashes, case manifests, source lineage, reviewer tasks, stable Person/Plate review objects with representative thumbnails, local session/correction provenance, version-alignment evidence, and finalization gates. The current React frontend package is generated under `artifacts/final_pipeline_package_frontend_v1_3_3/` from the accepted v1.3.2 package baseline by layering Vite-built assets under `app/` and preserving `legacy.html`. The earlier behavior-freeze package under `artifacts/final_pipeline_package_v1/` remains preserved.
+The frozen case-based review backend package is `artifacts/final_pipeline_package_v2_3_4/`. It records the active component hashes, case manifests, source lineage, reviewer tasks, stable Person/Plate review objects with representative thumbnails, local session/correction provenance, version-alignment evidence, and finalization gates. The current React frontend package is generated under `artifacts/final_pipeline_package_frontend_v1_5/` from the corrected v1.4.1 package baseline by layering Vite-built assets under `app/` and preserving `legacy.html`. The earlier behavior-freeze package under `artifacts/final_pipeline_package_v1/` remains preserved.
 
 ## Current User Workflow
 
@@ -82,7 +82,7 @@ redactor build-review-bundle \
 The final case review workspace is served locally:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_frontend_v1 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_frontend_v1_5 --open
 ```
 
 It shows separate Day and Night routes, Final Results and Audit Trail routes, Review/Edit modes, one large versioned player per active page, source-frame HUD, SVG timeline markers linked to review items, logical Person/Plate entities, append-only decisions and corrections, and finalization blockers. Review sessions can start anonymously; reviewer name is required only when exporting or finalizing. The legacy generated workspace remains available at `/legacy.html`.
@@ -301,7 +301,7 @@ Implemented:
 
 Not yet implemented:
 
-- correction UI for drawing or editing privacy regions;
+- segment-level reviewed-media reuse and a bounded render-segment cache;
 - robust automatic identity grouping for all keep-person fragments;
 - reviewed plate-correction intake and final unified face/plate rendering.
 
@@ -324,10 +324,10 @@ Not yet implemented:
 
 ## Next Planned Stages
 
-1. Add a correction workflow that can supply reviewed privacy regions for review-required intervals.
+1. Prove or reject segment-level reviewed-media rendering with full-output parity.
 2. Expand validation of rendered face-only outputs before making broader redaction-quality claims.
-3. Add reviewed plate-correction intake for unresolved plate intervals.
-4. Add unified face/plate rendering only after plate corrections are reviewed.
+3. Complete reviewed plate correction/finalization evidence for unresolved plate intervals.
+4. Add broader deployment hardening only after local correctness and security gates are satisfied.
 
 ## Detailed Technical Notes
 

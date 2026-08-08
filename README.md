@@ -51,9 +51,9 @@ npm ci
 npm run build
 cd ..
 PYTHONPATH=src .venv/bin/python -m redactor.cli build-final-review-workspace \
-  --output-dir artifacts/final_pipeline_package_frontend_v1_3_3 \
+  --output-dir artifacts/final_pipeline_package_frontend_v1_5 \
   --frontend react \
-  --react-reference-package artifacts/final_pipeline_package_frontend_v1_3_2 \
+  --react-reference-package artifacts/final_pipeline_package_frontend_v1_4_1 \
   --skip-frontend-build \
   --overwrite
 ```
@@ -62,17 +62,19 @@ Serve it locally:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m redactor.cli serve-final-review-workspace \
-  artifacts/final_pipeline_package_frontend_v1_3_3 --open
+  artifacts/final_pipeline_package_frontend_v1_5 --open
 ```
 
 React assets are served from `/app/`; the legacy generated workspace remains available at `/legacy.html`. The stable API contract is checked in at `docs/api/final_review_workspace_v1.schema.json` and served at `/api/v1/schema`.
 
-Frontend v1.3.3 keeps the v1.3.2 backend/media baseline intact while fixing destructive Reset all edits restoration for entity merges/policies and reserving a fixed entity-card operation status slot so pending media updates do not shift the Review objects modal layout.
+Frontend v1.4.1 fixes manual-redaction Save persistence so the exact previewed draft becomes active working state, creates a correction-verification task, and appears in a content-hashed Latest reviewed publication. Frontend v1.5 keeps that corrected behavior and adds exact changed-frame planning/progress metadata while retaining the proven full-render publication fallback. Segment-level reviewed-media reuse is deferred until parity can be proven. Evidence lives under `artifacts/manual_redaction_save_fix_v1_4_1/` and `artifacts/incremental_materialization_v1_5/`.
 
 Frontend details:
 
 - architecture: `docs/FRONTEND_ARCHITECTURE.md`;
 - development and test commands: `docs/FRONTEND_DEVELOPMENT.md`.
+- performance and local hardening: `docs/PERFORMANCE_AND_PRODUCTION_HARDENING.md`;
+- local runbook: `docs/LOCAL_PRODUCTION_RUNBOOK.md`.
 
 ## Supported Face Workflow
 
@@ -377,7 +379,7 @@ bake-offs are archived under `docs/archive/license_plate_detector_bakeoff/`.
 The broad-reader project summary is `docs/PROJECT_OVERVIEW.md`, and the short
 local demo guide is `docs/DEMO_GUIDE.md`. The behavior-freeze package is
 preserved under `artifacts/final_pipeline_package_v1/`. The current case-based
-review package is generated under `artifacts/final_pipeline_package_v2_3/`; it
+review package is generated under `artifacts/final_pipeline_package_frontend_v1_5/`; it
 contains case manifests, reviewer tasks, local session/correction provenance,
 stable Person/Plate review objects, representative thumbnails, a single
 versioned frame-aware player, timeline-linked review items, temporal correction
@@ -389,7 +391,7 @@ matching environment variables:
 
 ```bash
 redactor build-final-review-workspace \
-  --output-dir artifacts/final_pipeline_package_v2_3 \
+  --output-dir artifacts/final_pipeline_package_frontend_v1_5 \
   --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
   --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
   --plate-model models/open-image-models/yolo-v9-s-608-license-plates-end2end.onnx
@@ -398,7 +400,7 @@ redactor build-final-review-workspace \
 Serve the current review workspace with:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_v2_3 --open
+redactor serve-final-review-workspace artifacts/final_pipeline_package_frontend_v1_5 --open
 ```
 
 Validate or summarize an exported/local session with:

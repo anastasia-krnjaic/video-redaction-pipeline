@@ -1,5 +1,24 @@
 # System Overview Changelog
 
+## v034 — 2026-08-08
+
+Implemented the manual-redaction Save persistence fix and v1.5 reviewed-media planning pass:
+
+- documented `artifacts/final_pipeline_package_frontend_v1_4_1/` as the corrected manual Save baseline and `artifacts/final_pipeline_package_frontend_v1_5/` as the current React package;
+- recorded preview-token validation, `manual_correction_saved` events, linked verification tasks, and decoded evidence for single-frame, fixed-interval, and interpolated manual corrections;
+- added exact changed source-frame planning/progress metadata for media-aware mutations;
+- documented that segment-level reviewed-media reuse remains deferred because full-output parity was not proven.
+
+## v033 — 2026-08-08
+
+Implemented Final Review Workspace v1.4 performance and production hardening:
+
+- documented `artifacts/final_pipeline_package_frontend_v1_4/` as the current React package generated from preserved v1.3.3;
+- added deterministic effective privacy-region hashes so no-op/idempotent object policy changes and compatible lineage changes avoid reviewed-media rendering;
+- added target effective-region hashes and published working-state revisions to materialization jobs so non-media events do not invalidate compatible renders while stale media-changing jobs cannot publish;
+- strengthened local request and MP4 Range handling, including bounded JSON bodies and suffix/out-of-bounds/multi-range tests;
+- added benchmark and non-regression evidence under `artifacts/performance_production_hardening_v1_4/`.
+
 ## v032 — 2026-08-07
 
 Implemented Final Review Frontend v1.3.1 correctness fixes:

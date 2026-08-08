@@ -31,16 +31,16 @@ artifacts/final_pipeline_package_v2_3_4/
 The current React package is generated at:
 
 ```text
-artifacts/final_pipeline_package_frontend_v1_3/
+artifacts/final_pipeline_package_frontend_v1_5/
 ```
 
-Frontend v1.3.1 is generated at:
+The corrected manual-Save baseline is generated at:
 
 ```text
-artifacts/final_pipeline_package_frontend_v1_3_1/
+artifacts/final_pipeline_package_frontend_v1_4_1/
 ```
 
-For backend/privacy parity, the v1.3.1 package copies the accepted v1.3 React package as its base, then writes:
+For backend/privacy parity, the v1.5 package copies the accepted v1.4.1 React package as its base, then writes:
 
 ```text
 app/                         React/Vite SPA
@@ -97,6 +97,10 @@ Frame logic is centralized in `useVideoController` and `src/utils/frame.ts`.
 Review decisions, object policies, entity merges, corrections, checkpoints, and History remain Python-owned append-only session state. React may optimistically show an object policy only after the backend accepts the event.
 
 Entity policy changes, correction saves, checkpoint restores, and Restart case review enqueue Python materialization jobs. The server serializes jobs per case, debounces rapid accepted mutations, coalesces queued work to the newest active projection revision, caches already materialized state hashes, and rejects stale render results. React polls `/api/v1/materialization-jobs/{job_id}` and swaps in a revisioned Latest reviewed media URL only after the job completes.
+
+v1.4 adds a deterministic effective-region digest at the materialization scheduling boundary. Mutations that do not change the effective privacy-region hash update Python working state and History without starting a media job. If an identical target hash is already queued or running, the frontend receives the existing job rather than a replacement job. Completed jobs publish only when their target effective-region hash is still compatible with the current active projection.
+
+v1.5 extends the scheduler plan with exact changed source-frame counts and intervals so the UI can show meaningful progress. The renderer still publishes through the full-render fallback; segment reuse is not enabled until it has a separate parity gate.
 
 Entity merges are not assembled in React. The merge endpoint creates one canonical merged review entity, retires the selected aliases, preserves child/source evidence, and records the hash-chained event.
 

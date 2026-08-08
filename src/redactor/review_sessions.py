@@ -15,6 +15,10 @@ SCHEMA_VERSION = "review_session.v1"
 EVENT_SCHEMA_VERSION = "review_session_event.v1"
 SESSION_LAYOUT_DIRS = ("state", "events", "corrections", "checkpoints", "media")
 
+EVENT_CORRECTION_PREVIEWED = "correction_previewed"
+EVENT_CORRECTION_SAVED_LEGACY = "correction_saved"
+EVENT_MANUAL_CORRECTION_SAVED = "manual_correction_saved"
+
 ACTION_LOOKS_CORRECT = "looks_correct"
 ACTION_PRIVACY_LEAK = "privacy_leak"
 ACTION_PARTIAL_COVERAGE = "partial_coverage"
@@ -258,7 +262,7 @@ def append_correction_event(
 ) -> dict[str, Any]:
     event = append_event(
         session_dir,
-        event_type="correction_saved",
+        event_type=EVENT_MANUAL_CORRECTION_SAVED,
         actor=actor,
         case_id=correction.case_id,
         task_id=correction.task_id,
@@ -269,6 +273,41 @@ def append_correction_event(
     )
     write_correction_jsonl(session_dir / "corrections.jsonl", correction)
     write_correction_jsonl(session_dir / "corrections" / "corrections.jsonl", correction)
+    refresh_session_summary(session_dir)
+    return event
+
+
+def append_correction_preview_event(
+    session_dir: Path,
+    *,
+    actor: dict[str, Any],
+    correction: ReviewCorrection,
+    preview: dict[str, Any],
+) -> dict[str, Any]:
+    event = append_event(
+        session_dir,
+        event_type=EVENT_CORRECTION_PREVIEWED,
+        actor=actor,
+        case_id=correction.case_id,
+        task_id=correction.task_id,
+        before_state=None,
+        after_state={
+            "case_id": correction.case_id,
+            "category": correction.category,
+            "correction_id": correction.correction_id,
+            "draft_hash": preview.get("draft_hash"),
+            "effective_regions_hash": preview.get("effective_regions_hash"),
+            "frame_end": correction.source_frame_end,
+            "frame_start": correction.source_frame_start,
+            "interpolation_method": correction.interpolation_method,
+            "preview_sha256": preview.get("preview_sha256"),
+            "preview_token": preview.get("preview_token"),
+            "source_frame_end": correction.source_frame_end,
+            "source_frame_start": correction.source_frame_start,
+        },
+        note=correction.reason or "Manual correction previewed.",
+        application_hashes={"preview_sha256": str(preview.get("preview_sha256") or "")},
+    )
     refresh_session_summary(session_dir)
     return event
 

@@ -19,6 +19,8 @@ from redactor.privacy_records import (
 )
 from redactor.review_corrections import ReviewCorrection, load_corrections_jsonl
 from redactor.review_sessions import (
+    EVENT_CORRECTION_SAVED_LEGACY,
+    EVENT_MANUAL_CORRECTION_SAVED,
     append_event,
     ensure_session_layout,
     load_events,
@@ -26,7 +28,7 @@ from redactor.review_sessions import (
 
 WORKING_STATE_SCHEMA_VERSION = "review_working_state.v1"
 CHECKPOINT_SCHEMA_VERSION = "review_checkpoint.v1"
-PREVIEW_TOKEN_SCHEMA_VERSION = "correction_preview_token.v1"
+PREVIEW_TOKEN_SCHEMA_VERSION = "correction_preview_token.v2"
 
 POLICY_REDACT = privacy_entities.POLICY_REDACT
 POLICY_KEEP_VISIBLE = privacy_entities.POLICY_KEEP_VISIBLE
@@ -279,7 +281,7 @@ def derive_active_review_projection(
             if task_id:
                 manual_tasks[task_id] = task
             continue
-        if event_type == "correction_saved":
+        if event_type in {EVENT_MANUAL_CORRECTION_SAVED, EVENT_CORRECTION_SAVED_LEGACY}:
             correction_id = str(after.get("correction_id") or "")
             if correction_id:
                 active_correction_ids.add(correction_id)
@@ -581,7 +583,9 @@ def compute_effective_privacy_regions(
     session_dir = session_dir.resolve()
     manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
     base_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
-    base_regions = review_finalization.load_privacy_region_records(base_path)
+    base_regions = (
+        review_finalization.load_privacy_region_records(base_path) if base_path.exists() else []
+    )
     state = derive_working_state(package_root, session_dir)
     entity_index = load_entity_index(package_root)
     effective_entities = effective_case_entities(entity_index.get(case_id, []), state)
@@ -626,6 +630,148 @@ def compute_effective_privacy_regions(
         "state_hash": state["state_hash"],
     }
     return final_regions, provenance
+
+
+def effective_privacy_region_digest(
+    package_root: Path,
+    session_dir: Path,
+    *,
+    case_id: str,
+) -> dict[str, Any]:
+    started = time.monotonic()
+    regions, provenance = compute_effective_privacy_regions(
+        package_root,
+        session_dir,
+        case_id=case_id,
+    )
+    digest = stable_hash([record.to_dict() for record in regions])
+    frame_hashes = privacy_region_frame_hashes(regions)
+    intervals = privacy_region_intervals(regions)
+    return {
+        "affected_source_frame_intervals": intervals,
+        "case_id": case_id,
+        "duration_ms": int((time.monotonic() - started) * 1000),
+        "effective_regions_hash": digest,
+        "frame_region_hashes": frame_hashes,
+        "region_count": len(regions),
+        "schema_version": "effective_privacy_region_digest.v1",
+        "state_hash": provenance.get("state_hash"),
+    }
+
+
+def baseline_effective_privacy_region_digest(package_root: Path, *, case_id: str) -> dict[str, Any]:
+    from redactor import review_finalization
+
+    base_path = package_root.resolve() / "regions" / f"{case_id}_current_regions.jsonl"
+    regions = (
+        review_finalization.load_privacy_region_records(base_path) if base_path.exists() else []
+    )
+    return {
+        "affected_source_frame_intervals": privacy_region_intervals(regions),
+        "case_id": case_id,
+        "duration_ms": 0,
+        "effective_regions_hash": stable_hash([record.to_dict() for record in regions]),
+        "frame_region_hashes": privacy_region_frame_hashes(regions),
+        "region_count": len(regions),
+        "schema_version": "effective_privacy_region_digest.v1",
+        "state_hash": None,
+    }
+
+
+def published_effective_regions_hash(
+    package_root: Path,
+    state: dict[str, Any],
+    *,
+    case_id: str,
+) -> str | None:
+    latest = dict(state.get("materialized_latest_reviewed") or {}).get(case_id)
+    if isinstance(latest, dict) and latest.get("effective_regions_hash"):
+        return str(latest["effective_regions_hash"])
+    return str(
+        baseline_effective_privacy_region_digest(package_root, case_id=case_id)[
+            "effective_regions_hash"
+        ]
+    )
+
+
+def privacy_region_intervals(records: list[PrivacyRegionRecord]) -> list[dict[str, int]]:
+    frames = sorted({int(record.source_frame) for record in records})
+    return source_frame_intervals(frames)
+
+
+def source_frame_intervals(frames: list[int]) -> list[dict[str, int]]:
+    frames = sorted({int(frame) for frame in frames})
+    if not frames:
+        return []
+    intervals: list[dict[str, int]] = []
+    start = previous = frames[0]
+    for frame in frames[1:]:
+        if frame == previous + 1:
+            previous = frame
+            continue
+        intervals.append({"source_frame_end": previous, "source_frame_start": start})
+        start = previous = frame
+    intervals.append({"source_frame_end": previous, "source_frame_start": start})
+    return intervals
+
+
+def privacy_region_frame_hashes(records: list[PrivacyRegionRecord]) -> dict[str, str]:
+    by_frame: dict[int, list[PrivacyRegionRecord]] = {}
+    for record in records:
+        by_frame.setdefault(int(record.source_frame), []).append(record)
+    return {
+        str(frame): stable_hash(
+            [
+                record.to_dict()
+                for record in sorted(
+                    frame_records,
+                    key=lambda item: (
+                        item.source_frame,
+                        item.category,
+                        item.object_id or "",
+                        item.provenance,
+                        item.approval_state,
+                        item.render_eligible,
+                        item.bbox_xyxy or (-1, -1, -1, -1),
+                        stable_hash(dict(item.source_record)),
+                    ),
+                )
+            ]
+        )
+        for frame, frame_records in sorted(by_frame.items())
+    }
+
+
+def effective_region_change_summary(
+    package_root: Path,
+    *,
+    case_id: str,
+    before_digest: dict[str, Any],
+    after_digest: dict[str, Any],
+) -> dict[str, Any]:
+    manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
+    before_frame_hashes = {
+        str(frame): str(value)
+        for frame, value in dict(before_digest.get("frame_region_hashes") or {}).items()
+    }
+    after_frame_hashes = {
+        str(frame): str(value)
+        for frame, value in dict(after_digest.get("frame_region_hashes") or {}).items()
+    }
+    changed_frames = sorted(
+        int(frame)
+        for frame in set(before_frame_hashes) | set(after_frame_hashes)
+        if before_frame_hashes.get(frame) != after_frame_hashes.get(frame)
+    )
+    frame_count = int(manifest.frame_count or 0)
+    changed_count = len(changed_frames)
+    changed_percentage = (changed_count / frame_count) if frame_count > 0 else 0.0
+    return {
+        "changed_source_frame_count": changed_count,
+        "changed_source_frame_intervals": source_frame_intervals(changed_frames),
+        "changed_source_frame_percentage": round(changed_percentage, 6),
+        "schema_version": "effective_region_change_summary.v1",
+    }
 
 
 def effective_case_entities(
@@ -1032,6 +1178,13 @@ def render_correction_preview(
     source_path = review_finalization.resolve_package_path(package_root, manifest.source_path)
     if source_path is None or not source_path.exists():
         return {"ok": False, "reason": "case source missing"}
+    working_state = derive_working_state(package_root, session_dir)
+    working_state_revision = str(
+        working_state.get("active_projection_hash") or working_state.get("state_hash") or ""
+    )
+    source_video_hash = (
+        correction.source_video_hash or manifest.source_video_hash or media.sha256_file(source_path)
+    )
     local_start = max(0, correction.source_frame_start - manifest.source_frame_start)
     local_end = max(local_start, correction.source_frame_end - manifest.source_frame_start)
     fps = rational_to_float(manifest.fps) or 30.0
@@ -1046,12 +1199,13 @@ def render_correction_preview(
         duration_seconds=(local_end - local_start + 1) / fps,
         overwrite=True,
     )
-    final_regions, provenance = compute_effective_privacy_regions(
+    final_regions, _provenance = compute_effective_privacy_regions(
         package_root,
         session_dir,
         case_id=correction.case_id,
         include_unsaved_correction=correction if include_unsaved_correction else None,
     )
+    effective_regions_hash = stable_hash([record.to_dict() for record in final_regions])
     preview_regions = [
         replace(record, source_frame=record.source_frame - local_start)
         for record in final_regions
@@ -1070,15 +1224,22 @@ def render_correction_preview(
         source_has_audio=source_info.audio_stream is not None,
         overwrite=True,
     )
-    token_payload = preview_token_payload(session_dir, correction)
-    token_path = session_dir / "state" / "preview_tokens" / f"{token_payload['preview_token']}.json"
-    write_json(token_path, token_payload)
     preview_hash = media.sha256_file(corrected_preview)
+    token_payload = preview_token_payload(
+        session_dir,
+        correction,
+        effective_regions_hash=effective_regions_hash,
+        preview_sha256=preview_hash,
+        source_video_hash=source_video_hash,
+        working_state_revision=working_state_revision,
+    )
+    token_path = preview_token_path(session_dir, token_payload["preview_token"])
+    write_json(token_path, token_payload)
     return {
         "audio_handling": audio_handling,
         "corrected_preview": corrected_preview.relative_to(package_root).as_posix(),
         "draft_hash": token_payload["draft_hash"],
-        "effective_regions_hash": provenance.get("state_hash"),
+        "effective_regions_hash": effective_regions_hash,
         "frame_end": correction.source_frame_end,
         "frame_start": correction.source_frame_start,
         "latest_reviewed": corrected_preview.relative_to(package_root).as_posix(),
@@ -1089,39 +1250,131 @@ def render_correction_preview(
         "rendered_frames": rendered_frames,
         "rendered_regions": rendered_regions,
         "schema_version": "correction_interval_preview.v2",
+        "source_video_hash": source_video_hash,
+        "working_state_revision": working_state_revision,
     }
 
 
-def preview_token_payload(session_dir: Path, correction: ReviewCorrection) -> dict[str, Any]:
+def preview_token_payload(
+    session_dir: Path,
+    correction: ReviewCorrection,
+    *,
+    effective_regions_hash: str,
+    preview_sha256: str,
+    source_video_hash: str,
+    working_state_revision: str,
+) -> dict[str, Any]:
     draft_hash = correction_draft_hash(correction)
     return {
         "case_id": correction.case_id,
         "correction_id": correction.correction_id,
         "created_at_utc": media.utc_timestamp(),
         "draft_hash": draft_hash,
+        "effective_regions_hash": effective_regions_hash,
+        "keyframe_source_frames": [keyframe.source_frame for keyframe in correction.keyframes],
+        "preview_sha256": preview_sha256,
         "preview_token": f"preview_{uuid.uuid4().hex}",
         "schema_version": PREVIEW_TOKEN_SCHEMA_VERSION,
         "session_id": session_dir.name,
+        "source_frame_end": correction.source_frame_end,
+        "source_frame_start": correction.source_frame_start,
+        "source_video_hash": source_video_hash,
+        "working_state_revision": working_state_revision,
     }
 
 
-def validate_preview_token(
-    session_dir: Path, *, token: str, correction: ReviewCorrection
-) -> dict[str, Any]:
+def preview_token_path(session_dir: Path, token: str) -> Path:
+    return session_dir / "state" / "preview_tokens" / f"{token}.json"
+
+
+def load_preview_token_payload(session_dir: Path, *, token: str) -> dict[str, Any]:
     if not token:
-        return {"legacy_without_token": True, "ok": True}
+        return {
+            "error": "Preview the correction before saving it.",
+            "ok": False,
+        }
     safe = "".join(ch for ch in token if ch.isalnum() or ch in {"_", "-"})
     if safe != token:
         return {"error": "Preview token is invalid.", "ok": False}
-    path = session_dir / "state" / "preview_tokens" / f"{safe}.json"
+    path = preview_token_path(session_dir, safe)
     if not path.exists():
         return {"error": "Correction preview has expired or was not found.", "ok": False}
-    payload = read_json(path)
+    return {"ok": True, "preview": read_json(path)}
+
+
+def validate_preview_token(
+    session_dir: Path,
+    *,
+    token: str,
+    correction: ReviewCorrection,
+    current_working_state_revision: str | None = None,
+) -> dict[str, Any]:
+    token_result = load_preview_token_payload(session_dir, token=token)
+    if not token_result.get("ok"):
+        return token_result
+    payload = dict(token_result["preview"])
+    if payload.get("session_id") != session_dir.name:
+        return {"error": "Preview token belongs to a different review session.", "ok": False}
+    if payload.get("case_id") != correction.case_id:
+        return {"error": "Preview token belongs to a different case.", "ok": False}
+    if payload.get("correction_id") != correction.correction_id:
+        return {"error": "Preview token belongs to a different correction draft.", "ok": False}
+    if payload.get("source_video_hash") != correction.source_video_hash:
+        return {"error": "Preview token belongs to a different source media revision.", "ok": False}
     if payload.get("draft_hash") != correction_draft_hash(correction):
         return {
             "error": "Correction draft changed after Preview; preview it again before saving.",
             "ok": False,
         }
+    accepted_correction_id = str(payload.get("accepted_correction_id") or "")
+    if accepted_correction_id:
+        if accepted_correction_id == correction.correction_id:
+            return {"already_accepted": True, "ok": True, "preview": payload}
+        return {
+            "error": "Preview token has already been used for a different correction.",
+            "ok": False,
+        }
+    token_revision = str(payload.get("working_state_revision") or "")
+    if (
+        current_working_state_revision
+        and token_revision
+        and token_revision != current_working_state_revision
+    ):
+        return {
+            "error": (
+                "Review state changed after Preview; preview the correction again before saving."
+            ),
+            "ok": False,
+        }
+    return {"ok": True, "preview": payload}
+
+
+def mark_preview_token_accepted(
+    session_dir: Path,
+    *,
+    token: str,
+    correction: ReviewCorrection,
+    event: dict[str, Any],
+    materialization_plan: dict[str, Any],
+) -> dict[str, Any]:
+    token_result = load_preview_token_payload(session_dir, token=token)
+    if not token_result.get("ok"):
+        return token_result
+    payload = dict(token_result["preview"])
+    payload.update(
+        {
+            "accepted_at_utc": media.utc_timestamp(),
+            "accepted_correction_id": correction.correction_id,
+            "accepted_event_hash": event.get("event_hash"),
+            "accepted_event_id": event.get("event_id"),
+            "accepted_revision_id": correction.revision_id,
+            "materialization_job_id": (materialization_plan.get("job") or {}).get("job_id"),
+            "materialization_required": (materialization_plan.get("plan") or {}).get(
+                "materialization_required"
+            ),
+        }
+    )
+    write_json(preview_token_path(session_dir, token), payload)
     return {"ok": True, "preview": payload}
 
 
@@ -1133,6 +1386,7 @@ def correction_draft_hash(correction: ReviewCorrection) -> str:
         "created_at_utc",
         "previous_revision_id",
         "reason",
+        "reviewer_identity",
         "revision_id",
         "schema_version",
     ):
@@ -1681,7 +1935,7 @@ def human_event_label(event_type: str, after: dict[str, Any]) -> str:
         return f"{label} set to {policy_label(inherited_policy(after), after.get('category'))}"
     if event_type == "bulk_entity_policy_changed":
         return f"Bulk object policy set to {policy_label(str(after.get('policy') or ''), None)}"
-    if event_type == "correction_saved":
+    if event_type in {EVENT_MANUAL_CORRECTION_SAVED, EVENT_CORRECTION_SAVED_LEGACY}:
         return (
             f"Manual {after.get('category') or 'privacy'} correction saved, "
             f"frames {after.get('source_frame_start')}-{after.get('source_frame_end')}"

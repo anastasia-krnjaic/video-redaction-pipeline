@@ -24,8 +24,8 @@ Playwright E2E uses the package server and the repo virtualenv:
 
 ```bash
 cd frontend
-FINAL_REVIEW_PACKAGE=artifacts/final_pipeline_package_frontend_v1_3_3 npm run test:e2e -- --project=chromium
-FINAL_REVIEW_PACKAGE=artifacts/final_pipeline_package_frontend_v1_3_3 npm run test:e2e -- --project=firefox
+FINAL_REVIEW_PACKAGE=artifacts/final_pipeline_package_frontend_v1_5 npm run test:e2e -- --project=chromium
+FINAL_REVIEW_PACKAGE=artifacts/final_pipeline_package_frontend_v1_5 npm run test:e2e -- --project=firefox
 ```
 
 Install managed browsers when needed:
@@ -41,9 +41,9 @@ Generate the React package without changing backend artifacts:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m redactor.cli build-final-review-workspace \
-  --output-dir artifacts/final_pipeline_package_frontend_v1_3_3 \
+  --output-dir artifacts/final_pipeline_package_frontend_v1_5 \
   --frontend react \
-  --react-reference-package artifacts/final_pipeline_package_frontend_v1_3_2 \
+  --react-reference-package artifacts/final_pipeline_package_frontend_v1_4_1 \
   --skip-frontend-build \
   --overwrite
 ```
@@ -54,7 +54,7 @@ Serve it with:
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m redactor.cli serve-final-review-workspace \
-  artifacts/final_pipeline_package_frontend_v1_3_3 --open
+  artifacts/final_pipeline_package_frontend_v1_5 --open
 ```
 
 Open URL:
@@ -67,9 +67,9 @@ http://127.0.0.1:<port>/app/day
 
 ```bash
 PYTHONPATH=src .venv/bin/python -m redactor.cli audit-final-review-backend-parity \
-  --reference artifacts/final_pipeline_package_frontend_v1_3_2 \
-  --candidate artifacts/final_pipeline_package_frontend_v1_3_3 \
-  --output artifacts/final_pipeline_package_frontend_v1_3_3/backend_parity_audit.json
+  --reference artifacts/final_pipeline_package_frontend_v1_4 \
+  --candidate artifacts/final_pipeline_package_frontend_v1_5 \
+  --output artifacts/final_pipeline_package_frontend_v1_5/backend_parity_audit.json
 ```
 
 The audit compares backend/privacy artifacts and ignores frontend DOM/design differences.
@@ -97,6 +97,26 @@ The audit compares backend/privacy artifacts and ignores frontend DOM/design dif
 - `Restart review` remains workflow-only.
 - `Reset all edits to Automatic baseline` now guards against stale materialization events and compares the active case projection against the immutable package baseline in `reset_baseline_state_audit.json`.
 - Entity cards reserve a fixed operation-status slot at the right edge, so pending spinners do not shift policy buttons, card width, modal width, or scroll position.
+
+## v1.4 Hardening Notes
+
+- Object-policy changes, bulk policy changes, manual correction saves, merges, checkpoint restores, and destructive resets classify the effective privacy-region hash before scheduling media work.
+- No-op/idempotent mutations append History and update working state without starting a media job.
+- Compatible queued/running jobs are reused when repeated submissions target the same effective-region hash.
+- Materialization jobs include target effective-region hashes and published working-state revisions so stale jobs cannot overwrite newer media-changing state.
+- API request bodies are bounded, and MP4 Range handling covers normal, suffix, invalid, multi-range, and out-of-bounds requests.
+- Benchmark evidence is generated with `scripts/final_review_performance_harness.py` under `artifacts/performance_production_hardening_v1_4/`.
+
+## v1.4.1 Manual Save Notes
+
+- Manual correction Save requires the current Preview token and validates the case, session, source media hash, working-state revision compatibility, correction ID, and stable draft hash.
+- Preview appends a `correction_previewed` event; Save appends `manual_correction_saved`, creates the linked verification task, and keeps correction previews out of the persistent version selector.
+- Single-frame, fixed-box interval, and interpolated corrections are verified against active effective privacy regions and decoded Latest reviewed output.
+
+## v1.5 Planning Notes
+
+- Materialization plans now expose exact changed source-frame intervals, changed-frame counts, planned render/encode counts, current stage, and progress metadata.
+- The current renderer still uses the full-render publication fallback. Segment reuse and cache cleanup commands are deferred until full-output parity can be proven.
 
 ## API Schema
 

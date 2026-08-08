@@ -203,6 +203,12 @@ def interpolate_correction_boxes(correction: ReviewCorrection) -> dict[int, Box]
     if correction.operation not in {OP_ADD, OP_REPLACE}:
         return {}
     if correction.interpolation_method == INTERPOLATION_NONE:
+        if len(correction.keyframes) == 1:
+            keyframe = correction.keyframes[0]
+            return {
+                frame: keyframe.bbox_xyxy
+                for frame in range(correction.source_frame_start, correction.source_frame_end + 1)
+            }
         return {keyframe.source_frame: keyframe.bbox_xyxy for keyframe in correction.keyframes}
     keyframes = sorted(correction.keyframes, key=lambda item: item.source_frame)
     if not keyframes:

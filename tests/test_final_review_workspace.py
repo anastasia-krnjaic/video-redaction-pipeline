@@ -57,6 +57,13 @@ def post_json(url: str, payload: dict[str, object]) -> dict[str, object]:
         return json.loads(response.read().decode("utf-8"))
 
 
+def post_json_error(url: str, payload: dict[str, object]) -> tuple[int, dict[str, object]]:
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        post_json(url, payload)
+    error = exc_info.value
+    return error.code, json.loads(error.read().decode("utf-8"))
+
+
 def synthetic_case_manifest(package_root: Path) -> case_manifests.CaseManifest:
     source = package_root / "media" / "synthetic" / "original_reference.mp4"
     source.parent.mkdir(parents=True, exist_ok=True)
@@ -732,6 +739,52 @@ def write_base_region(package: Path, case_id: str) -> None:
     )
 
 
+def write_policy_entity_package(
+    package: Path,
+) -> tuple[case_manifests.CaseManifest, dict[str, object]]:
+    manifest = synthetic_case_manifest(package)
+    automatic = package / "media" / manifest.case_id / "automatic_baseline.mp4"
+    shutil.copy2(package / manifest.video_roles[0].path, automatic)
+    manifest = replace(
+        manifest,
+        video_roles=(
+            manifest.video_roles[0],
+            case_manifests.VideoRole(
+                label="Automatic",
+                path=automatic.relative_to(package).as_posix(),
+                role="automatic",
+                sha256=review_workspace.media.sha256_file(automatic),
+                source_frame_end=manifest.source_frame_end,
+                source_frame_start=manifest.source_frame_start,
+            ),
+        ),
+    )
+    case_manifests.write_case_manifest(package / "cases" / f"{manifest.case_id}.json", manifest)
+    write_base_region(package, manifest.case_id)
+    entity = {
+        "automatic_source_track_ids": ["plate_1"],
+        "case_id": manifest.case_id,
+        "category": CATEGORY_PLATE,
+        "current_policy": privacy_entities.POLICY_REDACT,
+        "default_privacy_policy": privacy_entities.POLICY_REDACT,
+        "entity_id": "entity_plate_1",
+        "first_visible_source_frame": 0,
+        "label": "Plate 01",
+        "last_visible_source_frame": 0,
+        "member_detector_tracker_ids": ["plate_1"],
+        "privacy_action": privacy_entities.POLICY_REDACT,
+        "representative_source_frame": 0,
+    }
+    write_json(
+        package / "review_entities.json",
+        {"cases": {manifest.case_id: [entity]}, "schema_version": "review_entities.v2"},
+    )
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_json(package / "workspace_manifest.json", {"case_count": 1})
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    return manifest, entity
+
+
 def write_empty_regions(package: Path, case_id: str) -> None:
     review_finalization.write_privacy_region_records(
         package / "regions" / f"{case_id}_current_regions.jsonl",
@@ -757,6 +810,19 @@ def video_frame_count(path: Path) -> int:
         return int(capture.get(cv.CAP_PROP_FRAME_COUNT))
     finally:
         capture.release()
+
+
+def wait_for_materialization_job(
+    server: review_workspace.FinalReviewWorkspaceServer,
+    job_id: str,
+) -> dict[str, object]:
+    deadline = review_workspace.time.monotonic() + 10
+    while review_workspace.time.monotonic() < deadline:
+        job = server.materialization_jobs.get(job_id)
+        if job and job.get("status") in {"completed", "failed", "superseded"}:
+            return job
+        review_workspace.time.sleep(0.05)
+    raise AssertionError(f"materialization job did not finish: {job_id}")
 
 
 def test_finalization_blocks_required_unresolved_task(tmp_path: Path) -> None:
@@ -913,6 +979,44 @@ def test_workspace_server_serves_mp4_range_and_rejects_traversal(tmp_path: Path)
         assert content_type == "video/mp4"
         assert len(body) == 16
 
+        suffix_request = urllib.request.Request(
+            f"{base_url}/{manifest.video_roles[0].path}",
+            headers={"Range": "bytes=-8"},
+        )
+        with urllib.request.urlopen(suffix_request, timeout=5) as response:
+            suffix_body = response.read()
+            suffix_range = response.headers["Content-Range"]
+        assert response.status == 206
+        assert len(suffix_body) == 8
+        assert suffix_range.startswith("bytes ")
+
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{base_url}/{manifest.video_roles[0].path}",
+                    headers={"Range": "bytes=999999999-1000000000"},
+                ),
+                timeout=5,
+            )
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 416
+            assert exc.headers["Content-Range"].startswith("bytes */")
+        else:  # pragma: no cover
+            raise AssertionError("out-of-bounds range request unexpectedly succeeded")
+
+        try:
+            urllib.request.urlopen(
+                urllib.request.Request(
+                    f"{base_url}/{manifest.video_roles[0].path}",
+                    headers={"Range": "bytes=0-1,3-4"},
+                ),
+                timeout=5,
+            )
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 416
+        else:  # pragma: no cover
+            raise AssertionError("multi-range request unexpectedly succeeded")
+
         try:
             urllib.request.urlopen(f"{base_url}/../pyproject.toml", timeout=5)
         except urllib.error.HTTPError as exc:
@@ -997,6 +1101,308 @@ def test_workspace_server_exposes_versioned_api_contract(tmp_path: Path) -> None
         assert summary["api_schema_version"] == "final_review_workspace_api.v1"
         assert summary["cases"]["synthetic"]["case_id"] == "synthetic"
         assert case_payload["source_frame_start"] == manifest.source_frame_start
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_noop_entity_policy_skips_materialization_job(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest, entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+    session_id = session_dir.name
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = post_json(
+            f"{base_url}/api/v1/object-policy",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "entity_id": entity["entity_id"],
+                "policy": privacy_entities.POLICY_REDACT,
+                "session_id": session_id,
+            },
+        )
+        audit = json.loads((package / "materialization_job_audit.json").read_text())
+
+        assert response["ok"] is True
+        assert response["materialization_required"] is False
+        assert response["materialization_job"] is None
+        assert response["materialization_plan"]["changed_source_frame_count"] == 0
+        assert response["materialization_plan"]["materialization_strategy"] == "no_op"
+        assert (
+            response["materialization_plan"]["before_effective_regions_hash"]
+            == response["materialization_plan"]["after_effective_regions_hash"]
+        )
+        assert audit["cases"][manifest.case_id]["materialization_jobs_skipped"] == 1
+        assert audit["cases"][manifest.case_id]["materialization_jobs_started"] == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_media_changing_policy_queues_one_target_hashed_job(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest, entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = post_json(
+            f"{base_url}/api/v1/object-policy",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "entity_id": entity["entity_id"],
+                "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                "session_id": session_dir.name,
+            },
+        )
+        job = response["materialization_job"]
+
+        assert response["ok"] is True
+        assert response["materialization_required"] is True
+        assert job["status"] == "queued"
+        assert job["changed_source_frame_count"] == 1
+        assert job["current_stage"] == "waiting"
+        assert job["materialization_plan"]["materialization_strategy"] == "full_render_fallback"
+        assert job["planned_frames_to_render"] == manifest.frame_count
+        assert (
+            job["target_effective_regions_hash"]
+            == response["materialization_plan"]["after_effective_regions_hash"]
+        )
+        assert job["target_effective_region_count"] == 0
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    ("name", "start", "end", "interpolation", "keyframes", "expected_intervals"),
+    [
+        (
+            "single",
+            2,
+            2,
+            review_corrections.INTERPOLATION_NONE,
+            [review_corrections.CorrectionKeyframe(2, (10, 10, 20, 20))],
+            [{"source_frame_start": 2, "source_frame_end": 2}],
+        ),
+        (
+            "fixed",
+            1,
+            3,
+            review_corrections.INTERPOLATION_NONE,
+            [review_corrections.CorrectionKeyframe(1, (10, 10, 20, 20))],
+            [{"source_frame_start": 1, "source_frame_end": 3}],
+        ),
+        (
+            "interpolated",
+            1,
+            3,
+            review_corrections.INTERPOLATION_LINEAR,
+            [
+                review_corrections.CorrectionKeyframe(1, (10, 10, 20, 20)),
+                review_corrections.CorrectionKeyframe(3, (14, 12, 24, 22)),
+            ],
+            [{"source_frame_start": 1, "source_frame_end": 3}],
+        ),
+    ],
+)
+def test_effective_region_change_summary_tracks_manual_correction_frames(
+    tmp_path: Path,
+    name: str,
+    start: int,
+    end: int,
+    interpolation: str,
+    keyframes: list[review_corrections.CorrectionKeyframe],
+    expected_intervals: list[dict[str, int]],
+) -> None:
+    package = tmp_path / f"package_{name}"
+    manifest = synthetic_case_manifest(package)
+    write_empty_regions(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    before = review_working_state.effective_privacy_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_PLATE,
+        correction_id=f"corr_{name}",
+        interpolation_method=interpolation,
+        keyframes=tuple(keyframes),
+        operation=review_corrections.OP_ADD,
+        reason=f"{name} correction",
+        reviewer_identity={"reviewer_id": "analyst"},
+        configuration_freeze_hash="test_freeze",
+        source_frame_end=end,
+        source_frame_start=start,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id=f"task_{name}",
+    )
+
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+    after = review_working_state.effective_privacy_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    summary = review_working_state.effective_region_change_summary(
+        package,
+        case_id=manifest.case_id,
+        before_digest=before,
+        after_digest=after,
+    )
+
+    assert summary["changed_source_frame_intervals"] == expected_intervals
+    assert summary["changed_source_frame_count"] == end - start + 1
+    assert summary["changed_source_frame_percentage"] == pytest.approx(
+        (end - start + 1) / manifest.frame_count
+    )
+
+
+def test_materialization_plan_reports_exact_changed_frames_for_policy_removal(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest, entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = post_json(
+            f"{base_url}/api/v1/object-policy",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "entity_id": entity["entity_id"],
+                "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                "session_id": session_dir.name,
+            },
+        )
+        plan = response["materialization_plan"]
+
+        assert plan["changed_source_frame_count"] == 1
+        assert plan["changed_source_frame_intervals"] == [
+            {"source_frame_start": 0, "source_frame_end": 0}
+        ]
+        assert plan["affected_source_frame_intervals"] == plan["changed_source_frame_intervals"]
+        assert plan["materialization_strategy"] == "full_render_fallback"
+        assert plan["planned_frames_to_render"] == manifest.frame_count
+        assert plan["planned_frames_to_encode"] == manifest.frame_count
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_repeated_same_policy_reuses_existing_pending_materialization_job(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest, entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    payload = {
+        "actor": {"reviewer_id": "analyst"},
+        "case_id": manifest.case_id,
+        "entity_id": entity["entity_id"],
+        "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+        "session_id": session_dir.name,
+    }
+    try:
+        first = post_json(f"{base_url}/api/v1/object-policy", payload)
+        second = post_json(f"{base_url}/api/v1/object-policy", payload)
+        jobs = server.materialization_jobs.jobs
+
+        assert first["materialization_required"] is True
+        assert second["materialization_required"] is True
+        assert first["materialization_job"]["job_id"] == second["materialization_job"]["job_id"]
+        assert (
+            second["materialization_plan"]["reused_job_id"]
+            == first["materialization_job"]["job_id"]
+        )
+        assert len(jobs) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest, _entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = post_json(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "note": "correct",
+                "session_id": session_dir.name,
+                "task_id": "task_1",
+            },
+        )
+
+        assert response["ok"] is True
+        assert server.materialization_jobs.jobs == {}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_region_compatible_job_publishes_after_non_media_decision(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest, entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        policy_response = post_json(
+            f"{base_url}/api/v1/object-policy",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "entity_id": entity["entity_id"],
+                "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                "session_id": session_dir.name,
+            },
+        )
+        decision_response = post_json(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "note": "correct",
+                "session_id": session_dir.name,
+                "task_id": "task_1",
+            },
+        )
+        job = wait_for_materialization_job(
+            server,
+            str(policy_response["materialization_job"]["job_id"]),
+        )
+        working_state = review_working_state.derive_working_state(package, session_dir)
+
+        assert decision_response["ok"] is True
+        assert job["status"] == "completed"
+        assert job["published_working_state_revision"] == working_state["active_projection_hash"]
+        assert manifest.case_id in working_state["materialized_latest_reviewed"]
     finally:
         server.shutdown()
         server.server_close()
@@ -2093,8 +2499,8 @@ def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> 
             "task_id": "task_1",
         }
 
-        correction_response = post_json(
-            f"{base_url}/api/corrections",
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
             {
                 "actor": {"reviewer_id": "analyst@example.test"},
                 "correction": correction,
@@ -2102,12 +2508,216 @@ def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> 
                 "session_id": session["session_id"],
             },
         )
+        saved_correction = dict(correction)
+        saved_correction["reviewer_identity"] = {
+            "attributed_at_utc": None,
+            "display_name": "Analyst",
+            "event_hash": None,
+            "event_id": None,
+            "reviewer_id": "analyst@example.test",
+            "schema_version": "reviewer_attribution_current.v1",
+            "session_id": session["session_id"],
+        }
+        correction_response = post_json(
+            f"{base_url}/api/corrections",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": saved_correction,
+                "preview_token": preview_response["preview"]["preview_token"],
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
         session_dir = package / "sessions" / session["session_id"]
         chain = review_sessions.validate_event_hash_chain(session_dir)
+        events = review_sessions.load_events(session_dir)
 
-        assert correction_response["event"]["event_type"] == "correction_saved"
+        assert preview_response["event"]["event_type"] == "correction_previewed"
+        assert correction_response["event"]["event_type"] == "manual_correction_saved"
+        assert events[-3]["event_type"] == "correction_previewed"
+        assert events[-2]["event_type"] == "manual_correction_saved"
+        assert events[-1]["event_type"] == "manual_issue_created"
         assert chain["passed"] is True
         assert (session_dir / "corrections.jsonl").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_workspace_server_rejects_unpreviewed_manual_correction_save(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_PLATE,
+            "configuration_freeze_hash": session_response["session"]["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "reviewed",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 0,
+            "source_frame_start": 0,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_1",
+        }
+
+        status, body = post_json_error(
+            f"{base_url}/api/corrections",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "reviewed",
+                "session_id": session_response["session"]["session_id"],
+            },
+        )
+
+        assert status == 409
+        assert "Preview the correction" in str(body["error"])
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_workspace_server_rejects_stale_manual_correction_preview_token(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_PLATE,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "reviewed",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 0,
+            "source_frame_start": 0,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_1",
+        }
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
+        changed = dict(correction)
+        changed["source_frame_end"] = 1
+
+        status, body = post_json_error(
+            f"{base_url}/api/corrections",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": changed,
+                "preview_token": preview_response["preview"]["preview_token"],
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
+
+        assert status == 409
+        assert "draft changed" in str(body["error"])
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_workspace_server_reuses_duplicate_manual_correction_save(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_PLATE,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "reviewed",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 0,
+            "source_frame_start": 0,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_1",
+        }
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
+        payload = {
+            "actor": {"reviewer_id": "analyst@example.test"},
+            "correction": correction,
+            "preview_token": preview_response["preview"]["preview_token"],
+            "reason": "reviewed",
+            "session_id": session["session_id"],
+        }
+
+        first = post_json(f"{base_url}/api/corrections", payload)
+        second = post_json(f"{base_url}/api/corrections", payload)
+        session_dir = package / "sessions" / session["session_id"]
+        state = review_working_state.derive_working_state(package, session_dir)
+        save_events = [
+            event
+            for event in review_sessions.load_events(session_dir)
+            if event.get("event_type") == "manual_correction_saved"
+        ]
+
+        assert second["idempotent_retry"] is True
+        assert first["materialization_job"]["job_id"] == second["materialization_job"]["job_id"]
+        assert len(server.materialization_jobs.jobs) == 1
+        assert state["active_correction_ids"] == [first["event"]["after_state"]["correction_id"]]
+        assert len(save_events) == 1
     finally:
         server.shutdown()
         server.server_close()

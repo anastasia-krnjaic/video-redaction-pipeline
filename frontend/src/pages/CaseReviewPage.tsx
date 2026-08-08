@@ -114,6 +114,7 @@ export function CaseReviewPage({
   const [previewRole, setPreviewRole] = useState<MediaVersion | undefined>();
   const [previewReady, setPreviewReady] = useState(false);
   const [previewToken, setPreviewToken] = useState<string>();
+  const [correctionSaveStatus, setCorrectionSaveStatus] = useState<string>();
   const [checkpointName, setCheckpointName] = useState('');
   const [checkpointBusy, setCheckpointBusy] = useState<string | null>(null);
   const [checkpointDeleteTarget, setCheckpointDeleteTarget] = useState<Record<string, unknown> | null>(null);
@@ -154,7 +155,9 @@ export function CaseReviewPage({
       .join('|'),
     [materializationJobs],
   );
-  const updatingMedia = activeMaterializationJobs.length > 0;
+  const materializationStatusText = activeMaterializationJobs[0]
+    ? formatMaterializationStatus(activeMaterializationJobs[0].job)
+    : undefined;
   const openComplete = tasks.length > 0 && tasks.every((task) => task.bucket !== 'Open');
 
   useEffect(() => {
@@ -335,6 +338,7 @@ export function CaseReviewPage({
     setPreviewReady(false);
     setPreviewToken(undefined);
     setPreviewRole(undefined);
+    setCorrectionSaveStatus(undefined);
     if (selectedRole === 'correction_preview') setSelectedRole('latest_reviewed');
     setDraft(withDraftHash({ ...nextDraft, preview_token: undefined }));
   };
@@ -348,6 +352,16 @@ export function CaseReviewPage({
   const trackMaterializationJob = (job: MaterializationJob | undefined, entityIds: string[] = []) => {
     const trackedEntityIds = job?.affected_entity_ids?.length ? job.affected_entity_ids : entityIds;
     if (!job?.job_id) {
+      if (trackedEntityIds.length) {
+        setPendingEntityIds((current) => {
+          const next = new Set(current);
+          trackedEntityIds.forEach((id) => next.delete(id));
+          return next;
+        });
+      }
+      return;
+    }
+    if (!['queued', 'running'].includes(job.status)) {
       if (trackedEntityIds.length) {
         setPendingEntityIds((current) => {
           const next = new Set(current);
@@ -553,6 +567,7 @@ export function CaseReviewPage({
     setPreviewReady(false);
     setPreviewToken(undefined);
     setPreviewRole(undefined);
+    setCorrectionSaveStatus('Correction saved');
     setSelectedRole('latest_reviewed');
     trackMaterializationJob(materialization_job, correction.entity_id ? [correction.entity_id] : []);
   };
@@ -582,6 +597,7 @@ export function CaseReviewPage({
     });
     setPreviewReady(true);
     setPreviewToken(preview.preview_token || undefined);
+    setCorrectionSaveStatus(undefined);
     setDraft((current) => withDraftHash({ ...current, preview_token: preview.preview_token || undefined }));
     setSelectedRole('latest_reviewed');
     controller.seekToFrame(preservedFrame);
@@ -734,7 +750,8 @@ export function CaseReviewPage({
           <h2>{manifest.display_name}</h2>
           <p className="case-subtitle">
             {manifest.frame_count} frames · source {manifest.source_frame_start}-{manifest.source_frame_end}
-            {updatingMedia ? ' · Updating Latest reviewed...' : ''}
+            {correctionSaveStatus ? ` · ${correctionSaveStatus}` : ''}
+            {materializationStatusText ? ` · ${materializationStatusText}` : ''}
             {checkpointBusy ? ' · Review state update in progress...' : ''}
             {previewReady ? ' · Previewing unsaved correction' : ''}
           </p>
@@ -857,6 +874,7 @@ export function CaseReviewPage({
                 setPreviewReady(false);
                 setPreviewToken(undefined);
                 setPreviewRole(undefined);
+                setCorrectionSaveStatus(undefined);
                 setSelectedRole('latest_reviewed');
                 setDraft(initialDraft(caseId, manifest, caseFrame, selectedTask));
               }}
@@ -981,10 +999,18 @@ function materializationJobMatchesCurrentProjection(
   job: MaterializationJob,
   currentState?: WorkingState,
 ): boolean {
-  const jobRevision = job.accepted_working_state_revision || job.working_state?.active_projection_hash;
+  const jobRevision = job.published_working_state_revision || job.working_state?.active_projection_hash || job.accepted_working_state_revision;
   const currentRevision = currentState?.active_projection_hash;
   if (!jobRevision || !currentRevision) return true;
   return jobRevision === currentRevision;
+}
+
+function formatMaterializationStatus(job: MaterializationJob): string {
+  const rawStage = String(job.current_stage || job.status || 'updating').replaceAll('_', ' ');
+  const changedFrames = typeof job.changed_source_frame_count === 'number'
+    ? ` (${job.changed_source_frame_count} changed frames)`
+    : '';
+  return `Updating Latest reviewed: ${rawStage}${changedFrames}`;
 }
 
 function initialDraft(caseId: CaseId, manifest: WorkspaceSummary['cases'][string], caseFrame: number, task?: Task | null): CorrectionDraft {

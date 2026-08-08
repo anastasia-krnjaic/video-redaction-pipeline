@@ -364,6 +364,7 @@ test.describe('Final Review React workspace', () => {
       'true',
       { timeout: 120_000 },
     );
+    await expect(firstEntity.locator('.entity-operation-status .inline-spinner')).toHaveCount(0, { timeout: 180_000 });
 
     const entityCountBefore = await page.locator('.entity-card').count();
     await page.locator('.entity-card').nth(0).locator('input[type="checkbox"]').check();
@@ -409,7 +410,7 @@ test.describe('Final Review React workspace', () => {
     await page.locator('.entity-card').nth(1).locator('input[type="checkbox"]').check();
     await page.getByRole('button', { name: /Merge selected \(2\)/ }).click();
     await page.getByRole('dialog', { name: 'Merge selected objects' }).getByRole('button', { name: 'Merge selected' }).click();
-    await expect.poll(async () => page.locator('.entity-card').count()).toBe(baselineCount - 1);
+    await expect.poll(async () => page.locator('.entity-card').count(), { timeout: 120_000 }).toBe(baselineCount - 1);
     await expect(page.locator('.entity-card', { hasText: /Merged Person/ }).first()).toBeVisible();
     await page.locator('.entity-card').first().locator('[data-policy="keep_visible"]').click();
     await expect(page.locator('.entity-card').first().locator('[data-policy="keep_visible"]')).toHaveAttribute('aria-pressed', 'true', { timeout: 120_000 });
@@ -451,7 +452,12 @@ test.describe('Final Review React workspace', () => {
 
   test('entity pending status uses a reserved slot without modal or card reflow', async ({ page }) => {
     test.setTimeout(180_000);
+    await page.route('**/api/v1/object-policy', async (route) => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await route.continue();
+    });
     await startReview(page);
+    await page.getByRole('button', { name: 'Night' }).click();
     await page.getByRole('button', { name: 'Entities' }).click();
     await page.getByRole('button', { name: 'People' }).click();
     const dialog = page.getByRole('dialog', { name: 'Review objects' });
@@ -459,8 +465,14 @@ test.describe('Final Review React workspace', () => {
     await scrollBody.evaluate((node) => {
       node.scrollTop = 80;
     });
-    const first = page.locator('.entity-card').first();
-    const second = page.locator('.entity-card').nth(1);
+    const first = page
+      .locator('.entity-card')
+      .filter({ has: page.locator('[data-policy="keep_visible"][aria-pressed="true"]') })
+      .first();
+    await expect(first).toBeVisible();
+    const firstEntityId = await first.getAttribute('data-entity-id');
+    if (!firstEntityId) throw new Error('Expected baseline Keep visible entity to expose an id.');
+    const second = page.locator(`.entity-card:not([data-entity-id="${firstEntityId}"])`).first();
     const beforeScroll = await scrollBody.evaluate((node) => node.scrollTop);
     const beforeDialog = await stableBox(dialog);
     const beforeFirst = await stableBox(first);
@@ -484,7 +496,7 @@ test.describe('Final Review React workspace', () => {
     expectBoxStable(beforeStatus, duringStatus);
     expect(Math.abs(duringScroll - beforeScroll)).toBeLessThanOrEqual(1);
 
-    await expect(first.locator('.entity-operation-status .inline-spinner')).toHaveCount(0, { timeout: 120_000 });
+    await expect(first.locator('.entity-operation-status .inline-spinner')).toHaveCount(0, { timeout: 20_000 });
     const afterFirst = await stableBox(first);
     const afterActions = await stableBox(first.locator('.entity-actions'));
     const afterStatus = await stableBox(first.getByTestId('entity-operation-status'));
@@ -516,14 +528,15 @@ test.describe('Final Review React workspace', () => {
     await expect(page.locator('.version-selector select')).toHaveValue('latest_reviewed', { timeout: 120_000 });
     await expect(page.locator('.version-selector option')).toHaveText(['Original', 'Automatic', 'Latest reviewed']);
     await expect.poll(async () => currentSourceFrame(page)).toBe(sourceBeforePreview);
-    await expect(page.getByRole('button', { name: 'Save correction' })).toBeEnabled();
+    await expect(page.getByRole('button', { name: 'Save correction' })).toBeEnabled({ timeout: 120_000 });
     await page.getByRole('button', { name: 'Save correction' }).click();
+    await expect(page.locator('.case-subtitle')).toContainText('Correction saved', { timeout: 120_000 });
     await expect(page.locator('.version-selector select')).toHaveValue('latest_reviewed', { timeout: 120_000 });
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.locator('.version-selector select')).toHaveValue('latest_reviewed', { timeout: 120_000 });
     await page.getByRole('button', { name: 'History' }).click();
-    await expect(page.locator('body')).toContainText('correction_saved');
+    await expect(page.locator('body')).toContainText('Manual correction saved');
   });
 
   test('validates and previews a two-keyframe multi-frame correction', async ({ page }) => {
