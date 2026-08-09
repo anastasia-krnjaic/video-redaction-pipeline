@@ -21,6 +21,7 @@ const NEEDS_CORRECTION_ACTIONS = new Set<string>([
 
 export function taskBucket(task: Task, decision?: TaskDecision): QueueBucket {
   if (task.decision_state === 'resolved') return 'Completed';
+  if (task.normal_task_class === 'correction_verification' && task.actionable === false) return 'Waiting';
   if (!decision) return 'Open';
   if (decision.action === ACTIONS.unsure) return 'Unsure / Escalated';
   if (NEEDS_CORRECTION_ACTIONS.has(decision.action)) return 'Needs correction';
@@ -39,6 +40,7 @@ export function tasksForCase(tasks: Task[], decisions: Record<string, TaskDecisi
 export function bucketCounts(tasks: TaskWithDecision[]): Record<QueueBucket, number> {
   return {
     Open: tasks.filter((task) => task.bucket === 'Open').length,
+    Waiting: tasks.filter((task) => task.bucket === 'Waiting').length,
     'Needs correction': tasks.filter((task) => task.bucket === 'Needs correction').length,
     'Unsure / Escalated': tasks.filter((task) => task.bucket === 'Unsure / Escalated').length,
     Completed: tasks.filter((task) => task.bucket === 'Completed').length,

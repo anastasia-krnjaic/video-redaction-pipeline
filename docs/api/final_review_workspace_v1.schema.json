@@ -801,6 +801,15 @@
             "null"
           ]
         },
+        "elapsed_time_ms": {
+          "type": "integer"
+        },
+        "encode_stage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "error": {
           "type": [
             "string",
@@ -809,6 +818,12 @@
         },
         "job_id": {
           "type": "string"
+        },
+        "last_progress_at_utc": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "latest_reviewed": {
           "anyOf": [
@@ -837,11 +852,26 @@
         "progress": {
           "type": "number"
         },
+        "publication_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "published_working_state_revision": {
           "type": [
             "string",
             "null"
           ]
+        },
+        "queue_state": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "queue_wait_time_ms": {
+          "type": "integer"
         },
         "requested_policy": {
           "type": [
@@ -881,6 +911,12 @@
           "type": "integer"
         },
         "target_effective_regions_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "validation_stage": {
           "type": [
             "string",
             "null"
@@ -1070,6 +1106,15 @@
     "Task": {
       "additionalProperties": true,
       "properties": {
+        "accepted_working_state_revision": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "actionable": {
+          "type": "boolean"
+        },
         "allowed_actions": {
           "items": {
             "type": "string"
@@ -1085,6 +1130,25 @@
         "category": {
           "type": "string"
         },
+        "changed_frame_count": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "changed_frame_intervals": {
+          "items": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "correction_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "correction_required": {
           "type": "boolean"
         },
@@ -1094,11 +1158,20 @@
         "issue_type": {
           "type": "string"
         },
+        "materialization_required": {
+          "type": "boolean"
+        },
         "normal_task_class": {
           "type": "string"
         },
         "optional": {
           "type": "boolean"
+        },
+        "publication_status": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "raw_signal_ids": {
           "items": {
@@ -1118,11 +1191,29 @@
         "source_frame_start": {
           "type": "integer"
         },
+        "target_effective_region_count": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "target_effective_regions_hash": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "technical_only": {
           "type": "boolean"
         },
         "title": {
           "type": "string"
+        },
+        "verification_status": {
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "what_happened": {
           "type": "string"

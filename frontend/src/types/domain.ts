@@ -3,7 +3,7 @@ import type { Entity, MediaVersion, Task, TaskDecision, WorkingState } from './a
 export type CaseId = 'day' | 'night';
 export type TopLevelRoute = CaseId | 'final' | 'audit';
 export type ReviewMode = 'review' | 'edit';
-export type QueueBucket = 'Open' | 'Needs correction' | 'Unsure / Escalated' | 'Completed';
+export type QueueBucket = 'Open' | 'Waiting' | 'Needs correction' | 'Unsure / Escalated' | 'Completed';
 export type EntityFilter = 'all' | 'face' | 'license_plate' | 'needs_review' | 'unresolved';
 export type EntityPolicy = 'redact' | 'keep_visible' | 'not_sensitive' | 'review_required';
 export type CorrectionIntervalMode = 'single_frame' | 'fixed_box' | 'interpolate';

@@ -965,6 +965,7 @@ def test_workspace_server_serves_mp4_range_and_rejects_traversal(tmp_path: Path)
     write_json(package / "configuration_freeze.json", {"schema_version": "test"})
     (package / "index.html").write_text("ok", encoding="utf-8")
     server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
     try:
         request = urllib.request.Request(
@@ -1266,9 +1267,101 @@ def test_effective_region_change_summary_tracks_manual_correction_frames(
 
     assert summary["changed_source_frame_intervals"] == expected_intervals
     assert summary["changed_source_frame_count"] == end - start + 1
+    assert after["region_count"] == end - start + 1
+    final_regions, _ = review_working_state.compute_effective_privacy_regions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    correction_source_frames = sorted(
+        int(record.source_record["source_frame"])
+        for record in final_regions
+        if record.object_id == correction.correction_id
+    )
+    assert correction_source_frames == list(range(start, end + 1))
+    assert start - 1 not in correction_source_frames
+    assert end + 1 not in correction_source_frames
     assert summary["changed_source_frame_percentage"] == pytest.approx(
         (end - start + 1) / manifest.frame_count
     )
+
+
+def test_fixed_box_long_day_span_expands_to_544_effective_frames(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    manifest = replace(
+        manifest,
+        frame_count=673,
+        source_frame_start=1828,
+        source_frame_end=2500,
+        video_roles=tuple(
+            replace(role, source_frame_start=1828, source_frame_end=2500)
+            for role in manifest.video_roles
+        ),
+    )
+    case_manifests.write_case_manifest(package / "cases" / "synthetic.json", manifest)
+    write_empty_regions(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    before = review_working_state.effective_privacy_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_FACE,
+        correction_id="corr_long_fixed",
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
+        keyframes=(review_corrections.CorrectionKeyframe(1957, (10, 10, 40, 40)),),
+        operation=review_corrections.OP_ADD,
+        reason="long fixed correction",
+        reviewer_identity={"reviewer_id": "analyst"},
+        configuration_freeze_hash="test_freeze",
+        source_frame_end=2500,
+        source_frame_start=1957,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id="task_long_fixed",
+    )
+
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+    after = review_working_state.effective_privacy_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    summary = review_working_state.effective_region_change_summary(
+        package,
+        case_id=manifest.case_id,
+        before_digest=before,
+        after_digest=after,
+    )
+    final_regions, _ = review_working_state.compute_effective_privacy_regions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    correction_source_frames = sorted(
+        int(record.source_record["source_frame"])
+        for record in final_regions
+        if record.object_id == correction.correction_id
+    )
+
+    assert len(correction_source_frames) == 544
+    assert correction_source_frames[0] == 1957
+    assert correction_source_frames[-1] == 2500
+    assert 1956 not in correction_source_frames
+    assert 2501 not in correction_source_frames
+    assert after["region_count"] == 544
+    assert summary["changed_source_frame_count"] == 544
+    assert summary["changed_source_frame_intervals"] == [
+        {"source_frame_start": 1957, "source_frame_end": 2500}
+    ]
 
 
 def test_materialization_plan_reports_exact_changed_frames_for_policy_removal(
@@ -2539,6 +2632,30 @@ def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> 
         assert events[-1]["event_type"] == "manual_issue_created"
         assert chain["passed"] is True
         assert (session_dir / "corrections.jsonl").exists()
+        assert correction_response["publication_status"] == "queued"
+        assert correction_response["target_effective_region_count"] == 1
+        assert correction_response["changed_frame_count"] == 1
+        assert correction_response["changed_frame_intervals"] == [
+            {"source_frame_start": 0, "source_frame_end": 0}
+        ]
+        verification_task = correction_response["verification_task"]
+        assert verification_task["actionable"] is False
+        assert verification_task["decision_state"] == "waiting_for_latest_reviewed"
+
+        status, body = post_json_error(
+            f"{base_url}/api/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "note": "Correct",
+                "session_id": session["session_id"],
+                "task_id": verification_task["review_task_id"],
+            },
+        )
+
+        assert status == 409
+        assert "Latest reviewed media" in str(body["error"])
     finally:
         server.shutdown()
         server.server_close()
@@ -2721,6 +2838,124 @@ def test_workspace_server_reuses_duplicate_manual_correction_save(
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_workspace_server_unlocks_correction_verification_after_publication(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_PLATE,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [0, 0, 96, 64], "source_frame": 0}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "reviewed",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 0,
+            "source_frame_start": 0,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_1",
+        }
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
+        correction_response = post_json(
+            f"{base_url}/api/corrections",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "preview_token": preview_response["preview"]["preview_token"],
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
+        job = wait_for_materialization_job(
+            server,
+            str(correction_response["materialization_job"]["job_id"]),
+        )
+        assert job["status"] == "completed"
+        session_dir = package / "sessions" / session["session_id"]
+        state = review_working_state.derive_working_state(package, session_dir)
+        verification_task = review_working_state.find_correction_verification_task(
+            state,
+            correction_id=correction_response["event"]["after_state"]["correction_id"],
+        )
+
+        assert verification_task is not None
+        assert verification_task["actionable"] is True
+        decision_response = post_json(
+            f"{base_url}/api/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "note": "Correct",
+                "session_id": session["session_id"],
+                "task_id": verification_task["review_task_id"],
+            },
+        )
+
+        assert decision_response["ok"] is True
+        assert decision_response["event"]["event_type"] == "decision_recorded"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_correction_verification_unlocks_on_newer_publication_that_contains_correction(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    latest_path = package / "media" / "day" / "latest_reviewed_new.mp4"
+    latest_path.parent.mkdir(parents=True)
+    latest_path.write_bytes(b"media")
+    task = {
+        "case_id": "day",
+        "correction_id": "corr_1",
+        "normal_task_class": "correction_verification",
+        "review_task_id": "correction_verify_day_corr_1",
+        "target_effective_regions_hash": "old_hash",
+    }
+    status = review_working_state.correction_verification_status(
+        package_root=package,
+        task=task,
+        materialized={
+            "day": {
+                "correction_render_verifications": {"corr_1": {"passed": True}},
+                "effective_regions_hash": "new_hash",
+                "media_validation_passed": True,
+                "path": "media/day/latest_reviewed_new.mp4",
+                "published_working_state_revision": "new_revision",
+            }
+        },
+    )
+
+    assert status["actionable"] is True
+    assert status["published_effective_regions_hash"] == "new_hash"
+    assert status["published_superseded_target_hash"] == "old_hash"
 
 
 def test_frozen_model_path_validation_honors_explicit_paths(

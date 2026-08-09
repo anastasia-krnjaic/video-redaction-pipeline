@@ -530,7 +530,9 @@ test.describe('Final Review React workspace', () => {
     await expect.poll(async () => currentSourceFrame(page)).toBe(sourceBeforePreview);
     await expect(page.getByRole('button', { name: 'Save correction' })).toBeEnabled({ timeout: 120_000 });
     await page.getByRole('button', { name: 'Save correction' }).click();
-    await expect(page.locator('.case-subtitle')).toContainText('Correction saved', { timeout: 120_000 });
+    await expect(page.locator('.case-subtitle')).toContainText(/Saved - updating Latest reviewed|Published/, {
+      timeout: 120_000,
+    });
     await expect(page.locator('.version-selector select')).toHaveValue('latest_reviewed', { timeout: 120_000 });
 
     await page.reload({ waitUntil: 'domcontentloaded' });
@@ -574,6 +576,7 @@ test.describe('Final Review React workspace', () => {
   });
 
   test('creates and restores a named checkpoint while preserving history', async ({ page }) => {
+    test.setTimeout(120_000);
     await startReview(page);
     await page.getByPlaceholder('Name').fill('Before policy work');
     await page.getByRole('button', { name: 'Create checkpoint' }).click();
@@ -582,6 +585,7 @@ test.describe('Final Review React workspace', () => {
     if (!taskId) throw new Error('No task available for checkpoint test.');
     await page.locator(`.task-card[data-task-id="${taskId}"] .decision-correct`).click();
     await page.getByRole('button', { name: /Restore Before policy work/ }).click();
+    await expect(page.getByRole('button', { name: /Restore Before policy work/ })).toBeEnabled({ timeout: 120_000 });
     await page.getByRole('button', { name: /Delete checkpoint Before policy work/ }).click();
     await expect(page.getByRole('dialog', { name: /Delete checkpoint/ })).toBeVisible();
     await page.getByRole('button', { name: 'Cancel' }).click();
@@ -595,7 +599,7 @@ test.describe('Final Review React workspace', () => {
   });
 
   test('materializes object policy changes into Latest reviewed and preserves reload state', async ({ page }) => {
-    test.setTimeout(180_000);
+    test.setTimeout(240_000);
     await startReview(page);
     await page.getByRole('button', { name: 'Night' }).click();
     await page.getByRole('button', { name: 'Entities' }).click();

@@ -293,6 +293,43 @@ interface OverlayProps {
   onDraftChange: (draft: CorrectionDraft) => void;
 }
 
+export interface PendingCorrectionRegion {
+  bbox_xyxy: [number, number, number, number];
+  correction_id: string;
+  source_frame: number;
+}
+
+export function PendingCorrectionOverlay({
+  manifest,
+  regions,
+}: {
+  manifest: Case;
+  regions: PendingCorrectionRegion[];
+}) {
+  const dimensions = useMemo(() => ({ width: manifest.width || 1920, height: manifest.height || 1080 }), [manifest.height, manifest.width]);
+  if (!regions.length) return null;
+  return (
+    <div className="pending-correction-overlay" aria-label="Saved pending correction overlay">
+      <svg viewBox={`0 0 ${dimensions.width} ${dimensions.height}`} preserveAspectRatio="xMidYMid meet">
+        {regions.map((region) => {
+          const [x1, y1, x2, y2] = region.bbox_xyxy;
+          return (
+            <rect
+              key={`${region.correction_id}:${region.source_frame}`}
+              className="pending-correction-rect"
+              x={x1}
+              y={y1}
+              width={Math.max(1, x2 - x1)}
+              height={Math.max(1, y2 - y1)}
+            />
+          );
+        })}
+      </svg>
+      <span className="pending-correction-label">Saved - updating Latest reviewed</span>
+    </div>
+  );
+}
+
 export function CorrectionVideoOverlay({
   currentSourceFrame,
   draft,
@@ -427,11 +464,7 @@ function normalizedKeyframes(draft: CorrectionDraft): CorrectionKeyframeDraft[] 
   if (draft.mode === 'fixed_box') {
     const first = inInterval[0];
     if (!first) return [];
-    const frames: CorrectionKeyframeDraft[] = [];
-    for (let frame = start; frame <= end; frame += 1) {
-      frames.push({ source_frame: frame, bbox_xyxy: first.bbox_xyxy });
-    }
-    return frames;
+    return [{ source_frame: start, bbox_xyxy: first.bbox_xyxy }];
   }
   return inInterval;
 }

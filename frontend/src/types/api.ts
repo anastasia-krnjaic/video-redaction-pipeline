@@ -59,22 +59,32 @@ export interface TaskCollection {
 }
 
 export interface Task {
+  "accepted_working_state_revision"?: string | null;
+  "actionable"?: boolean;
   "allowed_actions"?: string[];
   "blocking"?: boolean;
   "case_id": string;
   "category": string;
+  "changed_frame_count"?: number | null;
+  "changed_frame_intervals"?: Record<string, unknown>[];
+  "correction_id"?: string | null;
   "correction_required"?: boolean;
   "decision_state"?: string;
   "issue_type"?: string;
+  "materialization_required"?: boolean;
   "normal_task_class"?: string;
   "optional"?: boolean;
+  "publication_status"?: string | null;
   "raw_signal_ids"?: string[];
   "review_task_id": string;
   "severity"?: string;
   "source_frame_end": number;
   "source_frame_start": number;
+  "target_effective_region_count"?: number | null;
+  "target_effective_regions_hash"?: string | null;
   "technical_only": boolean;
   "title": string;
+  "verification_status"?: string | null;
   "what_happened"?: string;
   "what_to_inspect": string;
   [key: string]: unknown;
@@ -267,15 +277,21 @@ export interface MaterializationJob {
   "completed_at_utc"?: string | null;
   "created_at_utc"?: string | null;
   "current_stage"?: string | null;
+  "elapsed_time_ms"?: number;
+  "encode_stage"?: string | null;
   "error"?: string | null;
   "job_id": string;
+  "last_progress_at_utc"?: string | null;
   "latest_reviewed"?: MediaVersion | null;
   "materialization"?: Record<string, unknown>;
   "materialization_plan"?: Record<string, unknown>;
   "planned_frames_to_encode"?: number;
   "planned_frames_to_render"?: number;
   "progress"?: number;
+  "publication_status"?: string | null;
   "published_working_state_revision"?: string | null;
+  "queue_state"?: string | null;
+  "queue_wait_time_ms"?: number;
   "requested_policy"?: string | null;
   "reused_segment_count"?: number;
   "session_id"?: string;
@@ -284,6 +300,7 @@ export interface MaterializationJob {
   "superseded_by"?: string | null;
   "target_effective_region_count"?: number;
   "target_effective_regions_hash"?: string | null;
+  "validation_stage"?: string | null;
   "working_state"?: WorkingState;
   [key: string]: unknown;
 }

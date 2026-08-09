@@ -214,6 +214,8 @@ export async function saveCorrection(payload: {
   events?: AuditEvent[];
   materialization?: Record<string, unknown>;
   materialization_job?: MaterializationJob;
+  materialization_required?: boolean;
+  publication_status?: string;
   preview?: CorrectionPreview;
   verification_task?: Task;
   working_state?: WorkingState;
@@ -226,6 +228,8 @@ export async function saveCorrection(payload: {
     events: response.events,
     materialization: response.materialization,
     materialization_job: response.materialization_job,
+    materialization_required: typeof response.materialization_required === 'boolean' ? response.materialization_required : undefined,
+    publication_status: typeof response.publication_status === 'string' ? response.publication_status : undefined,
     preview: response.preview,
     verification_task: response.verification_task,
     working_state: response.working_state,

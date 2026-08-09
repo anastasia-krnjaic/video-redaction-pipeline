@@ -4,7 +4,7 @@ import type { QueueBucket, TaskWithDecision } from '../types/domain';
 import { bucketCounts } from '../state/reviewState';
 import { ReviewTaskCard } from './ReviewTaskCard';
 
-const buckets: QueueBucket[] = ['Open', 'Needs correction', 'Unsure / Escalated', 'Completed'];
+const buckets: QueueBucket[] = ['Open', 'Waiting', 'Needs correction', 'Unsure / Escalated', 'Completed'];
 
 interface Props {
   bucket: QueueBucket;

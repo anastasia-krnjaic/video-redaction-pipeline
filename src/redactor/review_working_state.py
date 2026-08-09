@@ -8,6 +8,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import cv2 as cv
+
 from redactor import case_manifests, media, privacy_entities, privacy_rendering, rendering
 from redactor.detection import rational_to_float
 from redactor.privacy_records import (
@@ -17,7 +19,13 @@ from redactor.privacy_records import (
     PrivacyRegionRecord,
     stable_hash,
 )
-from redactor.review_corrections import ReviewCorrection, load_corrections_jsonl
+from redactor.review_corrections import (
+    OP_ADD,
+    OP_REPLACE,
+    ReviewCorrection,
+    interpolate_correction_boxes,
+    load_corrections_jsonl,
+)
 from redactor.review_sessions import (
     EVENT_CORRECTION_SAVED_LEGACY,
     EVENT_MANUAL_CORRECTION_SAVED,
@@ -341,11 +349,20 @@ def derive_active_review_projection(
                 or after.get("accepted_working_state_revision")
                 or ""
             )
+            hash_manual_tasks = {key: dict(value) for key, value in manual_tasks.items()}
+            hash_decisions = {key: dict(value) for key, value in decisions.items()}
+            decorate_correction_verification_tasks(
+                package_root=package_root,
+                session_dir=session_dir,
+                manual_tasks=hash_manual_tasks,
+                decisions=hash_decisions,
+                materialized=materialized,
+            )
             current_projection_hash = active_projection_hash(
                 {
                     "active_correction_ids": sorted(active_correction_ids),
                     "active_manual_tasks": sorted(
-                        manual_tasks.values(),
+                        hash_manual_tasks.values(),
                         key=lambda task: (
                             str(task.get("case_id") or ""),
                             int(task.get("source_frame_start") or 0),
@@ -354,14 +371,33 @@ def derive_active_review_projection(
                     ),
                     "object_policy_overrides": overrides,
                     "sweep_acknowledgements": sweep_acknowledgements,
-                    "task_decisions": decisions,
+                    "task_decisions": hash_decisions,
                 }
             )
             if accepted_projection_hash and accepted_projection_hash != current_projection_hash:
                 continue
             if case_id and latest:
+                latest["accepted_working_state_revision"] = accepted_projection_hash
+                latest["effective_regions_hash"] = after.get("effective_regions_hash")
+                latest["published_working_state_revision"] = (
+                    after.get("published_working_state_revision")
+                    or after.get("active_projection_hash")
+                    or accepted_projection_hash
+                )
+                latest["target_effective_regions_hash"] = after.get("target_effective_regions_hash")
+                latest["media_validation_passed"] = after.get("media_validation_passed")
+                latest["correction_render_verifications"] = (
+                    after.get("correction_render_verifications") or {}
+                )
                 materialized[case_id] = latest
             continue
+    decorate_correction_verification_tasks(
+        package_root=package_root,
+        session_dir=session_dir,
+        manual_tasks=manual_tasks,
+        decisions=decisions,
+        materialized=materialized,
+    )
     return {
         "active_correction_ids": sorted(active_correction_ids),
         "active_manual_tasks": sorted(
@@ -513,6 +549,184 @@ def reset_review_workflow_from_active_projection(
 
 def durable_edit_verification_task_id(task_id: str) -> bool:
     return task_id.startswith("correction_verify_") or task_id.startswith("object_policy_verify_")
+
+
+def correction_id_from_verification_task(task: dict[str, Any]) -> str:
+    correction_id = str(task.get("correction_id") or "")
+    if correction_id:
+        return correction_id
+    task_id = str(task.get("review_task_id") or "")
+    case_id = str(task.get("case_id") or "")
+    prefix = f"correction_verify_{case_id}_"
+    if case_id and task_id.startswith(prefix):
+        return task_id.removeprefix(prefix)
+    if task_id.startswith("correction_verify_"):
+        parts = task_id.split("_", 3)
+        if len(parts) == 4:
+            return parts[3]
+    return ""
+
+
+def correction_render_verification_for_latest(
+    latest: dict[str, Any],
+    correction_id: str,
+) -> dict[str, Any]:
+    verifications = dict(latest.get("correction_render_verifications") or {})
+    verification = dict(verifications.get(correction_id) or {})
+    return verification
+
+
+def correction_verification_status(
+    *,
+    package_root: Path,
+    task: dict[str, Any],
+    materialized: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    if task.get("normal_task_class") != "correction_verification":
+        return {"actionable": True, "publication_status": "not_applicable"}
+    case_id = str(task.get("case_id") or "")
+    correction_id = correction_id_from_verification_task(task)
+    latest = dict(materialized.get(case_id) or {})
+    target_hash = str(task.get("target_effective_regions_hash") or "")
+    published_hash = str(latest.get("effective_regions_hash") or "")
+    published_path = str(latest.get("path") or "")
+    published_revision = latest.get("published_working_state_revision")
+    media_exists = bool(published_path and (package_root / published_path).exists())
+    media_validation_passed = latest.get("media_validation_passed") is True
+    verification = correction_render_verification_for_latest(latest, correction_id)
+    verification_present = bool(verification)
+    decoded_verification_passed = verification.get("passed") is True
+    published_matches_target = bool(target_hash and published_hash == target_hash)
+    if not target_hash:
+        return {
+            "actionable": False,
+            "decision_state": "waiting_for_latest_reviewed",
+            "publication_status": "waiting",
+            "reason": "Waiting for Latest reviewed media.",
+        }
+    if not latest:
+        return {
+            "actionable": False,
+            "decision_state": "waiting_for_latest_reviewed",
+            "publication_status": "waiting",
+            "reason": "Waiting for Latest reviewed media.",
+        }
+    if not media_exists:
+        return {
+            "actionable": False,
+            "decision_state": "waiting_for_latest_reviewed",
+            "publication_status": "missing_media",
+            "reason": "Latest reviewed media is missing.",
+        }
+    if not media_validation_passed:
+        return {
+            "actionable": False,
+            "decision_state": "materialization_failed",
+            "publication_status": "failed",
+            "reason": "Materialization failed.",
+        }
+    if not published_matches_target and not verification_present:
+        return {
+            "actionable": False,
+            "decision_state": "waiting_for_latest_reviewed",
+            "publication_status": "superseded_or_rendering",
+            "published_effective_regions_hash": published_hash or None,
+            "reason": "Waiting for Latest reviewed media.",
+        }
+    if not decoded_verification_passed:
+        return {
+            "actionable": False,
+            "decision_state": "materialization_failed",
+            "publication_status": "failed",
+            "reason": "Rendered correction verification failed.",
+        }
+    if not published_matches_target and decoded_verification_passed:
+        return {
+            "actionable": True,
+            "decision_state": "pending",
+            "publication_status": "published",
+            "published_effective_regions_hash": published_hash,
+            "published_superseded_target_hash": target_hash,
+            "published_working_state_revision": published_revision,
+            "reason": "Latest reviewed media is ready for verification.",
+        }
+    return {
+        "actionable": True,
+        "decision_state": "pending",
+        "publication_status": "published",
+        "published_effective_regions_hash": published_hash,
+        "published_working_state_revision": published_revision,
+        "reason": "Latest reviewed media is ready for verification.",
+    }
+
+
+def decorate_correction_verification_tasks(
+    *,
+    package_root: Path,
+    session_dir: Path,
+    manual_tasks: dict[str, dict[str, Any]],
+    decisions: dict[str, dict[str, Any]],
+    materialized: dict[str, dict[str, Any]],
+) -> None:
+    for task_id, task in list(manual_tasks.items()):
+        if dict(task).get("normal_task_class") != "correction_verification":
+            continue
+        status = correction_verification_status(
+            package_root=package_root,
+            task=task,
+            materialized=materialized,
+        )
+        task.update(
+            {
+                "actionable": bool(status.get("actionable")),
+                "publication_status": status.get("publication_status"),
+                "published_effective_regions_hash": status.get("published_effective_regions_hash"),
+                "published_working_state_revision": status.get("published_working_state_revision"),
+                "verification_status": status.get("decision_state"),
+            }
+        )
+        if status.get("actionable"):
+            task["allowed_actions"] = ["looks_correct", "privacy_leak", "uncertain_escalate"]
+            task["decision_state"] = "pending"
+            task["what_to_inspect"] = (
+                "Confirm the published Latest reviewed media protects the intended region."
+            )
+        else:
+            task["allowed_actions"] = []
+            task["decision_state"] = str(
+                status.get("decision_state") or "waiting_for_latest_reviewed"
+            )
+            task["what_to_inspect"] = str(
+                status.get("reason") or "Waiting for Latest reviewed media."
+            )
+            decisions.pop(task_id, None)
+        manual_tasks[task_id] = task
+
+
+def correction_verification_decision_gate(
+    package_root: Path,
+    session_dir: Path,
+    *,
+    task_id: str,
+) -> dict[str, Any]:
+    state = derive_working_state(package_root, session_dir)
+    task = next(
+        (
+            dict(item)
+            for item in list(state.get("active_manual_tasks") or [])
+            if dict(item).get("review_task_id") == task_id
+        ),
+        None,
+    )
+    if not task or task.get("normal_task_class") != "correction_verification":
+        return {"ok": True, "task": task}
+    if task.get("actionable") is True:
+        return {"ok": True, "task": task}
+    return {
+        "error": str(task.get("what_to_inspect") or "Waiting for Latest reviewed media."),
+        "ok": False,
+        "task": task,
+    }
 
 
 def inherited_policy(entity: dict[str, Any]) -> str:
@@ -695,7 +909,7 @@ def published_effective_regions_hash(
 
 
 def privacy_region_intervals(records: list[PrivacyRegionRecord]) -> list[dict[str, int]]:
-    frames = sorted({int(record.source_frame) for record in records})
+    frames = sorted({privacy_region_digest_frame(record) for record in records})
     return source_frame_intervals(frames)
 
 
@@ -718,7 +932,7 @@ def source_frame_intervals(frames: list[int]) -> list[dict[str, int]]:
 def privacy_region_frame_hashes(records: list[PrivacyRegionRecord]) -> dict[str, str]:
     by_frame: dict[int, list[PrivacyRegionRecord]] = {}
     for record in records:
-        by_frame.setdefault(int(record.source_frame), []).append(record)
+        by_frame.setdefault(privacy_region_digest_frame(record), []).append(record)
     return {
         str(frame): stable_hash(
             [
@@ -740,6 +954,13 @@ def privacy_region_frame_hashes(records: list[PrivacyRegionRecord]) -> dict[str,
         )
         for frame, frame_records in sorted(by_frame.items())
     }
+
+
+def privacy_region_digest_frame(record: PrivacyRegionRecord) -> int:
+    source = dict(record.source_record)
+    if record.provenance == "reviewed_correction" and source.get("source_frame") is not None:
+        return int(source["source_frame"])
+    return int(record.source_frame)
 
 
 def effective_region_change_summary(
@@ -1082,12 +1303,35 @@ def materialize_latest_reviewed(
         else:
             tmp_output.replace(output_path)
     render_duration_ms = int((time.monotonic() - render_start) * 1000)
+    state_for_verification = derive_working_state(package_root, session_dir)
+    active_correction_ids = set(
+        str(item) for item in state_for_verification.get("active_correction_ids") or []
+    )
+    correction_records = [
+        correction
+        for correction in load_active_corrections(
+            session_dir,
+            active_correction_ids=active_correction_ids,
+        )
+        if correction.case_id == case_id
+    ]
+    correction_render_verifications = verify_rendered_manual_corrections(
+        source_path=source_path,
+        output_path=output_path,
+        manifest=manifest,
+        corrections=correction_records,
+    )
     publication_start = time.monotonic()
     regions_path = session_dir / "state" / f"{case_id}_effective_regions_{region_hash[:16]}.jsonl"
     review_finalization.write_privacy_region_records(regions_path, final_regions)
     role = {
+        "accepted_working_state_revision": accepted_revision,
+        "correction_render_verifications": correction_render_verifications,
+        "effective_regions_hash": region_hash,
         "label": "Latest reviewed",
+        "media_validation_passed": media_validation.get("passed") is True,
         "path": output_path.relative_to(package_root).as_posix(),
+        "published_working_state_revision": accepted_revision,
         "role": "latest_reviewed",
         "sha256": video_hash,
         "source_frame_end": manifest.source_frame_end,
@@ -1104,6 +1348,7 @@ def materialize_latest_reviewed(
         "latest_reviewed": role,
         "materialized": True,
         "media_validation": media_validation,
+        "correction_render_verifications": correction_render_verifications,
         "output_video": role["path"],
         "rendered_frame_count": rendered_frames,
         "rendered_region_count": rendered_regions,
@@ -1159,6 +1404,92 @@ def materialize_latest_reviewed(
             application_hashes={"latest_reviewed_sha256": video_hash},
         )
     return materialization
+
+
+def verify_rendered_manual_corrections(
+    *,
+    source_path: Path,
+    output_path: Path,
+    manifest: case_manifests.CaseManifest,
+    corrections: list[ReviewCorrection],
+) -> dict[str, Any]:
+    results: dict[str, Any] = {}
+    for correction in corrections:
+        if correction.operation not in {OP_ADD, OP_REPLACE}:
+            continue
+        boxes = interpolate_correction_boxes(correction)
+        frames = sorted(boxes)
+        if not frames:
+            results[correction.correction_id] = {
+                "passed": False,
+                "reason": "correction has no renderable frames",
+                "schema_version": "correction_render_verification.v1",
+            }
+            continue
+        sample_frames = sorted({frames[0], frames[len(frames) // 2], frames[-1]})
+        samples = [
+            decoded_region_difference(
+                source_path=source_path,
+                output_path=output_path,
+                case_frame=source_frame - manifest.source_frame_start,
+                source_frame=source_frame,
+                bbox_xyxy=boxes[source_frame],
+            )
+            for source_frame in sample_frames
+        ]
+        results[correction.correction_id] = {
+            "passed": all(sample.get("passed") is True for sample in samples),
+            "sampled_source_frames": sample_frames,
+            "samples": samples,
+            "schema_version": "correction_render_verification.v1",
+        }
+    return results
+
+
+def decoded_region_difference(
+    *,
+    source_path: Path,
+    output_path: Path,
+    case_frame: int,
+    source_frame: int,
+    bbox_xyxy: tuple[int, int, int, int],
+) -> dict[str, Any]:
+    source = decode_video_frame(source_path, case_frame)
+    rendered = decode_video_frame(output_path, case_frame)
+    if source is None or rendered is None:
+        return {
+            "case_frame": case_frame,
+            "passed": False,
+            "reason": "frame decode failed",
+            "source_frame": source_frame,
+        }
+    height, width = rendered.shape[:2]
+    x1, y1, x2, y2 = [int(value) for value in bbox_xyxy]
+    x1 = max(0, min(width - 1, x1))
+    x2 = max(x1 + 1, min(width, x2))
+    y1 = max(0, min(height - 1, y1))
+    y2 = max(y1 + 1, min(height, y2))
+    source_roi = source[y1:y2, x1:x2].astype("float32")
+    rendered_roi = rendered[y1:y2, x1:x2].astype("float32")
+    diff = abs(source_roi - rendered_roi)
+    mean_abs_diff = float(diff.mean()) if diff.size else 0.0
+    return {
+        "bbox_xyxy": [x1, y1, x2, y2],
+        "case_frame": case_frame,
+        "mean_abs_diff_from_source": round(mean_abs_diff, 4),
+        "passed": mean_abs_diff >= 0.5,
+        "source_frame": source_frame,
+    }
+
+
+def decode_video_frame(path: Path, frame_index: int) -> Any:
+    capture = cv.VideoCapture(str(path))
+    try:
+        capture.set(cv.CAP_PROP_POS_FRAMES, max(0, int(frame_index)))
+        ok, frame = capture.read()
+        return frame if ok else None
+    finally:
+        capture.release()
 
 
 def render_correction_preview(
@@ -1394,28 +1725,57 @@ def correction_draft_hash(correction: ReviewCorrection) -> str:
     return stable_hash(payload)
 
 
-def create_correction_verification_task(correction: ReviewCorrection) -> dict[str, Any]:
+def create_correction_verification_task(
+    correction: ReviewCorrection,
+    *,
+    accepted_working_state_revision: str | None = None,
+    materialization_plan: dict[str, Any] | None = None,
+    publication_status: str = "waiting",
+) -> dict[str, Any]:
+    plan = dict(materialization_plan or {})
     return {
+        "accepted_working_state_revision": accepted_working_state_revision,
+        "actionable": False,
+        "allowed_actions": [],
         "blocking": True,
         "case_id": correction.case_id,
         "category": correction.category,
+        "changed_frame_count": plan.get("changed_source_frame_count"),
+        "changed_frame_intervals": plan.get("changed_source_frame_intervals") or [],
+        "correction_id": correction.correction_id,
         "correction_required": False,
-        "decision_state": "pending",
+        "decision_state": "waiting_for_latest_reviewed",
         "issue_type": "correction_verification",
+        "materialization_required": plan.get("materialization_required"),
         "normal_task_class": "correction_verification",
+        "publication_status": publication_status,
         "raw_signal_ids": [],
         "review_task_id": f"correction_verify_{correction.case_id}_{correction.correction_id}",
         "schema_version": "case_reviewer_task.v1",
         "severity": "blocker",
         "source_frame_end": correction.source_frame_end,
         "source_frame_start": correction.source_frame_start,
+        "target_effective_region_count": plan.get("after_effective_region_count"),
+        "target_effective_regions_hash": plan.get("after_effective_regions_hash"),
         "technical_only": False,
         "title": "Verify saved correction",
         "what_happened": "A reviewer supplied manual correction geometry.",
-        "what_to_inspect": (
-            "Confirm the previewed correction protects the intended region before finalization."
-        ),
+        "what_to_inspect": "Waiting for Latest reviewed media.",
     }
+
+
+def find_correction_verification_task(
+    state: dict[str, Any],
+    *,
+    correction_id: str,
+) -> dict[str, Any] | None:
+    for task in list(state.get("active_manual_tasks") or []):
+        row = dict(task)
+        if row.get("normal_task_class") != "correction_verification":
+            continue
+        if correction_id_from_verification_task(row) == correction_id:
+            return row
+    return None
 
 
 def create_checkpoint(

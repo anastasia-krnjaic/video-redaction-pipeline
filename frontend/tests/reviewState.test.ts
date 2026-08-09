@@ -52,9 +52,10 @@ describe('review state helpers', () => {
     expect(taskBucket(task, decision(ACTIONS.needsCorrection))).toBe('Needs correction');
     expect(taskBucket(task, decision(ACTIONS.unsure))).toBe('Unsure / Escalated');
     expect(taskBucket({ ...task, decision_state: 'resolved' })).toBe('Completed');
+    expect(taskBucket({ ...task, actionable: false, normal_task_class: 'correction_verification' })).toBe('Waiting');
   });
 
-  it('keeps the normal review buckets to the simplified four-state lifecycle', () => {
+  it('keeps the normal review buckets to the simplified reviewer lifecycle', () => {
     const tasks = tasksForCase([
       task,
       { ...task, review_task_id: 'task_2', decision_state: 'resolved' },
@@ -66,6 +67,7 @@ describe('review state helpers', () => {
     const counts = bucketCounts(tasks);
     expect(counts).toEqual({
       Open: 0,
+      Waiting: 0,
       'Needs correction': 1,
       'Unsure / Escalated': 1,
       Completed: 1,
