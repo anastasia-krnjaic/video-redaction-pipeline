@@ -26,6 +26,7 @@ def regions_by_frame(
         key=lambda item: (
             item.source_frame,
             item.category,
+            render_order(item),
             item.object_id or "",
             item.provenance,
             item.bbox_xyxy or (-1, -1, -1, -1),
@@ -33,6 +34,14 @@ def regions_by_frame(
     ):
         grouped.setdefault(record.source_frame, []).append(record.to_render_region())
     return grouped
+
+
+def render_order(record: PrivacyRegionRecord) -> int:
+    value = record.source_record.get("render_order", 0)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def provenance_counts(records: list[PrivacyRegionRecord]) -> dict[str, int]:

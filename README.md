@@ -99,9 +99,27 @@ The command runs:
 5. Privacy-region compilation and gap recovery for redacted tracks.
 6. A non-final automatic preview.
 7. A local review bundle for unresolved or risky intervals.
-8. A final output status. Final export remains blocked while review blockers remain.
+8. A legacy face final-status artifact when that path is available. The case-level automatic command itself remains non-final and does not run mixed finalization.
 
 The normal workflow does not require target-track IDs, frame windows, source-video-specific coordinates, or Ground Truth. Ground Truth is benchmark/evaluation input only; it is not the production privacy policy.
+
+## Unified Automatic Case Preview
+
+One canonical command can run face and license-plate automatic processing for a single source video:
+
+```bash
+redactor redact-video input.mp4 \
+  --categories face,license_plate \
+  --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
+  --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
+  --plate-model models/open-image-models/yolo-v9-s-608-license-plates-end2end.onnx \
+  --output-dir artifacts/cases/input_automatic_preview \
+  --overwrite
+```
+
+This writes one authoritative source identity, category run manifests, one effective-region render plan, one fail-closed `case_manifest.json`, and, when multiple selected categories have validated effective regions, one combined non-final automatic preview. The command does not create one mixed reviewed result, does not publish Latest reviewed, and does not run case-level mixed finalization.
+
+Face-only preview still uses the frozen face renderer. The combined face+plate automatic preview uses the shared renderer after parity and render-plan validation. Face automated evaluation remains available through `evaluate-faces`; plate evaluation is currently a capability report only and does not publish scores.
 
 To keep a person visible, create an explicit case-policy choice:
 
@@ -341,6 +359,7 @@ A full-video `redact-video` run writes a case directory:
 | `review/` | Local `index.html`, queue/task/summary/config JSON, contact sheets, short clips, decision template, and checklist. |
 | `final/` | Final render artifacts or a blocked final-status JSON. |
 | `audit_manifest.json` | Source, detection, tracking, policy, privacy, rendering, review, and final-status summary. |
+| `case_source_identity.json`, `case_manifest.json`, `render_plan/` | Automatic case-preview source identity, fail-closed artifact inventory, category lineage, and effective regions. |
 
 Generated artifacts belong under `artifacts/` and are ignored by Git.
 
@@ -421,4 +440,4 @@ redactor summarize-review-session --session-dir SESSION_DIR
 - No universal or production-wide zero-leak claim has been established.
 - Plate detection, minimal tracking, non-final previews, and case-based review/correction records are implemented. Reviewed-final plate output still requires human decisions and verified reviewed corrections for blockers.
 - Plate tracking bridges only short, defensible two-anchor gaps. Longer gaps and unstable plate-like tracks remain review-required evidence.
-- The canonical Day case has proven parent-source lineage and now includes a combined current result rendered from lineage-proven frozen face and plate evidence.
+- The unified automatic command can produce a combined non-final preview and manifest for face plus plate evidence, but mixed review, Latest reviewed, and mixed finalization remain deferred.

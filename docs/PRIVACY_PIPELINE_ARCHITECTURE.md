@@ -2,6 +2,8 @@
 
 This document records the shared foundation for post-detection privacy processing. It does not change the selected detectors or their thresholds.
 
+See `docs/UNIFIED_CASE_PIPELINE_ARCHITECTURE.md` for the case-level orchestration refactor that wraps the existing face and plate category implementations.
+
 ## Architecture Decision
 
 Detectors remain category-specific. Faces use OpenVINO `face-detection-adas-0001`; license plates use Open Image Models YOLOv9-S-608. After a detector emits evidence, common records describe the rest of the privacy pipeline:
@@ -68,7 +70,7 @@ Face profiles record compatibility metadata only in this milestone. Production f
 - H.264/yuv420p/faststart MP4 output;
 - decoded rendered-region verification.
 
-`render-plates` now uses this shared core through its existing plate renderer wrapper. Face rendering has adapters and parity tests, but the frozen face renderer remains in place until a later migration proves exact full-run parity.
+`render-plates` now uses this shared core through its existing plate renderer wrapper. Combined multi-category automatic previews also use the shared core after render-plan validation. Face-only rendering stays on the frozen face renderer until a later migration removes that divergence with full-run parity evidence.
 
 ## Frame-Span Safety
 
@@ -114,7 +116,8 @@ The migration is deliberately incremental:
 2. Plate tracking now uses the shared temporal evidence engine for confirmation, hysteresis, retrospective promotion, and bounded stitch decisions while preserving the existing association and gap-recovery parameters.
 3. Face artifacts are adapted to shared records and parity-tested, but the current face tracking, privacy gap recovery, and renderer behavior stay frozen.
 4. Future tracking lifecycle work can use the common states and transition records without embedding accumulated-evidence behavior inside a category module.
-4. A later unified face/plate render can consume `PrivacyRegionRecord`s from both categories once reviewed plate corrections exist.
+5. The automatic case-preview checkpoint can consume `PrivacyRegionRecord`s from both categories for a non-final combined preview.
+6. A later reviewed/final unified face/plate render can consume reviewed `PrivacyRegionRecord`s from both categories once mixed review and reviewed plate corrections exist.
 
 ## Intentionally Not Unified
 
@@ -124,7 +127,7 @@ The following remain category-specific:
 - face ordinary tracking and privacy gap recovery behavior;
 - plate association and gap-recovery parameters;
 - category-specific geometry validation;
-- category-specific review language;
+- category-specific review builders and review language;
 - current CLI entry points such as `face-pipeline`, `detect-plates`, `track-plates`, `render-faces`, and `render-plates`.
 
 The foundation is meant to reduce duplicate contracts, not to erase useful category boundaries.

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any
 
 from redactor import frame_spans, rendering
@@ -60,9 +61,128 @@ ISSUE_OPTIONAL_SPOT_CHECK = "optional_spot_check"
 Box = tuple[int, int, int, int]
 
 
+class PrivacyDisposition(StrEnum):
+    REDACT = "redact"
+    KEEP_VISIBLE = "keep_visible"
+    NOT_SENSITIVE = "not_sensitive"
+    REVIEW_REQUIRED = "review_required"
+
+
+class EvidenceDisposition(StrEnum):
+    TENTATIVE = "tentative"
+    ACCEPTED = "accepted"
+    REJECTED_WRONG_CLASS = "rejected_wrong_class"
+    REJECTED_DUPLICATE = "rejected_duplicate"
+
+
+class ReviewAction(StrEnum):
+    CONFIRM = "confirm"
+    CORRECT_GEOMETRY = "correct_geometry"
+    CHANGE_POLICY = "change_policy"
+    REJECT = "reject"
+    MERGE = "merge"
+    RESET = "reset"
+
+
+class ScoringDisposition(StrEnum):
+    SCORE = "score"
+    DETECTOR_IGNORE = "detector_ignore"
+
+
+PRIVACY_DISPOSITIONS = {item.value for item in PrivacyDisposition}
+EVIDENCE_DISPOSITIONS = {item.value for item in EvidenceDisposition}
+REVIEW_ACTIONS = {item.value for item in ReviewAction}
+SCORING_DISPOSITIONS = {item.value for item in ScoringDisposition}
+
+LEGACY_PRIVACY_DISPOSITION_ALIASES = {
+    "keep": PrivacyDisposition.KEEP_VISIBLE.value,
+    "keep_visible": PrivacyDisposition.KEEP_VISIBLE.value,
+    "not_sensitive": PrivacyDisposition.NOT_SENSITIVE.value,
+    "redact": PrivacyDisposition.REDACT.value,
+    "review": PrivacyDisposition.REVIEW_REQUIRED.value,
+    "review_required": PrivacyDisposition.REVIEW_REQUIRED.value,
+}
+LEGACY_EVIDENCE_DISPOSITION_ALIASES = {
+    "accepted": EvidenceDisposition.ACCEPTED.value,
+    "duplicate": EvidenceDisposition.REJECTED_DUPLICATE.value,
+    "false_positive": EvidenceDisposition.REJECTED_WRONG_CLASS.value,
+    "not_a_license_plate": EvidenceDisposition.REJECTED_WRONG_CLASS.value,
+    "not_a_person": EvidenceDisposition.REJECTED_WRONG_CLASS.value,
+    "rejected_duplicate": EvidenceDisposition.REJECTED_DUPLICATE.value,
+    "rejected_noise_track": EvidenceDisposition.REJECTED_WRONG_CLASS.value,
+    "rejected_wrong_class": EvidenceDisposition.REJECTED_WRONG_CLASS.value,
+    "tentative": EvidenceDisposition.TENTATIVE.value,
+}
+LEGACY_REVIEW_ACTION_ALIASES = {
+    "confirm": ReviewAction.CONFIRM.value,
+    "correct_geometry": ReviewAction.CORRECT_GEOMETRY.value,
+    "change_policy": ReviewAction.CHANGE_POLICY.value,
+    "reject": ReviewAction.REJECT.value,
+    "merge": ReviewAction.MERGE.value,
+    "reset": ReviewAction.RESET.value,
+}
+LEGACY_SCORING_DISPOSITION_ALIASES = {
+    "detector_ignore": ScoringDisposition.DETECTOR_IGNORE.value,
+    "ignore_for_detector": ScoringDisposition.DETECTOR_IGNORE.value,
+    "score": ScoringDisposition.SCORE.value,
+}
+
+
 def stable_hash(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_privacy_disposition(value: str) -> str:
+    normalized = LEGACY_PRIVACY_DISPOSITION_ALIASES.get(value)
+    if normalized is None:
+        if value in SCORING_DISPOSITIONS:
+            raise ValueError(f"{value} is a scoring disposition, not a privacy disposition")
+        if value in EVIDENCE_DISPOSITIONS:
+            raise ValueError(f"{value} is an evidence disposition, not a privacy disposition")
+        if value in REVIEW_ACTIONS:
+            raise ValueError(f"{value} is a review action, not a privacy disposition")
+        raise ValueError(f"unsupported privacy disposition: {value}")
+    return normalized
+
+
+def normalize_evidence_disposition(value: str) -> str:
+    normalized = LEGACY_EVIDENCE_DISPOSITION_ALIASES.get(value)
+    if normalized is None:
+        if value in PRIVACY_DISPOSITIONS:
+            raise ValueError(f"{value} is a privacy disposition, not an evidence disposition")
+        if value in SCORING_DISPOSITIONS:
+            raise ValueError(f"{value} is a scoring disposition, not an evidence disposition")
+        if value in REVIEW_ACTIONS:
+            raise ValueError(f"{value} is a review action, not an evidence disposition")
+        raise ValueError(f"unsupported evidence disposition: {value}")
+    return normalized
+
+
+def normalize_review_action(value: str) -> str:
+    normalized = LEGACY_REVIEW_ACTION_ALIASES.get(value)
+    if normalized is None:
+        if value in PRIVACY_DISPOSITIONS:
+            raise ValueError(f"{value} is a privacy disposition, not a review action")
+        if value in EVIDENCE_DISPOSITIONS:
+            raise ValueError(f"{value} is an evidence disposition, not a review action")
+        if value in SCORING_DISPOSITIONS:
+            raise ValueError(f"{value} is a scoring disposition, not a review action")
+        raise ValueError(f"unsupported review action: {value}")
+    return normalized
+
+
+def normalize_scoring_disposition(value: str) -> str:
+    normalized = LEGACY_SCORING_DISPOSITION_ALIASES.get(value)
+    if normalized is None:
+        if value in PRIVACY_DISPOSITIONS:
+            raise ValueError(f"{value} is a privacy disposition, not a scoring disposition")
+        if value in EVIDENCE_DISPOSITIONS:
+            raise ValueError(f"{value} is an evidence disposition, not a scoring disposition")
+        if value in REVIEW_ACTIONS:
+            raise ValueError(f"{value} is a review action, not a scoring disposition")
+        raise ValueError(f"unsupported scoring disposition: {value}")
+    return normalized
 
 
 def normalize_manual_redaction_category(category: str) -> str:

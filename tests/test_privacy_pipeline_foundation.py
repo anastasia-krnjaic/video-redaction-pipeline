@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from redactor import (
+    case_pipeline,
     detection,
     media,
     plate_detection,
@@ -31,6 +32,10 @@ from redactor.privacy_records import (
     ProcessingSpan,
     ReviewTaskRecord,
     TemporalRegion,
+    normalize_evidence_disposition,
+    normalize_privacy_disposition,
+    normalize_review_action,
+    normalize_scoring_disposition,
     privacy_regions_from_render_regions,
 )
 
@@ -134,6 +139,18 @@ def test_category_profiles_preserve_selected_detector_separation() -> None:
     )
     assert face.profile_hash() != plate.profile_hash()
     assert face.tracking_profile_hash != plate.tracking_profile_hash
+
+
+def test_semantic_dispositions_do_not_cross_normalize() -> None:
+    assert normalize_privacy_disposition("keep") == "keep_visible"
+    assert normalize_evidence_disposition("not_a_license_plate") == "rejected_wrong_class"
+    assert normalize_review_action("correct_geometry") == "correct_geometry"
+    assert normalize_scoring_disposition("ignore_for_detector") == "detector_ignore"
+
+    with pytest.raises(ValueError, match="scoring disposition"):
+        normalize_privacy_disposition("detector_ignore")
+    with pytest.raises(ValueError, match="privacy disposition"):
+        normalize_scoring_disposition("redact")
 
 
 def test_common_lifecycle_state_validation_rejects_unknown_state() -> None:
@@ -371,6 +388,134 @@ def test_face_renderer_regions_have_shared_renderer_parity(tmp_path: Path) -> No
     assert existing_summary["processed_frame_count"] == 3
     assert existing_verification["passed"] is True
     assert shared_verification["passed"] is True
+
+
+def test_frozen_and_shared_face_renderer_frame_parity_for_edge_cases() -> None:
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    for y in range(frame.shape[0]):
+        for x in range(frame.shape[1]):
+            frame[y, x] = ((x * 3) % 255, (y * 5) % 255, (x + y) % 255)
+    regions_by_frame = {
+        0: [rendering.RenderRegion(0, (10, 10, 36, 36), "detector", "covered", {})],
+        1: [rendering.RenderRegion(1, (0, 0, 18, 18), "detector", "covered", {})],
+        2: [rendering.RenderRegion(2, (101, 61, 120, 80), "detector", "covered", {})],
+        3: [rendering.RenderRegion(3, (30, 30, 32, 32), "detector", "covered", {})],
+        4: [
+            rendering.RenderRegion(4, (10, 10, 35, 35), "detector", "covered", {}),
+            rendering.RenderRegion(
+                4,
+                (22, 22, 50, 50),
+                "ordinary_tracker",
+                "covered",
+                {},
+            ),
+        ],
+    }
+    records = privacy_regions_from_render_regions(CATEGORY_FACE, regions_by_frame)
+    shared_regions = privacy_rendering.regions_by_frame(records)
+
+    for frame_index in range(6):
+        frozen = rendering.render_frame(
+            frame,
+            frame_index,
+            regions_by_frame,
+            render_settings(),
+        )
+        shared = rendering.render_frame(
+            frame,
+            frame_index,
+            shared_regions,
+            render_settings(),
+        )
+        assert np.array_equal(frozen, shared)
+
+
+def test_combined_face_component_matches_frozen_output_outside_plate_mask() -> None:
+    frame = np.zeros((80, 120, 3), dtype=np.uint8)
+    frame[:, :] = (30, 80, 120)
+    cv.rectangle(frame, (10, 10), (36, 36), (230, 230, 230), -1)
+    cv.rectangle(frame, (55, 50), (100, 66), (245, 245, 245), -1)
+    cv.putText(frame, "ABC123", (57, 63), cv.FONT_HERSHEY_SIMPLEX, 0.35, (0, 0, 0), 1)
+    face = face_record(0)
+    plate = plate_record(0)
+    frozen_face = rendering.render_frame(
+        frame,
+        0,
+        privacy_rendering.regions_by_frame([face]),
+        render_settings(),
+    )
+    combined = rendering.render_frame(
+        frame,
+        0,
+        privacy_rendering.regions_by_frame([face, plate]),
+        render_settings(),
+    )
+    plate_box = rendering.expanded_clipped_box(
+        plate.bbox_xyxy,
+        frame_width=120,
+        frame_height=80,
+        margin_pixels=render_settings().margin_pixels,
+        margin_fraction=render_settings().margin_fraction,
+    )
+    assert plate_box is not None
+    mask = np.zeros(frame.shape[:2], dtype=bool)
+    x1, y1, x2, y2 = plate_box
+    mask[y1:y2, x1:x2] = True
+
+    assert np.array_equal(frozen_face[~mask], combined[~mask])
+    assert not np.array_equal(frozen_face[mask], combined[mask])
+
+
+def test_combined_render_plan_filters_keep_reject_and_review_required(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    write_synthetic_video(source, frame_count=4)
+    source_info = media.probe_media(source)
+    identity = case_pipeline.SourceIdentity.from_video(source, info=source_info)
+    context = case_pipeline.CaseContext(
+        case_id="case",
+        output_dir=tmp_path / "case",
+        selected_categories=(CATEGORY_FACE, CATEGORY_PLATE),
+        source_identity=identity,
+        source_info=source_info,
+        source_video=source,
+    )
+    accepted_plate = plate_record(1)
+    rejected_plate = PrivacyRegionRecord(
+        approval_state="rejected",
+        bbox_xyxy=(20, 20, 50, 35),
+        category=CATEGORY_PLATE,
+        object_id="plate_rejected",
+        provenance="plate_detector_observation",
+        render_eligible=False,
+        source_frame=1,
+    )
+    review_plate = PrivacyRegionRecord(
+        approval_state="needs_review",
+        bbox_xyxy=(60, 20, 90, 35),
+        category=CATEGORY_PLATE,
+        object_id="plate_review",
+        provenance="plate_detector_observation",
+        render_eligible=False,
+        source_frame=1,
+    )
+    keep_face = PrivacyRegionRecord(
+        approval_state="keep_visible",
+        bbox_xyxy=(1, 1, 10, 10),
+        category=CATEGORY_FACE,
+        object_id="face_keep",
+        provenance="policy",
+        render_eligible=False,
+        source_frame=1,
+        source_record={"privacy_disposition": "keep_visible"},
+    )
+
+    records, blockers = case_pipeline.validate_effective_render_plan(
+        context,
+        [keep_face, accepted_plate, rejected_plate, review_plate],
+    )
+
+    assert records == [accepted_plate]
+    assert blockers == ()
 
 
 def test_future_category_can_use_common_records_without_core_changes() -> None:

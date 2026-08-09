@@ -437,3 +437,54 @@ def test_deterministic_object_reports(
 
     assert first["acceptance"] == second["acceptance"]
     assert first_objects == second_objects
+
+
+def test_category_evaluation_adapter_preserves_face_arguments(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_face_impl(**kwargs):
+        captured.update(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setattr(evaluation, "_run_face_evaluation_impl", fake_face_impl)
+    metrics = evaluation.run_face_evaluation(
+        ground_truth_path=tmp_path / "ground_truth.json",
+        clip_id="synthetic_clip",
+        mode=evaluation.MODE_AUTOMATIC,
+        source_video_path=tmp_path / "source.mp4",
+        detections_path=tmp_path / "detections.jsonl",
+        output_dir=tmp_path / "out",
+        detector_threshold=0.42,
+        overwrite=True,
+    )
+
+    assert metrics == {"status": "ok"}
+    assert captured["clip_id"] == "synthetic_clip"
+    assert captured["mode"] == evaluation.MODE_AUTOMATIC
+    assert captured["source_video_path"] == tmp_path / "source.mp4"
+    assert captured["detections_path"] == tmp_path / "detections.jsonl"
+    assert captured["detector_threshold"] == 0.42
+    assert captured["overwrite"] is True
+
+
+def test_plate_evaluation_reports_capability_gap_without_scores(tmp_path: Path) -> None:
+    metrics = evaluation.run_plate_evaluation(
+        ground_truth_path=Path("data/ground_truth/redaction_ground_truth_v1.0.json"),
+        clip_id="day_face",
+        output_dir=tmp_path / "plate_eval",
+    )
+    written_metrics = json.loads((tmp_path / "plate_eval" / "metrics.json").read_text())
+    report = (tmp_path / "plate_eval" / "report.md").read_text()
+
+    assert metrics["category"] == "license_plate"
+    assert metrics["publishable_metrics"] is False
+    assert metrics["detector"]["object_frame_recall"] is None
+    assert metrics["privacy"]["privacy_coverage"] is None
+    assert "machine_readable_ground_truth_has_no_license_plate_objects" in metrics[
+        "capability"
+    ]["blockers"]
+    assert written_metrics == metrics
+    assert "not an evaluation scorecard" in report

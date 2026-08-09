@@ -1350,6 +1350,52 @@ def evaluate_faces(
     click.echo(f"Wrote evaluation report: {output_dir / 'report.md'}")
 
 
+@main.command("evaluate-plates")
+@click.option(
+    "--ground-truth",
+    "ground_truth_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Machine-readable redaction ground-truth JSON.",
+)
+@click.option("--clip-id", required=True, help="Clip id inside the ground-truth file.")
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory for plate evaluation capability reports.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
+def evaluate_plates(
+    ground_truth_path: Path,
+    clip_id: str,
+    output_dir: Path,
+    overwrite: bool,
+) -> None:
+    """Report whether license-plate ground truth can support published scores."""
+    from redactor import evaluation
+
+    try:
+        metrics = evaluation.run_plate_evaluation(
+            ground_truth_path=ground_truth_path,
+            clip_id=clip_id,
+            output_dir=output_dir,
+            overwrite=overwrite,
+        )
+    except (FileExistsError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    capability = metrics["capability"]
+    click.echo(
+        "Plate evaluation capability: "
+        f"publishable_metrics={capability['publishable_metrics']}; "
+        f"license_plate_objects={capability['license_plate_object_count']}."
+    )
+    if capability["blockers"]:
+        click.echo(f"Blockers: {', '.join(capability['blockers'])}")
+    click.echo(f"Wrote evaluation capability report: {output_dir / 'report.md'}")
+
+
 @main.command("build-review-bundle")
 @click.option(
     "--source-video",
@@ -1979,6 +2025,51 @@ def audit_final_review_backend_parity(
         raise click.ClickException("; ".join(audit["errors"][:10]))
 
 
+@main.command("write-face-shared-renderer-parity-report")
+@click.option(
+    "--input-report",
+    "v1_report_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Existing v1 face shared-renderer parity report to upgrade into v2 evidence.",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Directory for the v2 parity JSON and Markdown reports.",
+)
+@click.option(
+    "--repo-root",
+    default=Path("."),
+    show_default=True,
+    type=click.Path(exists=True, file_okay=False, path_type=Path),
+    help="Repository root used to resolve relative artifact paths in the input report.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace files in an existing output directory.")
+def write_face_shared_renderer_parity_report(
+    v1_report_path: Path,
+    output_dir: Path,
+    repo_root: Path,
+    overwrite: bool,
+) -> None:
+    """Write explicit v2 face shared-renderer migration parity evidence."""
+    from redactor import face_renderer_parity
+
+    try:
+        report = face_renderer_parity.write_report_from_v1(
+            v1_report_path=v1_report_path,
+            output_dir=output_dir,
+            repo_root=repo_root,
+            overwrite=overwrite,
+        )
+    except (FileExistsError, FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(f"Wrote v2 face shared-renderer parity report: {output_dir}")
+    click.echo(f"Status: {report['status']}")
+
+
 @main.command("serve-final-review-workspace")
 @click.argument(
     "package_root",
@@ -2159,6 +2250,14 @@ def validate_face_policy(policy_path: Path, source_video: Path | None) -> None:
 )
 @click.option("--faces/--no-faces", default=True, show_default=True, help="Run face redaction.")
 @click.option(
+    "--categories",
+    default=None,
+    help=(
+        "Comma-separated privacy categories for the case-level pipeline: "
+        "face, license_plate, or all. Defaults to face for backwards compatibility."
+    ),
+)
+@click.option(
     "--policy",
     "policy_mode",
     type=click.Choice(
@@ -2205,6 +2304,13 @@ def validate_face_policy(policy_path: Path, source_video: Path | None) -> None:
     help="Face model path. For ADAS this is the XML path.",
 )
 @click.option(
+    "--plate-model",
+    "plate_model_path",
+    required=False,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="License-plate model path. Defaults to the OIM YOLOv9-S-608 model.",
+)
+@click.option(
     "--adas-xml",
     "adas_xml_path",
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
@@ -2221,73 +2327,75 @@ def validate_face_policy(policy_path: Path, source_video: Path | None) -> None:
 @click.option("--proposal-threshold", default=0.20, show_default=True, type=click.FloatRange(0, 1))
 @click.option("--primary-threshold", default=0.30, show_default=True, type=click.FloatRange(0, 1))
 @click.option(
+    "--allow-partial-plate-preview",
+    is_flag=True,
+    help="Allow an automatic plate preview even when plate review intervals remain unresolved.",
+)
+@click.option(
     "--output-dir",
     required=True,
     type=click.Path(file_okay=False, path_type=Path),
-    help="Root directory for the full-video face privacy case output.",
+    help="Root directory for the full-video privacy case output.",
 )
 @click.option("--no-detection-overlay", is_flag=True, help="Skip diagnostic detection overlay.")
 @click.option("--overwrite", is_flag=True, help="Replace outputs in non-empty output directories.")
 def redact_video(
     input_path: Path,
     faces: bool,
+    categories: str | None,
     policy_mode: str,
     policy_path: Path | None,
     keep_track_ids: tuple[int, ...],
     selected_track_ids: tuple[int, ...],
     detections_path: Path | None,
     model_path: Path | None,
+    plate_model_path: Path | None,
     adas_xml_path: Path | None,
     adas_bin_path: Path | None,
     proposal_threshold: float,
     primary_threshold: float,
+    allow_partial_plate_preview: bool,
     output_dir: Path,
     no_detection_overlay: bool,
     overwrite: bool,
 ) -> None:
-    """Run the production-oriented full-video face privacy workflow."""
-    if not faces:
+    """Run the full-video automatic privacy preview workflow."""
+    if categories is None and not faces:
         raise click.ClickException("redact-video currently supports --faces only")
-    from redactor import detection, face_policy
+    from redactor import case_pipeline
 
-    resolved_detections_path = detections_path
     try:
-        if resolved_detections_path is None:
-            detection_dir = output_dir / "detection"
-            resolved_backend = detection.resolve_detector_backend("face", None)
-            resolved_model_path = resolve_detection_model_path(
-                category="face",
-                detector_backend=resolved_backend,
-                model_path=model_path,
-                adas_xml_path=adas_xml_path,
-            )
-            resolved_adas_bin = (
-                adas_bin_path
-                if adas_bin_path is not None
-                else detection.default_adas_bin_path(resolved_model_path)
-            )
-            detection.run_detection(
-                input_path,
-                category="face",
-                model_path=resolved_model_path,
-                threshold=proposal_threshold,
-                output_dir=detection_dir,
-                overwrite=overwrite,
-                detector_backend=resolved_backend,
-                adas_bin_path=resolved_adas_bin,
-                primary_threshold=primary_threshold,
-                write_overlay_video=not no_detection_overlay,
-            )
-            resolved_detections_path = detection_dir / "detections.jsonl"
-        audit = face_policy.run_full_video_policy_flow(
+        selected_categories = case_pipeline.parse_categories(
+            categories,
+            legacy_faces_enabled=faces,
+        )
+        face_conflict = (
+            categories is not None
+            and not faces
+            and case_pipeline.CATEGORY_FACE in selected_categories
+        )
+        if face_conflict:
+            raise ValueError("--no-faces conflicts with a face category selection")
+        result = case_pipeline.run_case_pipeline(
             input_path,
             output_dir=output_dir,
-            detections_path=resolved_detections_path,
-            mode=policy_mode,
-            policy_path=policy_path,
-            keep_track_ids=keep_track_ids,
-            selected_track_ids=selected_track_ids,
-            overwrite=overwrite,
+            categories=selected_categories,
+            options=case_pipeline.CasePipelineOptions(
+                adas_bin_path=adas_bin_path,
+                adas_xml_path=adas_xml_path,
+                allow_partial_plate_preview=allow_partial_plate_preview,
+                face_detections_path=detections_path,
+                face_model_path=model_path,
+                face_policy_mode=policy_mode,
+                face_policy_path=policy_path,
+                keep_track_ids=keep_track_ids,
+                no_detection_overlay=no_detection_overlay,
+                overwrite=overwrite,
+                plate_model_path=plate_model_path,
+                primary_threshold=primary_threshold,
+                proposal_threshold=proposal_threshold,
+                selected_track_ids=selected_track_ids,
+            ),
         )
     except (
         FileExistsError,
@@ -2297,13 +2405,36 @@ def redact_video(
         ValueError,
     ) as exc:
         raise click.ClickException(str(exc)) from exc
-    click.echo(
-        "Full-video face privacy preview complete: "
-        f"{audit['privacy_summary']['redact_track_count']} redact tracks; "
-        f"{audit['privacy_summary']['review_required_interval_count']} review-required intervals."
-    )
-    click.echo(f"Final export status: {audit['final_export_status']}")
-    click.echo(f"Wrote audit manifest: {output_dir / 'audit_manifest.json'}")
+
+    manifest = result["manifest"]
+    if selected_categories == (case_pipeline.CATEGORY_FACE,):
+        face_summary = manifest["category_summaries"].get(case_pipeline.CATEGORY_FACE, {})
+        privacy_summary = face_summary.get("privacy_summary", {})
+        click.echo(
+            "Full-video face automatic privacy preview complete (non-final): "
+            f"{privacy_summary.get('redact_track_count', 0)} redact tracks; "
+            f"{privacy_summary.get('review_required_interval_count', 0)} "
+            "review-required intervals."
+        )
+        click.echo("Case finalization was not run by this automatic-preview command.")
+        click.echo(f"Wrote audit manifest: {output_dir / 'audit_manifest.json'}")
+    else:
+        category_text = ", ".join(selected_categories)
+        click.echo(
+            "Automatic case privacy preview complete (non-final): "
+            f"{category_text}; "
+            f"{result['render_plan']['effective_region_count']} effective privacy regions."
+        )
+        if result.get("combined_preview"):
+            click.echo(
+                "Wrote combined automatic preview: "
+                f"{output_dir / result['combined_preview']['manifest']['output_video']}"
+            )
+        blockers = manifest.get("blockers") or []
+        if blockers:
+            click.echo(f"Review/final blockers recorded: {', '.join(blockers)}")
+        click.echo("Latest reviewed and case finalization were not run.")
+    click.echo(f"Wrote case manifest: {output_dir / 'case_manifest.json'}")
 
 
 @main.command("face-pipeline")

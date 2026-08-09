@@ -290,6 +290,7 @@ def test_redact_video_help_is_full_video_policy_oriented() -> None:
     result = CliRunner().invoke(main, ["redact-video", "--help"])
 
     assert result.exit_code == 0
+    assert "--categories" in result.output
     assert "--policy" in result.output
     assert "redact_all" in result.output
     assert "--target-track-id" not in result.output
@@ -302,7 +303,7 @@ def test_redact_video_runs_policy_flow_without_target_ids(
     monkeypatch,
 ) -> None:
     input_video = tmp_path / "input.mp4"
-    input_video.write_bytes(b"not decoded by mocked policy flow")
+    synthetic_video(input_video)
     detections = tmp_path / "detections.jsonl"
     detections.write_text("", encoding="utf-8")
     output_dir = tmp_path / "case"
@@ -311,6 +312,54 @@ def test_redact_video_runs_policy_flow_without_target_ids(
     def fake_run_full_video_policy_flow(input_video_arg, **kwargs):
         captured["input_video"] = input_video_arg
         captured.update(kwargs)
+        info = media.probe_media(input_video_arg)
+        case_dir = Path(kwargs["output_dir"])
+        source_frame_count = int(info.video_stream.frame_count or 0)
+
+        def write_json(path: Path, payload: dict[str, object]) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+        write_json(
+            case_dir / "source_manifest.json",
+            {
+                "fps": 5.0,
+                "height": info.video_stream.height,
+                "source_frame_count": source_frame_count,
+                "source_video_hash": info.sha256,
+                "width": info.video_stream.width,
+            },
+        )
+        write_json(case_dir / "privacy_policy.json", {"mode": "redact_all"})
+        write_json(case_dir / "track_census.json", {"summary": {}})
+        write_json(case_dir / "tracking" / "track_quality.json", {"tracks": []})
+        (case_dir / "tracking").mkdir(parents=True, exist_ok=True)
+        (case_dir / "tracking" / "tracks.jsonl").write_text("", encoding="utf-8")
+        (case_dir / "privacy_regions").mkdir(parents=True, exist_ok=True)
+        (case_dir / "privacy_regions" / "privacy_regions.jsonl").write_text(
+            "",
+            encoding="utf-8",
+        )
+        write_json(case_dir / "privacy_regions" / "interval_decisions.json", {})
+        write_json(case_dir / "review" / "review_tasks.json", {"tasks": []})
+        (case_dir / "automatic_preview").mkdir(parents=True, exist_ok=True)
+        (case_dir / "automatic_preview" / "redacted_preview.mp4").write_bytes(b"preview")
+        write_json(
+            case_dir / "automatic_preview" / "render_manifest.json",
+            {"source_video_hash": info.sha256},
+        )
+        write_json(case_dir / "automatic_preview" / "validation.json", {"passed": True})
+        write_json(
+            case_dir / "final" / "final_status.json",
+            {
+                "blocking_reasons": ["review_required_policy_or_track_intervals"],
+                "status": "blocked_review_required",
+            },
+        )
+        write_json(
+            case_dir / "audit_manifest.json",
+            {"source_manifest": {"source_video_hash": info.sha256}},
+        )
         return {
             "final_export_status": "blocked_review_required",
             "privacy_summary": {

@@ -7,12 +7,13 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
-from typing import Any
+from typing import Any, Protocol
 
 import cv2 as cv
 import numpy as np
 
 from redactor import media
+from redactor.privacy_records import CATEGORY_FACE, CATEGORY_PLATE
 
 SCHEMA_VERSION = "1.0"
 
@@ -26,6 +27,7 @@ STATUS_PASSED_AUTOMATIC = "passed_automatic"
 STATUS_PASSED_REVIEWED_FINAL = "passed_reviewed_final"
 STATUS_FAILED_PRIVACY_ACCEPTANCE = "failed_privacy_acceptance"
 STATUS_FAILED_INPUT_VALIDATION = "failed_input_validation"
+STATUS_NOT_SCORABLE = "not_scorable"
 
 VALID_POLICIES = {"redact", "keep", "ignore"}
 VALID_OBJECT_TYPES = {"face", "license_plate"}
@@ -69,7 +71,173 @@ class TrackBox:
     quality_status: str
 
 
+@dataclass(frozen=True)
+class EvaluationRequest:
+    ground_truth_path: Path
+    clip_id: str
+    mode: str
+    output_dir: Path
+    source_video_path: Path | None = None
+    detections_path: Path | None = None
+    adjudication_path: Path | None = None
+    tracks_path: Path | None = None
+    privacy_regions_path: Path | None = None
+    interval_decisions_path: Path | None = None
+    preserved_regions_path: Path | None = None
+    rendered_video_path: Path | None = None
+    render_manifest_path: Path | None = None
+    render_validation_path: Path | None = None
+    detector_threshold: float = 0.30
+    overwrite: bool = False
+
+
+class CategoryEvaluationAdapter(Protocol):
+    category: str
+
+    def run(self, request: EvaluationRequest) -> dict[str, Any]: ...
+
+
+class FaceEvaluationAdapter:
+    category = CATEGORY_FACE
+
+    def run(self, request: EvaluationRequest) -> dict[str, Any]:
+        if request.source_video_path is None:
+            raise ValueError("face evaluation requires source_video_path")
+        if request.detections_path is None:
+            raise ValueError("face evaluation requires detections_path")
+        return _run_face_evaluation_impl(
+            ground_truth_path=request.ground_truth_path,
+            clip_id=request.clip_id,
+            mode=request.mode,
+            source_video_path=request.source_video_path,
+            detections_path=request.detections_path,
+            output_dir=request.output_dir,
+            adjudication_path=request.adjudication_path,
+            tracks_path=request.tracks_path,
+            privacy_regions_path=request.privacy_regions_path,
+            interval_decisions_path=request.interval_decisions_path,
+            preserved_regions_path=request.preserved_regions_path,
+            rendered_video_path=request.rendered_video_path,
+            render_manifest_path=request.render_manifest_path,
+            render_validation_path=request.render_validation_path,
+            detector_threshold=request.detector_threshold,
+            overwrite=request.overwrite,
+        )
+
+
+class PlateEvaluationAdapter:
+    category = CATEGORY_PLATE
+
+    def run(self, request: EvaluationRequest) -> dict[str, Any]:
+        ensure_output_dir(request.output_dir, overwrite=request.overwrite)
+        capability = plate_evaluation_capability(
+            ground_truth_path=request.ground_truth_path,
+            clip_id=request.clip_id,
+        )
+        metrics = {
+            "acceptance": {
+                "blocking_reasons": capability["blockers"],
+                "final_status": STATUS_NOT_SCORABLE,
+            },
+            "capability": capability,
+            "category": CATEGORY_PLATE,
+            "clip_id": request.clip_id,
+            "detector": {
+                "detector_scored_object_frames": None,
+                "frames_with_valid_detection": None,
+                "object_frame_recall": None,
+            },
+            "evaluation_mode": request.mode,
+            "privacy": {
+                "covered_privacy_frames": None,
+                "privacy_coverage": None,
+                "privacy_required_frames": None,
+            },
+            "publishable_metrics": False,
+            "schema_version": SCHEMA_VERSION,
+        }
+        write_json(request.output_dir / "metrics.json", metrics)
+        (request.output_dir / "report.md").write_text(
+            plate_capability_report_markdown(capability),
+            encoding="utf-8",
+        )
+        return metrics
+
+
+def run_category_evaluation(category: str, request: EvaluationRequest) -> dict[str, Any]:
+    adapters: dict[str, CategoryEvaluationAdapter] = {
+        CATEGORY_FACE: FaceEvaluationAdapter(),
+        CATEGORY_PLATE: PlateEvaluationAdapter(),
+    }
+    adapter = adapters.get(category)
+    if adapter is None:
+        raise ValueError(f"unsupported evaluation category: {category}")
+    return adapter.run(request)
+
+
 def run_face_evaluation(
+    *,
+    ground_truth_path: Path,
+    clip_id: str,
+    mode: str,
+    source_video_path: Path,
+    detections_path: Path,
+    output_dir: Path,
+    adjudication_path: Path | None = None,
+    tracks_path: Path | None = None,
+    privacy_regions_path: Path | None = None,
+    interval_decisions_path: Path | None = None,
+    preserved_regions_path: Path | None = None,
+    rendered_video_path: Path | None = None,
+    render_manifest_path: Path | None = None,
+    render_validation_path: Path | None = None,
+    detector_threshold: float = 0.30,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    return run_category_evaluation(
+        CATEGORY_FACE,
+        EvaluationRequest(
+            adjudication_path=adjudication_path,
+            clip_id=clip_id,
+            detector_threshold=detector_threshold,
+            detections_path=detections_path,
+            ground_truth_path=ground_truth_path,
+            interval_decisions_path=interval_decisions_path,
+            mode=mode,
+            output_dir=output_dir,
+            overwrite=overwrite,
+            preserved_regions_path=preserved_regions_path,
+            privacy_regions_path=privacy_regions_path,
+            render_manifest_path=render_manifest_path,
+            render_validation_path=render_validation_path,
+            rendered_video_path=rendered_video_path,
+            source_video_path=source_video_path,
+            tracks_path=tracks_path,
+        ),
+    )
+
+
+def run_plate_evaluation(
+    *,
+    ground_truth_path: Path,
+    clip_id: str,
+    output_dir: Path,
+    mode: str = "capability",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    return run_category_evaluation(
+        CATEGORY_PLATE,
+        EvaluationRequest(
+            clip_id=clip_id,
+            ground_truth_path=ground_truth_path,
+            mode=mode,
+            output_dir=output_dir,
+            overwrite=overwrite,
+        ),
+    )
+
+
+def _run_face_evaluation_impl(
     *,
     ground_truth_path: Path,
     clip_id: str,
@@ -257,6 +425,94 @@ def validate_ground_truth_file(
         "schema_version": ground_truth.get("schema_version"),
         "status": "valid" if not errors else "invalid",
     }
+
+
+def plate_evaluation_capability(*, ground_truth_path: Path, clip_id: str) -> dict[str, Any]:
+    ground_truth = load_ground_truth(ground_truth_path)
+    validation_errors = validate_ground_truth_document(ground_truth)
+    clip = next(
+        (
+            candidate
+            for candidate in ground_truth.get("clips", [])
+            if candidate.get("clip_id") == clip_id
+        ),
+        None,
+    )
+    blockers: list[str] = []
+    if validation_errors:
+        blockers.append("ground_truth_schema_validation_failed")
+    if clip is None:
+        blockers.append("clip_id_not_found")
+        plate_objects: list[dict[str, Any]] = []
+    else:
+        plate_objects = [
+            obj for obj in clip.get("objects", []) if obj.get("object_type") == CATEGORY_PLATE
+        ]
+    objects_with_dense_boxes = [
+        obj for obj in plate_objects if obj.get("per_frame_boxes") or obj.get("keyframe_boxes")
+    ]
+    if not plate_objects:
+        blockers.append("machine_readable_ground_truth_has_no_license_plate_objects")
+    elif not objects_with_dense_boxes:
+        blockers.append("license_plate_objects_lack_tight_scoring_boxes")
+
+    annotation_scope = ground_truth.get("annotation_scope") or {}
+    can_score = not blockers and len(objects_with_dense_boxes) == len(plate_objects)
+    return {
+        "annotation_scope": {
+            "box_truth_level": annotation_scope.get("box_truth_level"),
+            "keyframe_boxes_available": annotation_scope.get("keyframe_boxes_available"),
+            "per_frame_boxes_available": annotation_scope.get("per_frame_boxes_available"),
+        },
+        "blockers": blockers,
+        "can_publish_detector_metrics": can_score,
+        "can_publish_privacy_metrics": can_score,
+        "category": CATEGORY_PLATE,
+        "clip_id": clip_id,
+        "ground_truth_id": ground_truth.get("ground_truth_id"),
+        "license_plate_object_count": len(plate_objects),
+        "object_ids": [str(obj.get("object_id")) for obj in plate_objects],
+        "objects_with_tight_boxes": len(objects_with_dense_boxes),
+        "publishable_metrics": can_score,
+        "schema_version": "plate_evaluation_capability.v1",
+        "validation_error_count": len(validation_errors),
+        "validation_errors": validation_errors,
+    }
+
+
+def plate_capability_report_markdown(capability: dict[str, Any]) -> str:
+    blockers = capability.get("blockers") or []
+    lines = [
+        "# License Plate Evaluation Capability",
+        "",
+        f"- Clip: `{capability.get('clip_id')}`",
+        f"- Ground truth: `{capability.get('ground_truth_id')}`",
+        f"- Publishable metrics: `{capability.get('publishable_metrics')}`",
+        f"- License-plate objects: `{capability.get('license_plate_object_count')}`",
+        f"- Objects with tight boxes: `{capability.get('objects_with_tight_boxes')}`",
+        "",
+        "## Status",
+        "",
+    ]
+    if blockers:
+        lines.append("Plate detector/privacy scores were not produced.")
+        lines.append("")
+        lines.append("## Blockers")
+        lines.append("")
+        lines.extend(f"- `{blocker}`" for blocker in blockers)
+    else:
+        lines.append("The machine-readable ground truth contains the fields needed for scoring.")
+    lines.extend(
+        [
+            "",
+            "## Notes",
+            "",
+            "Range-level or search ROI annotations are not treated as tight plate boxes.",
+            "This report is a capability record, not an evaluation scorecard.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def validate_ground_truth_document(
