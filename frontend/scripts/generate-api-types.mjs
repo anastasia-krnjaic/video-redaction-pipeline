@@ -30,6 +30,7 @@ const orderedNames = [
   'BulkEntityPolicyAction',
   'EntityMergeCandidate',
   'EntityMergeEvent',
+  'ManualPrivacyCategory',
   'Correction',
   'CorrectionPreview',
   'WorkingState',

@@ -332,12 +332,14 @@ test.describe('Final Review React workspace', () => {
 
     await page.locator('.filter-row').getByRole('button', { name: /^Open/ }).click();
     await page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"] .decision-needs-correction`).click();
+    await expect(page.locator(`.timeline-marker[data-task-id="${initialTaskIds[1]}"]`)).toHaveClass(/marker-needs-correction/);
     await page.locator('.filter-row').getByRole('button', { name: /^Needs correction/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"]`)).toBeVisible();
     await page.locator('.filter-row').getByRole('button', { name: /^Open/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"]`)).toHaveCount(0);
 
     await page.locator(`.task-card[data-task-id="${initialTaskIds[2]}"] .decision-unsure`).click();
+    await expect(page.locator(`.timeline-marker[data-task-id="${initialTaskIds[2]}"]`)).toHaveClass(/marker-unsure/);
     await page.locator('.filter-row').getByRole('button', { name: /^Unsure \/ Escalated/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[2]}"]`)).toBeVisible();
     await page.locator('.filter-row').getByRole('button', { name: /^Open/ }).click();
@@ -508,6 +510,20 @@ test.describe('Final Review React workspace', () => {
   test('draws correction keyframes on the video overlay and preserves preview/save frame state', async ({ page }) => {
     test.setTimeout(180_000);
     await startReview(page);
+    let drewFirstKeyframe = false;
+    let preKeyframeMutationCalls = 0;
+    const savedCorrections: Record<string, unknown>[] = [];
+    page.on('request', (request) => {
+      if (request.method() !== 'POST') return;
+      const pathname = new URL(request.url()).pathname;
+      const isCorrectionMutation = pathname === '/api/v1/corrections' || pathname === '/api/v1/corrections/preview';
+      const isMaterializationMutation = pathname.startsWith('/api/v1/materialization-jobs');
+      if (!drewFirstKeyframe && (isCorrectionMutation || isMaterializationMutation)) preKeyframeMutationCalls += 1;
+      if (pathname === '/api/v1/corrections') {
+        const payload = request.postDataJSON() as { correction?: Record<string, unknown> } | null;
+        if (payload?.correction) savedCorrections.push(payload.correction);
+      }
+    });
     await page.keyboard.press('Shift+ArrowRight');
     await page.getByRole('button', { name: 'Manual redaction' }).click();
     await expect(page.locator('video')).toBeVisible();
@@ -516,10 +532,19 @@ test.describe('Final Review React workspace', () => {
     await expect(overlay).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
     await expect(page.locator('.editor-backdrop')).toHaveCount(0);
 
-    await page.getByRole('button', { name: 'Set start to current frame' }).click();
-    await page.getByRole('button', { name: 'Set end to current frame' }).click();
     const sourceBeforePreview = await currentSourceFrame(page);
+    await page.getByLabel('Category').selectOption('license_plate');
+    await expect(page.getByLabel('Category')).toHaveValue('license_plate');
+    await page.getByLabel('Category').selectOption('other_sensitive');
+    await expect(page.getByLabel('Category')).toHaveValue('other_sensitive');
+    await page.getByRole('button', { name: 'Interpolate between keyframes' }).click();
+    await page.getByRole('button', { name: 'Single frame' }).click();
+    await expect(page.getByLabel('Start source frame')).toHaveValue(String(sourceBeforePreview));
+    await expect(page.getByLabel('End source frame')).toHaveValue(String(sourceBeforePreview));
+    await expect.poll(() => preKeyframeMutationCalls).toBe(0);
+
     await drawCorrectionBox(page);
+    drewFirstKeyframe = true;
     await expect(page.locator('.keyframe-row')).toContainText(new RegExp(`frame ${sourceBeforePreview}: \\d+, \\d+, \\d+, \\d+`));
     await expect(page.getByText('Draw at least one rectangle keyframe.')).toHaveCount(0);
 
@@ -529,16 +554,55 @@ test.describe('Final Review React workspace', () => {
     await expect(page.locator('.version-selector option')).toHaveText(['Original', 'Automatic', 'Latest reviewed']);
     await expect.poll(async () => currentSourceFrame(page)).toBe(sourceBeforePreview);
     await expect(page.getByRole('button', { name: 'Save correction' })).toBeEnabled({ timeout: 120_000 });
+    await page.getByLabel('Category').selectOption('face');
+    await expect(page.getByText('The correction changed. Preview again before saving.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Save correction' })).toBeDisabled();
+    await expect(page.getByRole('button', { name: 'Preview correction' })).toBeEnabled();
+    await page.getByLabel('Category').selectOption('other_sensitive');
+    await page.getByRole('button', { name: 'Preview correction' }).click();
+    await expect(page.getByRole('button', { name: 'Save correction' })).toBeEnabled({ timeout: 120_000 });
     await page.getByRole('button', { name: 'Save correction' }).click();
     await expect(page.locator('.case-subtitle')).toContainText(/Saved - updating Latest reviewed|Published/, {
       timeout: 120_000,
+    });
+    expect(savedCorrections.at(-1)).toMatchObject({
+      category: 'other_sensitive',
+      source_frame_end: sourceBeforePreview,
+      source_frame_start: sourceBeforePreview,
     });
     await expect(page.locator('.version-selector select')).toHaveValue('latest_reviewed', { timeout: 120_000 });
 
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.locator('.version-selector select')).toHaveValue('latest_reviewed', { timeout: 120_000 });
     await page.getByRole('button', { name: 'History' }).click();
-    await expect(page.locator('body')).toContainText('Manual correction saved');
+    await expect(page.locator('body')).toContainText('Manual Other sensitive region correction saved');
+  });
+
+  test('keeps interpolation preview disabled until the exact end keyframe exists', async ({ page }) => {
+    await startReview(page);
+    await page.getByRole('button', { name: 'Day' }).click();
+    await expect.poll(async () => currentSourceFrame(page)).toBe(1828);
+    await page.getByRole('button', { name: 'Manual redaction' }).click();
+    await page.getByRole('button', { name: 'Interpolate between keyframes' }).click();
+    await page.getByLabel('End source frame').fill('1848');
+    await drawCorrectionBox(page, 0.28, 0.3, 0.46, 0.5);
+    await expect(page.getByText('Draw a rectangle on end frame 1848 to preview this interpolation.')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Preview correction' })).toBeDisabled();
+
+    let previewCalls = 0;
+    page.on('request', (request) => {
+      if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/corrections/preview') previewCalls += 1;
+    });
+    await expect.poll(() => previewCalls).toBe(0);
+
+    await page.getByRole('button', { name: 'Go to end frame' }).click();
+    await expect.poll(async () => currentSourceFrame(page)).toBe(1848);
+    await drawCorrectionBox(page, 0.46, 0.34, 0.64, 0.58);
+    await expect(page.getByText('End rectangle ready')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Preview correction' })).toBeEnabled();
+    await page.getByRole('button', { name: 'Preview correction' }).click();
+    await expect(page.locator('.version-selector select')).toHaveValue('latest_reviewed', { timeout: 120_000 });
+    await expect.poll(() => previewCalls).toBe(1);
   });
 
   test('validates and previews a two-keyframe multi-frame correction', async ({ page }) => {
@@ -548,10 +612,11 @@ test.describe('Final Review React workspace', () => {
     await page.getByRole('button', { name: 'Day' }).click();
     await page.getByRole('button', { name: 'Manual redaction' }).click();
     await page.getByRole('button', { name: 'Interpolate between keyframes' }).click();
-    await page.getByRole('button', { name: 'Set start to current frame' }).click();
+    const intervalControls = page.locator('.edit-card').first().locator('.button-row').first();
+    await intervalControls.getByRole('button', { name: 'Set start to current frame' }).click();
     await drawCorrectionBox(page, 0.26, 0.32, 0.42, 0.48);
     await page.keyboard.press('Shift+ArrowRight');
-    await page.getByRole('button', { name: 'Set end to current frame' }).click();
+    await intervalControls.getByRole('button', { name: 'Set end to current frame' }).click();
     await expect(page.getByRole('button', { name: 'Preview correction' })).toBeDisabled();
     await drawCorrectionBox(page, 0.44, 0.38, 0.62, 0.6);
     await expect(page.getByRole('button', { name: 'Preview correction' })).toBeEnabled();

@@ -279,7 +279,7 @@
           "type": "string"
         },
         "category": {
-          "type": "string"
+          "$ref": "#/definitions/ManualPrivacyCategory"
         },
         "checkpoint_verifications": {
           "items": {
@@ -748,6 +748,13 @@
         "schema_version"
       ],
       "type": "object"
+    },
+    "ManualPrivacyCategory": {
+      "enum": [
+        "face",
+        "license_plate",
+        "other_sensitive"
+      ]
     },
     "MaterializationJob": {
       "additionalProperties": true,
@@ -1580,5 +1587,10 @@
   "title": "Final Review Workspace API v1",
   "type": "object",
   "x-api-prefix": "/api/v1",
-  "x-api-schema-version": "final_review_workspace_api.v1"
+  "x-api-schema-version": "final_review_workspace_api.v1",
+  "x-manual-redaction-categories": [
+    "face",
+    "license_plate",
+    "other_sensitive"
+  ]
 }

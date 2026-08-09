@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from redactor import media
-from redactor.privacy_records import stable_hash
+from redactor.privacy_records import normalize_manual_redaction_category, stable_hash
 
 SCHEMA_VERSION = "review_correction.v1"
 
@@ -103,6 +103,7 @@ class ReviewCorrection:
     schema_version: str = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "category", normalize_manual_redaction_category(self.category))
         if self.operation not in OPERATIONS:
             raise ValueError(f"unsupported correction operation: {self.operation}")
         if self.interpolation_method not in INTERPOLATION_METHODS:
@@ -121,6 +122,31 @@ class ReviewCorrection:
                 raise ValueError("checkpoint cannot be before correction interval")
             if checkpoint.source_frame > self.source_frame_end:
                 raise ValueError("checkpoint cannot be after correction interval")
+        self._validate_mode_specific_keyframes()
+
+    def _validate_mode_specific_keyframes(self) -> None:
+        if self.operation not in {OP_ADD, OP_REPLACE}:
+            return
+        source_frames = {keyframe.source_frame for keyframe in self.keyframes}
+        if self.interpolation_method == INTERPOLATION_NONE:
+            return
+        if self.source_frame_start == self.source_frame_end:
+            if self.source_frame_start not in source_frames:
+                raise ValueError(
+                    "single-frame correction requires a keyframe at source frame "
+                    f"{self.source_frame_start}"
+                )
+            return
+        if self.source_frame_start not in source_frames:
+            raise ValueError(
+                "linear interpolation requires a start keyframe at source frame "
+                f"{self.source_frame_start}"
+            )
+        if self.source_frame_end not in source_frames:
+            raise ValueError(
+                "linear interpolation requires an end keyframe at source frame "
+                f"{self.source_frame_end}"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {

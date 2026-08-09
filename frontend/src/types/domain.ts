@@ -1,4 +1,4 @@
-import type { Entity, MediaVersion, Task, TaskDecision, WorkingState } from './api';
+import type { Entity, ManualPrivacyCategory, MediaVersion, Task, TaskDecision, WorkingState } from './api';
 
 export type CaseId = 'day' | 'night';
 export type TopLevelRoute = CaseId | 'final' | 'audit';
@@ -7,6 +7,17 @@ export type QueueBucket = 'Open' | 'Waiting' | 'Needs correction' | 'Unsure / Es
 export type EntityFilter = 'all' | 'face' | 'license_plate' | 'needs_review' | 'unresolved';
 export type EntityPolicy = 'redact' | 'keep_visible' | 'not_sensitive' | 'review_required';
 export type CorrectionIntervalMode = 'single_frame' | 'fixed_box' | 'interpolate';
+export type ManualRedactionCategory = ManualPrivacyCategory;
+
+export const MANUAL_REDACTION_CATEGORIES = ['face', 'license_plate', 'other_sensitive'] as const satisfies readonly ManualRedactionCategory[];
+export const MANUAL_REDACTION_CATEGORY_OPTIONS: readonly {
+  label: string;
+  value: ManualRedactionCategory;
+}[] = [
+  { value: 'face', label: 'Face / person' },
+  { value: 'license_plate', label: 'Plate' },
+  { value: 'other_sensitive', label: 'Other sensitive region' },
+];
 
 export interface FinalMediaState {
   [caseId: string]: MediaVersion | undefined;
@@ -27,7 +38,7 @@ export interface CorrectionCheckpointDraft {
 export interface CorrectionDraft {
   caseId: CaseId;
   case_id: CaseId;
-  category: string;
+  category: ManualRedactionCategory;
   start: number;
   end: number;
   start_source_frame: number;

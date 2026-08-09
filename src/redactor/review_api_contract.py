@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from redactor.privacy_records import stable_hash
+from redactor.privacy_records import MANUAL_REDACTION_CATEGORIES, stable_hash
 
 API_SCHEMA_VERSION = "final_review_workspace_api.v1"
 API_PREFIX = "/api/v1"
@@ -23,6 +23,7 @@ def final_review_workspace_schema() -> dict[str, Any]:
         "type": "object",
         "x-api-prefix": API_PREFIX,
         "x-api-schema-version": API_SCHEMA_VERSION,
+        "x-manual-redaction-categories": list(MANUAL_REDACTION_CATEGORIES),
         "definitions": {
             "FinalReviewWorkspaceApiSchema": {
                 "type": "object",
@@ -378,6 +379,7 @@ def final_review_workspace_schema() -> dict[str, Any]:
                     "target_entity_id": {"type": "string"},
                 },
             },
+            "ManualPrivacyCategory": {"enum": list(MANUAL_REDACTION_CATEGORIES)},
             "Correction": {
                 "type": "object",
                 "additionalProperties": True,
@@ -396,7 +398,7 @@ def final_review_workspace_schema() -> dict[str, Any]:
                 ],
                 "properties": {
                     "case_id": {"type": "string"},
-                    "category": {"type": "string"},
+                    "category": {"$ref": "#/definitions/ManualPrivacyCategory"},
                     "checkpoint_verifications": {"type": "array", "items": dict_value},
                     "configuration_freeze_hash": {"type": "string"},
                     "entity_id": string_or_null,

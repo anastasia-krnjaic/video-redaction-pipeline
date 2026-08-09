@@ -1,7 +1,8 @@
 import { useMemo, useRef, useState } from 'react';
 import type { PointerEvent, RefObject } from 'react';
 import type { Attribution, Case, Correction, Task } from '../types/api';
-import type { CaseId, CorrectionCheckpointDraft, CorrectionDraft, CorrectionKeyframeDraft } from '../types/domain';
+import type { CaseId, CorrectionCheckpointDraft, CorrectionDraft, CorrectionKeyframeDraft, ManualRedactionCategory } from '../types/domain';
+import { MANUAL_REDACTION_CATEGORY_OPTIONS } from '../types/domain';
 import { clamp } from '../utils/frame';
 
 interface Props {
@@ -10,6 +11,7 @@ interface Props {
   configurationFreezeHash?: string | null;
   currentSourceFrame: number;
   draft: CorrectionDraft;
+  previewInvalidated: boolean;
   previewReady: boolean;
   selectedTask?: Task | null;
   sourceVideoHash?: string | null;
@@ -31,13 +33,16 @@ export function CorrectionEditor({
   onGoToSourceFrame,
   onPreview,
   onSave,
+  previewInvalidated,
   previewReady,
   selectedTask,
   sourceVideoHash,
 }: Props) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const validation = validateCorrectionDraft(draft);
+  const validation = deriveCorrectionDraftValidation(draft);
+  const canPreview = validation.valid && !busy;
+  const canSave = previewReady && !busy;
   const currentKeyframe = draft.keyframes.find((keyframe) => keyframe.source_frame === currentSourceFrame);
 
   const startFrame = draft.start_source_frame;
@@ -54,25 +59,7 @@ export function CorrectionEditor({
       keyframes: draft.keyframes.filter((keyframe) => keyframe.source_frame >= intervalStart && keyframe.source_frame <= intervalEnd),
     });
   };
-  const setIntervalMode = (mode: CorrectionDraft['mode']) => {
-    const patch: Partial<CorrectionDraft> = { mode };
-    if (mode === 'single_frame') {
-      patch.start_source_frame = currentSourceFrame;
-      patch.end_source_frame = currentSourceFrame;
-      patch.start = currentSourceFrame;
-      patch.end = currentSourceFrame;
-      patch.keyframes = draft.keyframes.filter((keyframe) => keyframe.source_frame === currentSourceFrame);
-    }
-    if (mode === 'fixed_box') {
-      patch.holdSameBox = true;
-      patch.interpolation_method = 'none';
-    }
-    if (mode === 'interpolate') {
-      patch.holdSameBox = false;
-      patch.interpolation_method = 'linear';
-    }
-    updateDraft(patch);
-  };
+  const setIntervalMode = (mode: CorrectionDraft['mode']) => updateDraft(applyCorrectionDraftMode(draft, mode, currentSourceFrame));
   const deleteCurrentKeyframe = () => {
     updateDraft({ keyframes: draft.keyframes.filter((keyframe) => keyframe.source_frame !== currentSourceFrame) });
   };
@@ -101,13 +88,13 @@ export function CorrectionEditor({
     return {
       case_id: caseId,
       task_id: taskId,
-      category: selectedTask?.category || draft.category || 'license_plate',
+      category: draft.category || selectedTask?.category || 'license_plate',
       operation: 'add_privacy_region',
       source_frame_start: Math.min(startFrame, endFrame),
       source_frame_end: Math.max(startFrame, endFrame),
       keyframe_boxes: normalized,
       checkpoint_verifications: draft.barriers.map((checkpoint) => ({ ...checkpoint })),
-      interpolation_method: draft.mode === 'fixed_box' ? 'none' : 'linear',
+      interpolation_method: draft.mode === 'interpolate' ? 'linear' : 'none',
       reviewer_identity: actor || {},
       reason: 'Reviewed correction revision',
       source_video_hash: sourceVideoHash,
@@ -115,6 +102,15 @@ export function CorrectionEditor({
     } satisfies Correction;
   };
   const run = async (mode: 'preview' | 'save') => {
+    const currentValidation = deriveCorrectionDraftValidation(draft);
+    if (mode === 'preview' && !currentValidation.valid) {
+      setError(currentValidation.message);
+      return;
+    }
+    if (mode === 'save' && !previewReady) {
+      setError('The correction changed. Preview again before saving.');
+      return;
+    }
     const correction = correctionOrError();
     if (typeof correction === 'string') {
       setError(correction);
@@ -143,10 +139,15 @@ export function CorrectionEditor({
         <p className="muted">Drag directly on the video to add a redaction box.</p>
         <label>
           Category
-          <select value={draft.category} onChange={(event) => updateDraft({ category: event.currentTarget.value })}>
-            <option value="face">Face / person</option>
-            <option value="license_plate">Plate</option>
-            <option value="other_sensitive">Other sensitive region</option>
+          <select
+            value={draft.category}
+            onChange={(event) => updateDraft({ category: event.currentTarget.value as ManualRedactionCategory })}
+          >
+            {MANUAL_REDACTION_CATEGORY_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
           </select>
         </label>
         <div className="mode-options" role="radiogroup" aria-label="Manual redaction interval mode">
@@ -187,7 +188,7 @@ export function CorrectionEditor({
               <strong>Step 1 - Start frame</strong>
               <p>Source frame {startFrame}</p>
               <p className={draft.keyframes.some((keyframe) => keyframe.source_frame === startFrame) ? 'success-text' : 'muted'}>
-                {draft.keyframes.some((keyframe) => keyframe.source_frame === startFrame) ? 'Start rectangle ready' : 'Start rectangle missing'}
+                {draft.keyframes.some((keyframe) => keyframe.source_frame === startFrame) ? 'Start rectangle ready' : `Draw start keyframe on source frame ${startFrame}.`}
               </p>
               <div className="button-row">
                 <button type="button" onClick={() => onGoToSourceFrame(startFrame)}>Go to start frame</button>
@@ -198,7 +199,7 @@ export function CorrectionEditor({
               <strong>Step 2 - End frame</strong>
               <p>Source frame {endFrame}</p>
               <p className={draft.keyframes.some((keyframe) => keyframe.source_frame === endFrame) ? 'success-text' : 'muted'}>
-                {draft.keyframes.some((keyframe) => keyframe.source_frame === endFrame) ? 'End rectangle ready' : 'End rectangle missing'}
+                {draft.keyframes.some((keyframe) => keyframe.source_frame === endFrame) ? 'End rectangle ready' : `Draw end keyframe on source frame ${endFrame}.`}
               </p>
               <div className="button-row">
                 <button type="button" onClick={() => onGoToSourceFrame(endFrame)}>Go to end frame</button>
@@ -219,7 +220,18 @@ export function CorrectionEditor({
         <div className="keyframe-list">
           {draft.keyframes.length ? (
             draft.keyframes.map((keyframe) => (
-              <div className="keyframe-row" key={keyframe.source_frame}>
+              <div
+                className="keyframe-row"
+                key={keyframe.source_frame}
+                onClick={() => onGoToSourceFrame(keyframe.source_frame)}
+                onKeyDown={(event) => {
+                  if (event.key !== 'Enter' && event.key !== ' ') return;
+                  event.preventDefault();
+                  onGoToSourceFrame(keyframe.source_frame);
+                }}
+                role="button"
+                tabIndex={0}
+              >
                 <span>
                   {keyframeLabel(keyframe, draft)} - frame {keyframe.source_frame}: {keyframe.bbox_xyxy.join(', ')}
                 </span>
@@ -228,7 +240,10 @@ export function CorrectionEditor({
                 </button>
                 <button
                   type="button"
-                  onClick={() => updateDraft({ keyframes: draft.keyframes.filter((item) => item !== keyframe) })}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    updateDraft({ keyframes: draft.keyframes.filter((item) => item !== keyframe) });
+                  }}
                 >
                   Delete
                 </button>
@@ -268,17 +283,21 @@ export function CorrectionEditor({
         </details>
         {error || !validation.valid ? <p className="error-text">{error || validation.message}</p> : null}
         <div className="button-row">
-          <button type="button" className="primary" onClick={() => void run('preview')} disabled={busy || !validation.valid}>
+          <button type="button" className="primary" onClick={() => void run('preview')} disabled={!canPreview}>
             Preview correction
           </button>
-          <button type="button" onClick={() => void run('save')} disabled={busy || !previewReady}>
+          <button type="button" onClick={() => void run('save')} disabled={!canSave}>
             Save correction
           </button>
           <button type="button" onClick={onDiscard} disabled={busy}>
             Discard
           </button>
         </div>
-        {!previewReady && validation.valid ? <p className="muted">Preview the correction before saving. If the correction changed, preview it again before saving.</p> : null}
+        {!previewReady && validation.valid ? (
+          <p className="muted">
+            {previewInvalidated ? 'The correction changed. Preview again before saving.' : 'Preview the correction before saving.'}
+          </p>
+        ) : null}
       </article>
       <p className="muted">Correction geometry is stored in source-frame and source-video coordinates.</p>
     </section>
@@ -418,7 +437,12 @@ export function CorrectionVideoOverlay({
   );
 }
 
-export function validateCorrectionDraft(draft: CorrectionDraft): { valid: boolean; message: string } {
+export interface CorrectionDraftValidation {
+  valid: boolean;
+  message: string;
+}
+
+export function deriveCorrectionDraftValidation(draft: CorrectionDraft): CorrectionDraftValidation {
   const start = Math.min(draft.start_source_frame, draft.end_source_frame);
   const end = Math.max(draft.start_source_frame, draft.end_source_frame);
   const keyframes = draft.keyframes.filter((keyframe) => keyframe.source_frame >= start && keyframe.source_frame <= end);
@@ -438,7 +462,7 @@ export function validateCorrectionDraft(draft: CorrectionDraft): { valid: boolea
   }
   if (draft.mode === 'fixed_box') {
     if (draft.start_source_frame > draft.end_source_frame) return { valid: false, message: 'Choose a valid source-frame interval.' };
-    if (!keyframes.length) return { valid: false, message: `Draw a rectangle on source frame ${start}.` };
+    if (!keyframes.length) return { valid: false, message: `Draw one rectangle inside source frames ${start}-${end}.` };
     return { valid: true, message: '' };
   }
   if (draft.start_source_frame >= draft.end_source_frame) return { valid: false, message: 'Interpolate mode requires a multi-frame interval.' };
@@ -446,13 +470,15 @@ export function validateCorrectionDraft(draft: CorrectionDraft): { valid: boolea
     return { valid: false, message: 'Linear correction cannot cross scene-cut or not-visible barriers.' };
   }
   if (!keyframes.some((keyframe) => keyframe.source_frame === start)) {
-    return { valid: false, message: `Draw a rectangle on source frame ${start}.` };
+    return { valid: false, message: `Draw a rectangle on start frame ${start} to preview this interpolation.` };
   }
   if (!keyframes.some((keyframe) => keyframe.source_frame === end)) {
-    return { valid: false, message: `Add an end-frame rectangle on source frame ${end}.` };
+    return { valid: false, message: `Draw a rectangle on end frame ${end} to preview this interpolation.` };
   }
   return { valid: true, message: '' };
 }
+
+export const validateCorrectionDraft = deriveCorrectionDraftValidation;
 
 function normalizedKeyframes(draft: CorrectionDraft): CorrectionKeyframeDraft[] {
   const start = Math.min(draft.start_source_frame, draft.end_source_frame);
@@ -498,4 +524,30 @@ function checkpointLabel(state: CorrectionCheckpointDraft['state']): string {
   if (state === 'verified') return 'Verified';
   if (state === 'needs_adjustment') return 'Needs adjustment';
   return 'Unreviewed';
+}
+
+export function applyCorrectionDraftMode(
+  draft: CorrectionDraft,
+  mode: CorrectionDraft['mode'],
+  currentSourceFrame: number,
+): Partial<CorrectionDraft> {
+  const patch: Partial<CorrectionDraft> = { mode };
+  if (mode === 'single_frame') {
+    patch.start_source_frame = currentSourceFrame;
+    patch.end_source_frame = currentSourceFrame;
+    patch.start = currentSourceFrame;
+    patch.end = currentSourceFrame;
+    patch.keyframes = draft.keyframes.filter((keyframe) => keyframe.source_frame === currentSourceFrame);
+    patch.holdSameBox = false;
+    patch.interpolation_method = 'linear';
+  }
+  if (mode === 'fixed_box') {
+    patch.holdSameBox = true;
+    patch.interpolation_method = 'none';
+  }
+  if (mode === 'interpolate') {
+    patch.holdSameBox = false;
+    patch.interpolation_method = 'linear';
+  }
+  return patch;
 }

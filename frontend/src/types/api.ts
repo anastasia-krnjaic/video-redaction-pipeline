@@ -202,9 +202,11 @@ export interface EntityMergeEvent {
   [key: string]: unknown;
 }
 
+export type ManualPrivacyCategory = "face" | "license_plate" | "other_sensitive";
+
 export interface Correction {
   "case_id": string;
-  "category": string;
+  "category": ManualPrivacyCategory;
   "checkpoint_verifications"?: Record<string, unknown>[];
   "configuration_freeze_hash": string;
   "entity_id"?: string | null;

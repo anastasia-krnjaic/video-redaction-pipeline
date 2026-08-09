@@ -49,7 +49,7 @@ from redactor.privacy_records import (
 )
 
 SCHEMA_VERSION = "final_review_workspace.v2.3.4"
-FRONTEND_MILESTONE_VERSION = "v1.5.1"
+FRONTEND_MILESTONE_VERSION = "v1.5.4"
 DAY_PARENT_PATH = Path("artifacts/day_primary.mp4")
 DAY_CANONICAL_SOURCE_FRAME_START = 1828
 DAY_CANONICAL_SOURCE_FRAME_END = 5694

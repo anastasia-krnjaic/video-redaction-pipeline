@@ -52,10 +52,12 @@ import type {
   EffectiveEntity,
   EntityFilter,
   EntityPolicy,
+  ManualRedactionCategory,
   QueueBucket,
   ReviewMode,
   TaskWithDecision,
 } from '../types/domain';
+import { MANUAL_REDACTION_CATEGORIES } from '../types/domain';
 import { caseToSourceFrame } from '../utils/frame';
 
 interface Props {
@@ -117,6 +119,7 @@ export function CaseReviewPage({
   const [pendingEntityIds, setPendingEntityIds] = useState<Set<string>>(() => new Set());
   const [latestRole, setLatestRole] = useState<MediaVersion | undefined>();
   const [previewRole, setPreviewRole] = useState<MediaVersion | undefined>();
+  const [previewInvalidated, setPreviewInvalidated] = useState(false);
   const [previewReady, setPreviewReady] = useState(false);
   const [previewToken, setPreviewToken] = useState<string>();
   const [correctionSaveStatus, setCorrectionSaveStatus] = useState<string>();
@@ -134,6 +137,7 @@ export function CaseReviewPage({
   const setSelectedRoleRef = useRef(setSelectedRole);
   const seekToFrameRef = useRef<(frame: number) => void>(() => {});
   const workingStateRef = useRef<WorkingState | undefined>(workingState);
+  const editDraftContextRef = useRef<string | null>(null);
 
   const allTasks = useMemo(
     () => [...baseTasks, ...manualTasks].filter((task) => task.case_id === caseId),
@@ -208,17 +212,20 @@ export function CaseReviewPage({
   }, [selectedTask?.review_task_id]);
 
   useEffect(() => {
-    if (mode === 'edit') controller.pause();
-  }, [controller, mode]);
-
-  useEffect(() => {
-    if (mode !== 'edit') return;
+    if (mode !== 'edit') {
+      editDraftContextRef.current = null;
+      return;
+    }
     controller.pause();
+    const contextKey = `${caseId}:${selectedTask?.review_task_id || ''}`;
+    const shouldInitialize = editDraftContextRef.current !== contextKey;
+    editDraftContextRef.current = contextKey;
     setDraft((current) => {
+      if (current.caseId === caseId && !shouldInitialize) return current;
       if (current.caseId === caseId && current.keyframes.length) return current;
       return initialDraft(caseId, manifest, caseFrame, selectedTask);
     });
-  }, [caseFrame, caseId, controller, manifest, mode, selectedTask]);
+  }, [caseFrame, caseId, controller.pause, manifest, mode, selectedTask]);
 
   useEffect(() => {
     if (!focusTarget) return undefined;
@@ -346,6 +353,7 @@ export function CaseReviewPage({
   };
 
   const updateDraft = (nextDraft: CorrectionDraft) => {
+    setPreviewInvalidated(previewReady || Boolean(previewToken) || Boolean(nextDraft.preview_token));
     setPreviewReady(false);
     setPreviewToken(undefined);
     setPreviewRole(undefined);
@@ -584,6 +592,7 @@ export function CaseReviewPage({
       ]);
     }
     setPreviewReady(false);
+    setPreviewInvalidated(false);
     setPreviewToken(undefined);
     setPreviewRole(undefined);
     setCorrectionSaveStatus(materialization_required ? 'Saved - updating Latest reviewed' : `Saved - ${publication_status || 'published'}`);
@@ -615,6 +624,7 @@ export function CaseReviewPage({
       source_frame_end: preview.frame_end ?? correction.source_frame_end,
     });
     setPreviewReady(true);
+    setPreviewInvalidated(false);
     setPreviewToken(preview.preview_token || undefined);
     setCorrectionSaveStatus(undefined);
     setDraft((current) => withDraftHash({ ...current, preview_token: preview.preview_token || undefined }));
@@ -889,6 +899,7 @@ export function CaseReviewPage({
               configurationFreezeHash={workspace.configuration_freeze_hash}
               currentSourceFrame={currentSourceFrame}
               draft={draft}
+              previewInvalidated={previewInvalidated}
               previewReady={previewReady}
               selectedTask={selectedTask}
               sourceVideoHash={manifest.source_video_hash}
@@ -1116,7 +1127,7 @@ function initialDraft(caseId: CaseId, manifest: WorkspaceSummary['cases'][string
   return withDraftHash({
     caseId,
     case_id: caseId,
-    category: task?.category || 'license_plate',
+    category: manualRedactionCategory(task?.category),
     start: sourceFrame,
     end: sourceFrame,
     start_source_frame: sourceFrame,
@@ -1128,6 +1139,13 @@ function initialDraft(caseId: CaseId, manifest: WorkspaceSummary['cases'][string
     interpolation_method: 'linear',
     selectedTaskId: task?.review_task_id,
   });
+}
+
+function manualRedactionCategory(category: string | undefined): ManualRedactionCategory {
+  if (MANUAL_REDACTION_CATEGORIES.includes(category as ManualRedactionCategory)) {
+    return category as ManualRedactionCategory;
+  }
+  return 'license_plate';
 }
 
 function isTextEntryTarget(element: Element | null): boolean {

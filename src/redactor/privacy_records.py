@@ -11,6 +11,20 @@ SCHEMA_VERSION = "privacy_pipeline_records.v1"
 
 CATEGORY_FACE = "face"
 CATEGORY_PLATE = "license_plate"
+CATEGORY_OTHER_SENSITIVE = "other_sensitive"
+MANUAL_REDACTION_CATEGORIES = (CATEGORY_FACE, CATEGORY_PLATE, CATEGORY_OTHER_SENSITIVE)
+MANUAL_REDACTION_CATEGORY_LABELS = {
+    CATEGORY_FACE: "Face / person",
+    CATEGORY_PLATE: "Plate",
+    CATEGORY_OTHER_SENSITIVE: "Other sensitive region",
+}
+MANUAL_REDACTION_CATEGORY_ALIASES = {
+    "face": CATEGORY_FACE,
+    "person": CATEGORY_FACE,
+    "plate": CATEGORY_PLATE,
+    "license_plate": CATEGORY_PLATE,
+    "other_sensitive": CATEGORY_OTHER_SENSITIVE,
+}
 
 LIFECYCLE_TENTATIVE = "tentative"
 LIFECYCLE_CONFIRMED = "confirmed"
@@ -49,6 +63,18 @@ Box = tuple[int, int, int, int]
 def stable_hash(payload: dict[str, Any]) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def normalize_manual_redaction_category(category: str) -> str:
+    normalized = MANUAL_REDACTION_CATEGORY_ALIASES.get(category)
+    if normalized is None:
+        raise ValueError(f"unsupported privacy category: {category}")
+    return normalized
+
+
+def manual_redaction_category_label(category: str) -> str:
+    normalized = normalize_manual_redaction_category(category)
+    return MANUAL_REDACTION_CATEGORY_LABELS[normalized]
 
 
 @dataclass(frozen=True)

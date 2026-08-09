@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import urllib.error
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import cv2 as cv
 import numpy as np
@@ -14,6 +16,7 @@ import pytest
 from redactor import (
     case_manifests,
     privacy_entities,
+    review_api_contract,
     review_corrections,
     review_finalization,
     review_sessions,
@@ -23,7 +26,9 @@ from redactor import (
 from redactor.privacy_records import (
     APPROVAL_ACCEPTED,
     CATEGORY_FACE,
+    CATEGORY_OTHER_SENSITIVE,
     CATEGORY_PLATE,
+    MANUAL_REDACTION_CATEGORIES,
     PrivacyRegionRecord,
     stable_hash,
 )
@@ -548,35 +553,48 @@ def test_correction_interpolation_and_no_extrapolation() -> None:
 
 
 def test_correction_interpolation_rejects_extrapolation() -> None:
-    correction = review_corrections.ReviewCorrection(
-        case_id="case",
-        category="license_plate",
-        configuration_freeze_hash="hash",
-        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
-        keyframes=(
-            review_corrections.CorrectionKeyframe(11, (10, 10, 30, 20)),
-            review_corrections.CorrectionKeyframe(12, (12, 12, 34, 24)),
-        ),
-        operation=review_corrections.OP_ADD,
-        reason="reviewed",
-        reviewer_identity={"reviewer_id": "analyst"},
-        source_frame_end=12,
-        source_frame_start=10,
-        source_video_hash="source",
-        task_id="task",
-    )
+    with pytest.raises(ValueError, match="start keyframe at source frame 10"):
+        review_corrections.ReviewCorrection(
+            case_id="case",
+            category="license_plate",
+            configuration_freeze_hash="hash",
+            interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+            keyframes=(
+                review_corrections.CorrectionKeyframe(11, (10, 10, 30, 20)),
+                review_corrections.CorrectionKeyframe(12, (12, 12, 34, 24)),
+            ),
+            operation=review_corrections.OP_ADD,
+            reason="reviewed",
+            reviewer_identity={"reviewer_id": "analyst"},
+            source_frame_end=12,
+            source_frame_start=10,
+            source_video_hash="source",
+            task_id="task",
+        )
 
-    try:
-        review_corrections.interpolate_correction_boxes(correction)
-    except ValueError as exc:
-        assert "cannot extrapolate" in str(exc)
-    else:  # pragma: no cover
-        raise AssertionError("correction extrapolation was accepted")
+
+def test_correction_linear_preview_contract_requires_exact_endpoint_keyframes() -> None:
+    with pytest.raises(ValueError, match="end keyframe at source frame 1848"):
+        review_corrections.ReviewCorrection(
+            case_id="day",
+            category=CATEGORY_OTHER_SENSITIVE,
+            configuration_freeze_hash="hash",
+            interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+            keyframes=(review_corrections.CorrectionKeyframe(1828, (10, 10, 30, 20)),),
+            operation=review_corrections.OP_ADD,
+            reason="observed invalid interpolation draft",
+            reviewer_identity={"reviewer_id": "analyst"},
+            source_frame_end=1848,
+            source_frame_start=1828,
+            source_video_hash="source",
+            task_id="task",
+        )
 
 
 @pytest.mark.parametrize(
     (
         "name",
+        "category",
         "start",
         "end",
         "method",
@@ -587,7 +605,8 @@ def test_correction_interpolation_rejects_extrapolation() -> None:
     ),
     [
         (
-            "single",
+            "face_single",
+            CATEGORY_FACE,
             0,
             0,
             review_corrections.INTERPOLATION_NONE,
@@ -597,17 +616,41 @@ def test_correction_interpolation_rejects_extrapolation() -> None:
             (10, 10, 70, 50),
         ),
         (
-            "fixed",
+            "plate_single",
+            CATEGORY_PLATE,
+            0,
+            0,
+            review_corrections.INTERPOLATION_NONE,
+            ((0, (10, 10, 70, 50)),),
+            [0],
+            0,
+            (10, 10, 70, 50),
+        ),
+        (
+            "other_single",
+            CATEGORY_OTHER_SENSITIVE,
+            0,
+            0,
+            review_corrections.INTERPOLATION_NONE,
+            ((0, (10, 10, 70, 50)),),
+            [0],
+            0,
+            (10, 10, 70, 50),
+        ),
+        (
+            "other_fixed",
+            CATEGORY_OTHER_SENSITIVE,
             1,
             3,
-            review_corrections.INTERPOLATION_LINEAR,
+            review_corrections.INTERPOLATION_NONE,
             ((1, (10, 10, 70, 50)),),
             [1, 2, 3],
             2,
             (10, 10, 70, 50),
         ),
         (
-            "interpolate",
+            "other_interpolate",
+            CATEGORY_OTHER_SENSITIVE,
             1,
             3,
             review_corrections.INTERPOLATION_LINEAR,
@@ -621,6 +664,7 @@ def test_correction_interpolation_rejects_extrapolation() -> None:
 def test_saved_manual_correction_materializes_latest_reviewed_regions_and_pixels(
     tmp_path: Path,
     name: str,
+    category: str,
     start: int,
     end: int,
     method: str,
@@ -650,7 +694,7 @@ def test_saved_manual_correction_materializes_latest_reviewed_regions_and_pixels
     session_dir = create_session(package, manifest)
     correction = review_corrections.ReviewCorrection(
         case_id=manifest.case_id,
-        category=CATEGORY_PLATE,
+        category=category,
         configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
         interpolation_method=method,
         keyframes=tuple(
@@ -682,6 +726,7 @@ def test_saved_manual_correction_materializes_latest_reviewed_regions_and_pixels
     assert [
         record.source_record["source_frame"] for record in correction_regions
     ] == expected_frames
+    assert {record.category for record in correction_regions} == {category}
     assert provenance["manual_correction_count"] == 1
 
     materialization = review_working_state.materialize_latest_reviewed(
@@ -1105,6 +1150,31 @@ def test_workspace_server_exposes_versioned_api_contract(tmp_path: Path) -> None
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_manual_redaction_category_contract_is_shared() -> None:
+    backend_categories = list(MANUAL_REDACTION_CATEGORIES)
+    generated_schema = review_api_contract.final_review_workspace_schema()
+    checked_in_schema = json.loads(
+        Path("docs/api/final_review_workspace_v1.schema.json").read_text(encoding="utf-8")
+    )
+    frontend_domain = Path("frontend/src/types/domain.ts").read_text(encoding="utf-8")
+    frontend_api_types = Path("frontend/src/types/api.ts").read_text(encoding="utf-8")
+    frontend_match = re.search(
+        r"MANUAL_REDACTION_CATEGORIES\s*=\s*\[(?P<values>[^\]]+)\]",
+        frontend_domain,
+    )
+
+    assert frontend_match is not None
+    frontend_categories = re.findall(r"'([^']+)'", frontend_match.group("values"))
+    assert generated_schema["x-manual-redaction-categories"] == backend_categories
+    assert generated_schema["definitions"]["ManualPrivacyCategory"]["enum"] == backend_categories
+    assert checked_in_schema["definitions"]["ManualPrivacyCategory"]["enum"] == backend_categories
+    assert frontend_categories == backend_categories
+    assert (
+        "export type ManualPrivacyCategory = "
+        + " | ".join(json.dumps(item) for item in backend_categories)
+    ) in frontend_api_types
 
 
 def test_noop_entity_policy_skips_materialization_job(tmp_path: Path) -> None:
@@ -2661,6 +2731,233 @@ def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> 
         server.server_close()
 
 
+@pytest.mark.parametrize(
+    ("name", "category", "start", "end", "method", "keyframes", "expected_frames"),
+    [
+        (
+            "face_single",
+            CATEGORY_FACE,
+            0,
+            0,
+            review_corrections.INTERPOLATION_NONE,
+            [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            [0],
+        ),
+        (
+            "plate_single",
+            CATEGORY_PLATE,
+            0,
+            0,
+            review_corrections.INTERPOLATION_NONE,
+            [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            [0],
+        ),
+        (
+            "other_single",
+            CATEGORY_OTHER_SENSITIVE,
+            0,
+            0,
+            review_corrections.INTERPOLATION_NONE,
+            [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            [0],
+        ),
+        (
+            "other_fixed",
+            CATEGORY_OTHER_SENSITIVE,
+            1,
+            3,
+            review_corrections.INTERPOLATION_NONE,
+            [{"bbox_xyxy": [18, 18, 58, 38], "source_frame": 1}],
+            [1, 2, 3],
+        ),
+        (
+            "other_interpolate",
+            CATEGORY_OTHER_SENSITIVE,
+            1,
+            3,
+            review_corrections.INTERPOLATION_LINEAR,
+            [
+                {"bbox_xyxy": [18, 18, 58, 38], "source_frame": 1},
+                {"bbox_xyxy": [26, 22, 66, 42], "source_frame": 3},
+            ],
+            [1, 2, 3],
+        ),
+    ],
+)
+def test_workspace_server_accepts_manual_correction_categories_and_modes(
+    tmp_path: Path,
+    name: str,
+    category: str,
+    start: int,
+    end: int,
+    method: str,
+    keyframes: list[dict[str, Any]],
+    expected_frames: list[int],
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/v1/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": category,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": method,
+            "keyframe_boxes": keyframes,
+            "operation": review_corrections.OP_ADD,
+            "reason": f"{name} reviewed",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": end,
+            "source_frame_start": start,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": f"task_{name}",
+        }
+
+        preview_response = post_json(
+            f"{base_url}/api/v1/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": f"{name} preview",
+                "session_id": session["session_id"],
+            },
+        )
+        correction_response = post_json(
+            f"{base_url}/api/v1/corrections",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction
+                | {
+                    "reviewer_identity": {
+                        "display_name": "Analyst",
+                        "reviewer_id": "analyst@example.test",
+                        "session_id": session["session_id"],
+                    }
+                },
+                "preview_token": preview_response["preview"]["preview_token"],
+                "reason": f"{name} save",
+                "session_id": session["session_id"],
+            },
+        )
+        session_dir = package / "sessions" / session["session_id"]
+        state = review_working_state.derive_working_state(package, session_dir)
+        effective_regions, _provenance = review_working_state.compute_effective_privacy_regions(
+            package,
+            session_dir,
+            case_id=manifest.case_id,
+        )
+        correction_regions = [
+            record for record in effective_regions if record.provenance == "reviewed_correction"
+        ]
+        with urllib.request.urlopen(
+            f"{base_url}/api/v1/session-state?session_id={session['session_id']}",
+            timeout=5,
+        ) as response:
+            reloaded = json.loads(response.read().decode("utf-8"))
+
+        assert preview_response["ok"] is True
+        assert correction_response["ok"] is True
+        assert correction_response["event"]["after_state"]["category"] == category
+        assert correction_response["verification_task"]["category"] == category
+        if category == CATEGORY_OTHER_SENSITIVE:
+            assert "Other sensitive region" in correction_response["verification_task"]["title"]
+        assert [
+            record.source_record["source_frame"] for record in correction_regions
+        ] == expected_frames
+        assert {record.category for record in correction_regions} == {category}
+        assert state["active_correction_ids"] == [
+            correction_response["event"]["after_state"]["correction_id"]
+        ]
+        assert reloaded["working_state"]["manual_corrections"][-1]["category"] == category
+
+        if name == "other_single":
+            reset_response = post_json(
+                f"{base_url}/api/v1/checkpoints/reset",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "case_id": manifest.case_id,
+                    "session_id": session["session_id"],
+                },
+            )
+            reset_regions, _reset_provenance = (
+                review_working_state.compute_effective_privacy_regions(
+                    package,
+                    session_dir,
+                    case_id=manifest.case_id,
+                )
+            )
+            assert reset_response["ok"] is True
+            assert reset_response["working_state"]["active_correction_ids"] == []
+            assert [
+                record for record in reset_regions if record.provenance == "reviewed_correction"
+            ] == []
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_workspace_server_rejects_interpolation_preview_without_end_keyframe(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/v1/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_OTHER_SENSITIVE,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_LINEAR,
+            "keyframe_boxes": [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "invalid interpolation preview",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 3,
+            "source_frame_start": 0,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_invalid_interpolation",
+        }
+
+        status, body = post_json_error(
+            f"{base_url}/api/v1/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "invalid interpolation preview",
+                "session_id": session["session_id"],
+            },
+        )
+
+        assert status == 400
+        assert body["ok"] is False
+        assert "end keyframe at source frame 3" in body["error"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_workspace_server_rejects_unpreviewed_manual_correction_save(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest = synthetic_case_manifest(package)
@@ -2750,7 +3047,7 @@ def test_workspace_server_rejects_stale_manual_correction_preview_token(
             },
         )
         changed = dict(correction)
-        changed["source_frame_end"] = 1
+        changed["keyframe_boxes"] = [{"bbox_xyxy": [22, 22, 60, 40], "source_frame": 0}]
 
         status, body = post_json_error(
             f"{base_url}/api/corrections",

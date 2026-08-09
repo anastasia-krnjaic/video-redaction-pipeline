@@ -70,5 +70,6 @@ export function ReviewTaskCard({ manifest, onDecision, onSelect, pending, select
 function categoryLabel(category: string): string {
   if (category === 'face') return 'Person';
   if (category === 'license_plate') return 'Plate';
+  if (category === 'other_sensitive') return 'Other sensitive region';
   return category;
 }

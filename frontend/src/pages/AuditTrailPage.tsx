@@ -51,7 +51,7 @@ function humanEvent(event: AuditEvent): string {
     return `${String(after.label || after.display_name || 'Review object')} set to ${policyText(String(after.current_policy || after.privacy_action || 'review_required'), String(after.category || ''))}`;
   }
   if (event.event_type === 'manual_correction_saved' || event.event_type === 'correction_saved') {
-    return `Manual correction saved, frames ${String(after.source_frame_start ?? '?')}-${String(after.source_frame_end ?? '?')}`;
+    return `Manual ${categoryText(String(after.category || ''))} correction saved, frames ${String(after.source_frame_start ?? '?')}-${String(after.source_frame_end ?? '?')}`;
   }
   if (event.event_type === 'checkpoint_created') return `Checkpoint "${String(after.name || 'Checkpoint')}" created`;
   if (event.event_type === 'restore_checkpoint') return `Restored checkpoint "${String(after.name || 'Checkpoint')}"`;
@@ -74,4 +74,11 @@ function policyText(policy: string, category: string): string {
   if (policy === 'keep_visible') return 'Keep visible';
   if (policy === 'not_sensitive') return category === 'face' ? 'Not a person' : 'Not a plate';
   return 'Needs review';
+}
+
+function categoryText(category: string): string {
+  if (category === 'face') return 'Face / person';
+  if (category === 'license_plate') return 'Plate';
+  if (category === 'other_sensitive') return 'Other sensitive region';
+  return 'privacy';
 }

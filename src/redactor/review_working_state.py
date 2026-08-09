@@ -17,6 +17,7 @@ from redactor.privacy_records import (
     CATEGORY_FACE,
     CATEGORY_PLATE,
     PrivacyRegionRecord,
+    manual_redaction_category_label,
     stable_hash,
 )
 from redactor.review_corrections import (
@@ -1733,6 +1734,7 @@ def create_correction_verification_task(
     publication_status: str = "waiting",
 ) -> dict[str, Any]:
     plan = dict(materialization_plan or {})
+    category_label = manual_redaction_category_label(correction.category)
     return {
         "accepted_working_state_revision": accepted_working_state_revision,
         "actionable": False,
@@ -1758,8 +1760,8 @@ def create_correction_verification_task(
         "target_effective_region_count": plan.get("after_effective_region_count"),
         "target_effective_regions_hash": plan.get("after_effective_regions_hash"),
         "technical_only": False,
-        "title": "Verify saved correction",
-        "what_happened": "A reviewer supplied manual correction geometry.",
+        "title": f"Verify saved {category_label} correction",
+        "what_happened": f"A reviewer supplied manual {category_label} redaction geometry.",
         "what_to_inspect": "Waiting for Latest reviewed media.",
     }
 
@@ -2296,8 +2298,13 @@ def human_event_label(event_type: str, after: dict[str, Any]) -> str:
     if event_type == "bulk_entity_policy_changed":
         return f"Bulk object policy set to {policy_label(str(after.get('policy') or ''), None)}"
     if event_type in {EVENT_MANUAL_CORRECTION_SAVED, EVENT_CORRECTION_SAVED_LEGACY}:
+        category = str(after.get("category") or "privacy")
+        try:
+            category = manual_redaction_category_label(category)
+        except ValueError:
+            pass
         return (
-            f"Manual {after.get('category') or 'privacy'} correction saved, "
+            f"Manual {category} correction saved, "
             f"frames {after.get('source_frame_start')}-{after.get('source_frame_end')}"
         )
     if event_type == "checkpoint_created":

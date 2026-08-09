@@ -11,7 +11,9 @@ from redactor.privacy_records import (
     APPROVAL_ACCEPTED,
     CATEGORY_FACE,
     CATEGORY_PLATE,
+    MANUAL_REDACTION_CATEGORIES,
     PrivacyRegionRecord,
+    normalize_manual_redaction_category,
     stable_hash,
 )
 from redactor.review_corrections import (
@@ -464,7 +466,7 @@ def human_reviewed_metrics(
                     frame_by_category.get(category, set())
                 ),
             }
-            for category in sorted({CATEGORY_FACE, CATEGORY_PLATE} | set(category_counts))
+            for category in sorted(set(MANUAL_REDACTION_CATEGORIES) | set(category_counts))
         },
         "combined": {
             "frames_containing_both": len(
@@ -556,11 +558,7 @@ def copy_reference_media(src: Path, dst: Path, *, overwrite: bool = False) -> di
 
 
 def normalize_category(category: str) -> str:
-    if category in {"plate", "license_plate"}:
-        return CATEGORY_PLATE
-    if category == "face":
-        return CATEGORY_FACE
-    raise ValueError(f"unsupported privacy category: {category}")
+    return normalize_manual_redaction_category(category)
 
 
 def load_json(path: Path) -> dict[str, Any]:
