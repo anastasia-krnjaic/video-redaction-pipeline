@@ -69,18 +69,67 @@ class FakeAdapter:
     ) -> case_pipeline.CategoryRunResult:
         assert context.source_identity.sha256 == "source-sha256"
         assert options.overwrite is True
+        review_artifact = self.write_review_tasks(context)
         return case_pipeline.CategoryRunResult(
             category=self.category,
             privacy_regions=(self.record,),
+            artifacts=(review_artifact,),
             stages=(
                 case_pipeline.StageStatus(
                     category=self.category,
                     stage=case_pipeline.STAGE_PRIVACY_REGIONS,
                     status=case_pipeline.STATUS_SUCCEEDED,
+                    artifacts=(review_artifact,),
                     summary={"fake": True},
                 ),
             ),
             summary={"fake_category": self.category},
+        )
+
+    def write_review_tasks(
+        self,
+        context: case_pipeline.CaseContext,
+    ) -> case_pipeline.ArtifactReference:
+        if self.category == CATEGORY_FACE:
+            path = context.output_dir / "review" / "review_tasks.json"
+            payload = {
+                "reviewer_tasks": [
+                    {
+                        "category": "action_required",
+                        "case_id": context.case_id,
+                        "final_export_blocking": True,
+                        "frame_end": self.record.source_frame,
+                        "frame_start": self.record.source_frame,
+                        "object_id": self.record.object_id,
+                        "reviewer_task_id": "face_review_0001",
+                        "title": "Face review",
+                    }
+                ],
+                "schema_version": "test_face_review_tasks.v1",
+            }
+        else:
+            path = context.output_dir / CATEGORY_PLATE / "review" / "review_tasks.json"
+            payload = {
+                "schema_version": "test_plate_review_tasks.v1",
+                "tasks": [
+                    {
+                        "blocking": True,
+                        "frame_end": self.record.source_frame,
+                        "frame_start": self.record.source_frame,
+                        "review_task_id": "plate_review_0001",
+                        "severity": "blocker",
+                        "title": "Plate review",
+                        "track_uids": [self.record.object_id],
+                    }
+                ],
+            }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        return case_pipeline.artifact_reference(
+            context.output_dir,
+            path,
+            role="review_tasks",
+            category=self.category,
         )
 
 
@@ -140,6 +189,7 @@ def test_case_pipeline_writes_one_manifest_and_combined_render_plan(
         render_manifest.write_text("{}", encoding="utf-8")
         validation.write_text("{}", encoding="utf-8")
         summary.write_text("{}", encoding="utf-8")
+        output_hash = case_pipeline.media.sha256_file(output_video)
         return {
             "artifacts": (
                 case_pipeline.artifact_reference(
@@ -163,7 +213,12 @@ def test_case_pipeline_writes_one_manifest_and_combined_render_plan(
                     role="combined_automatic_preview_summary",
                 ),
             ),
-            "manifest": {"output_video": "combined_preview/automatic_preview.mp4"},
+            "manifest": {
+                "output_video": "combined_preview/automatic_preview.mp4",
+                "output_video_hash": output_hash,
+                "rendered_region_count": len(records),
+                "source_video_hash": context.source_identity.sha256,
+            },
             "summary": {
                 "rendered_frame_count": 2,
                 "rendered_region_count": len(records),
@@ -205,6 +260,10 @@ def test_case_pipeline_writes_one_manifest_and_combined_render_plan(
     assert manifest["selected_categories"] == [CATEGORY_FACE, CATEGORY_PLATE]
     assert set(manifest["category_profiles"]) == {CATEGORY_FACE, CATEGORY_PLATE}
     assert manifest["case_phase"] == case_pipeline.CASE_PHASE_AUTOMATIC_PREVIEW_READY
+    assert manifest["review"]["mixed_review_status"] == case_pipeline.STATUS_READY
+    assert manifest["review"]["entity_count"] == 2
+    assert manifest["review"]["task_count"] == 2
+    assert manifest["review_session"]["status"] == case_pipeline.STATUS_NOT_STARTED
     assert manifest["latest_reviewed"]["status"] == case_pipeline.STATUS_NOT_RUN
     assert manifest["finalization"]["status"] == case_pipeline.STATUS_NOT_RUN
     assert manifest["evaluation"]["status"] == case_pipeline.STATUS_NOT_RUN
@@ -220,11 +279,45 @@ def test_case_pipeline_writes_one_manifest_and_combined_render_plan(
         "combined_automatic_preview_manifest",
         "combined_automatic_preview_validation",
         "effective_privacy_regions",
+        "mixed_review_entities",
+        "mixed_review_media_inventory",
+        "mixed_review_session_state",
+        "mixed_review_tasks",
+        "mixed_review_validation",
+        "mixed_review_workspace_summary",
+        "review_workspace_manifest",
         "render_plan",
         "source_identity",
     } <= artifact_roles
+    assert "mixed_review_manifest" not in artifact_roles
     assert all(item["sha256"] for item in manifest["artifacts"])
     assert all((tmp_path / "case" / item["path"]).exists() for item in manifest["artifacts"])
+    workspace_root = tmp_path / "case" / "review_workspace"
+    workspace_manifest = json.loads((workspace_root / "workspace_manifest.json").read_text())
+    category_run_identities = workspace_manifest["category_run_manifest_identities"]
+    assert not (workspace_root / "mixed_review_manifest.json").exists()
+    assert set(category_run_identities) == {CATEGORY_FACE, CATEGORY_PLATE}
+    assert (
+        manifest["review"]["category_run_manifest_identities"]
+        == category_run_identities
+    )
+    assert (
+        manifest["review"]["category_run_manifest_identity_hash"]
+        == workspace_manifest["category_run_manifest_identity_hash"]
+    )
+    assert workspace_manifest["automatic_preview"]["region_count"] == 2
+    assert workspace_manifest["latest_reviewed_publication"]["status"] == "deferred"
+    assert manifest["review"]["latest_reviewed_publication"]["status"] == "deferred"
+    entities = json.loads((workspace_root / "review_entities.json").read_text())
+    tasks = json.loads((workspace_root / "reviewer_tasks.json").read_text())
+    assert workspace_manifest["lifecycle"]["review_workspace"] == "ready"
+    assert workspace_manifest["lifecycle"]["review_session"]["status"] == "not_started"
+    assert {entity["category"] for entity in entities["cases"]["case"]} == {
+        CATEGORY_FACE,
+        CATEGORY_PLATE,
+    }
+    assert {task["category"] for task in tasks["tasks"]} == {CATEGORY_FACE, CATEGORY_PLATE}
+    assert all(task["entity_id"] for task in tasks["tasks"])
 
 
 def test_manifest_artifact_references_fail_closed(tmp_path: Path) -> None:

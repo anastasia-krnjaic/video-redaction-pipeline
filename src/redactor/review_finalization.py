@@ -5,7 +5,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from redactor import case_manifests, media, privacy_rendering, rendering
+from redactor import case_ids, case_manifests, media, privacy_rendering, rendering
 from redactor.detection import rational_to_float
 from redactor.privacy_records import (
     APPROVAL_ACCEPTED,
@@ -50,6 +50,7 @@ def finalization_blockers(
     blockers: list[str] = []
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
+    case_id = case_ids.validate_case_id(case_id)
     from redactor import review_working_state
 
     working_state = review_working_state.derive_working_state(package_root, session_dir)
@@ -95,12 +96,14 @@ def finalization_blockers(
         blockers.append(f"{case_id}: full-video sweep has not been acknowledged")
 
     blockers.extend(object_policy_blockers(working_state, decisions, case_id=case_id))
+    if review_working_state.latest_reviewed_publication_deferred(package_root):
+        blockers.append(f"{case_id}: latest_reviewed_publication_deferred")
 
     chain = validate_event_hash_chain(session_dir)
     if not chain["passed"]:
         blockers.extend(f"event log: {error}" for error in chain["errors"])
 
-    case_manifest_path = package_root / "cases" / f"{case_id}.json"
+    case_manifest_path = case_ids.case_manifest_path(package_root, case_id)
     if not case_manifest_path.exists():
         blockers.append(f"{case_id}: missing case manifest")
     else:
@@ -125,7 +128,11 @@ def finalization_blockers(
     else:
         blockers.append("missing configuration_freeze.json")
 
-    region_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
+    region_path = case_ids.contained_path(
+        package_root,
+        "regions",
+        f"{case_id}_current_regions.jsonl",
+    )
     if not region_path.exists():
         blockers.append(f"{case_id}: current privacy-region provenance is missing")
 
@@ -204,6 +211,7 @@ def finalize_reviewed_case(
     overwrite: bool = False,
 ) -> dict[str, Any]:
     package_root = package_root.resolve()
+    case_id = case_ids.validate_case_id(case_id)
     blockers = finalization_blockers(
         package_root=package_root,
         case_id=case_id,
@@ -217,7 +225,7 @@ def finalize_reviewed_case(
             "schema_version": SCHEMA_VERSION,
         }
 
-    manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
+    manifest = case_manifests.load_case_manifest(case_ids.case_manifest_path(package_root, case_id))
     source_path = resolve_package_path(package_root, manifest.source_path)
     if source_path is None:
         raise ValueError("case source path is required for finalization")

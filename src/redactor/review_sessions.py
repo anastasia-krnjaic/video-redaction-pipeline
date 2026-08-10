@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from redactor import media
+from redactor import case_ids, media
 from redactor.privacy_records import stable_hash
 from redactor.review_corrections import ReviewCorrection, write_correction_jsonl
 
@@ -80,6 +80,7 @@ class ReviewSession:
     configuration_freeze_hash: str
     case_manifest_hashes: dict[str, str]
     source_hashes: dict[str, str]
+    workspace_identity_hashes: dict[str, str] | None = None
     user_agent: str | None = None
     hostname: str | None = None
     session_status: str = "active"
@@ -100,6 +101,7 @@ class ReviewSession:
             "source_revision": self.source_revision,
             "started_at_utc": self.started_at_utc,
             "user_agent": self.user_agent,
+            "workspace_identity_hashes": self.workspace_identity_hashes or {},
         }
 
 
@@ -111,6 +113,7 @@ def create_review_session(
     configuration_freeze_hash: str,
     case_manifest_hashes: dict[str, str],
     source_hashes: dict[str, str],
+    workspace_identity_hashes: dict[str, str] | None = None,
     user_agent: str | None = None,
     include_hostname: bool = False,
 ) -> ReviewSession:
@@ -126,6 +129,7 @@ def create_review_session(
         source_revision=source_revision,
         started_at_utc=media.utc_timestamp(),
         user_agent=user_agent,
+        workspace_identity_hashes=dict(sorted((workspace_identity_hashes or {}).items())),
     )
     session_dir = session_directory(package_root, session.session_id)
     session_dir.mkdir(parents=True, exist_ok=False)
@@ -348,13 +352,14 @@ def append_event(
     note: str | None,
     application_hashes: dict[str, str],
 ) -> dict[str, Any]:
+    validated_case_id = None if case_id is None else case_ids.validate_case_id(case_id)
     previous_hash = last_event_hash(session_dir)
     payload = {
         "actor": actor,
         "after_state": after_state,
         "application_hashes": dict(sorted(application_hashes.items())),
         "before_state": before_state,
-        "case_id": case_id,
+        "case_id": validated_case_id,
         "event_id": f"event_{uuid.uuid4().hex}",
         "event_type": event_type,
         "note": note,

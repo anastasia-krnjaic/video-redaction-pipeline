@@ -10,7 +10,7 @@ from typing import Any
 
 import cv2 as cv
 
-from redactor import case_manifests, media, privacy_entities, privacy_rendering, rendering
+from redactor import case_ids, case_manifests, media, privacy_entities, privacy_rendering, rendering
 from redactor.detection import rational_to_float
 from redactor.privacy_records import (
     APPROVAL_ACCEPTED,
@@ -38,12 +38,90 @@ from redactor.review_sessions import (
 WORKING_STATE_SCHEMA_VERSION = "review_working_state.v1"
 CHECKPOINT_SCHEMA_VERSION = "review_checkpoint.v1"
 PREVIEW_TOKEN_SCHEMA_VERSION = "correction_preview_token.v2"
+LATEST_REVIEWED_PUBLICATION_DEFERRED_ERROR_CODE = "latest_reviewed_publication_deferred"
+LATEST_REVIEWED_PUBLICATION_DEFERRED_REASON = (
+    "mixed_reviewed_region_compilation_not_implemented"
+)
 
 POLICY_REDACT = privacy_entities.POLICY_REDACT
 POLICY_KEEP_VISIBLE = privacy_entities.POLICY_KEEP_VISIBLE
 POLICY_NOT_SENSITIVE = privacy_entities.POLICY_NOT_SENSITIVE
 POLICY_REVIEW_REQUIRED = privacy_entities.POLICY_REVIEW_REQUIRED
 SUPPRESSING_POLICIES = {POLICY_KEEP_VISIBLE, POLICY_NOT_SENSITIVE}
+
+
+def safe_case_manifest_path(package_root: Path, case_id: str) -> Path:
+    return case_ids.case_manifest_path(package_root, case_id)
+
+
+def require_safe_case_manifest_path(package_root: Path, case_id: str) -> Path:
+    path = safe_case_manifest_path(package_root, case_id)
+    if not path.exists():
+        raise FileNotFoundError(f"case manifest not found: {case_ids.validate_case_id(case_id)}")
+    return path
+
+
+def safe_case_region_path(package_root: Path, case_id: str) -> Path:
+    return case_ids.contained_path(
+        package_root,
+        "regions",
+        f"{case_ids.validate_case_id(case_id)}_current_regions.jsonl",
+    )
+
+
+def workspace_manifest_payload(package_root: Path) -> dict[str, Any]:
+    path = package_root.resolve() / "workspace_manifest.json"
+    if not path.exists():
+        return {}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def latest_reviewed_publication_state(package_root: Path) -> dict[str, Any]:
+    manifest = workspace_manifest_payload(package_root)
+    publication = manifest.get("latest_reviewed_publication")
+    if isinstance(publication, dict):
+        return dict(publication)
+    return {"status": "supported", "schema_version": "latest_reviewed_publication_capability.v1"}
+
+
+def latest_reviewed_publication_deferred(package_root: Path) -> bool:
+    return latest_reviewed_publication_state(package_root).get("status") == "deferred"
+
+
+def latest_reviewed_publication_deferred_plan(
+    *,
+    case_id: str,
+    before_digest: dict[str, Any],
+    after_digest: dict[str, Any],
+    change_summary: dict[str, Any],
+    operation: str,
+    published_hash: str | None,
+) -> dict[str, Any]:
+    after_hash = str(after_digest.get("effective_regions_hash") or "")
+    before_hash = str(before_digest.get("effective_regions_hash") or "")
+    return {
+        "affected_source_frame_intervals": change_summary["changed_source_frame_intervals"],
+        "after_effective_region_count": int(after_digest.get("region_count") or 0),
+        "after_effective_regions_hash": after_hash,
+        "before_effective_region_count": int(before_digest.get("region_count") or 0),
+        "before_effective_regions_hash": before_hash,
+        "case_id": case_id,
+        "changed_source_frame_count": change_summary["changed_source_frame_count"],
+        "changed_source_frame_intervals": change_summary["changed_source_frame_intervals"],
+        "changed_source_frame_percentage": change_summary["changed_source_frame_percentage"],
+        "error_code": LATEST_REVIEWED_PUBLICATION_DEFERRED_ERROR_CODE,
+        "full_case_fallback_required": False,
+        "latest_reviewed_publication_reason": LATEST_REVIEWED_PUBLICATION_DEFERRED_REASON,
+        "latest_reviewed_publication_status": "deferred",
+        "materialization_required": False,
+        "materialization_strategy": "deferred",
+        "operation": operation,
+        "planned_frames_to_encode": 0,
+        "planned_frames_to_render": 0,
+        "publication_status": "deferred",
+        "published_effective_regions_hash": published_hash,
+        "schema_version": "materialization_planning_result.v1",
+    }
 
 
 def derive_working_state(package_root: Path, session_dir: Path) -> dict[str, Any]:
@@ -97,9 +175,16 @@ def derive_working_state(package_root: Path, session_dir: Path) -> dict[str, Any
 def package_baseline(package_root: Path) -> dict[str, Any]:
     cases: dict[str, Any] = {}
     for case_path in sorted((package_root / "cases").glob("*.json")):
+        case_ids.validate_case_id(case_path.stem)
         manifest = case_manifests.load_case_manifest(case_path)
-        base_region_path = package_root / "regions" / f"{manifest.case_id}_current_regions.jsonl"
-        cases[manifest.case_id] = {
+        manifest_case_id = case_ids.validate_case_id(manifest.case_id)
+        if manifest_case_id != case_path.stem:
+            raise ValueError(
+                f"case manifest ID {manifest_case_id!r} does not match file stem "
+                f"{case_path.stem!r}"
+            )
+        base_region_path = safe_case_region_path(package_root, manifest_case_id)
+        cases[manifest_case_id] = {
             "automatic_regions": base_region_path.relative_to(package_root).as_posix()
             if base_region_path.exists()
             else None,
@@ -585,6 +670,20 @@ def correction_verification_status(
 ) -> dict[str, Any]:
     if task.get("normal_task_class") != "correction_verification":
         return {"actionable": True, "publication_status": "not_applicable"}
+    if (
+        task.get("publication_status") == "deferred"
+        or task.get("latest_reviewed_publication_status") == "deferred"
+        or latest_reviewed_publication_deferred(package_root)
+    ):
+        return {
+            "actionable": True,
+            "decision_state": "pending",
+            "publication_status": "deferred",
+            "reason": (
+                "Correction saved; reviewed output publication is deferred until the "
+                "reviewed-region compiler is available."
+            ),
+        }
     case_id = str(task.get("case_id") or "")
     correction_id = correction_id_from_verification_task(task)
     latest = dict(materialized.get(case_id) or {})
@@ -689,8 +788,9 @@ def decorate_correction_verification_tasks(
         if status.get("actionable"):
             task["allowed_actions"] = ["looks_correct", "privacy_leak", "uncertain_escalate"]
             task["decision_state"] = "pending"
-            task["what_to_inspect"] = (
-                "Confirm the published Latest reviewed media protects the intended region."
+            task["what_to_inspect"] = str(
+                status.get("reason")
+                or "Confirm the published Latest reviewed media protects the intended region."
             )
         else:
             task["allowed_actions"] = []
@@ -796,8 +896,9 @@ def compute_effective_privacy_regions(
 
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
-    manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
-    base_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
+    case_id = case_ids.validate_case_id(case_id)
+    manifest = case_manifests.load_case_manifest(safe_case_manifest_path(package_root, case_id))
+    base_path = safe_case_region_path(package_root, case_id)
     base_regions = (
         review_finalization.load_privacy_region_records(base_path) if base_path.exists() else []
     )
@@ -877,7 +978,9 @@ def effective_privacy_region_digest(
 def baseline_effective_privacy_region_digest(package_root: Path, *, case_id: str) -> dict[str, Any]:
     from redactor import review_finalization
 
-    base_path = package_root.resolve() / "regions" / f"{case_id}_current_regions.jsonl"
+    package_root = package_root.resolve()
+    case_id = case_ids.validate_case_id(case_id)
+    base_path = safe_case_region_path(package_root, case_id)
     regions = (
         review_finalization.load_privacy_region_records(base_path) if base_path.exists() else []
     )
@@ -971,7 +1074,8 @@ def effective_region_change_summary(
     before_digest: dict[str, Any],
     after_digest: dict[str, Any],
 ) -> dict[str, Any]:
-    manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
+    case_id = case_ids.validate_case_id(case_id)
+    manifest = case_manifests.load_case_manifest(safe_case_manifest_path(package_root, case_id))
     before_frame_hashes = {
         str(frame): str(value)
         for frame, value in dict(before_digest.get("frame_region_hashes") or {}).items()
@@ -1228,7 +1332,14 @@ def materialize_latest_reviewed(
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
     ensure_session_layout(session_dir)
-    manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
+    case_id = case_ids.validate_case_id(case_id)
+    if latest_reviewed_publication_deferred(package_root):
+        raise ValueError(
+            f"{LATEST_REVIEWED_PUBLICATION_DEFERRED_ERROR_CODE}: "
+            "decisions and corrections are persisted, but reviewed output publication "
+            "is deferred until the reviewed-region compiler is available"
+        )
+    manifest = case_manifests.load_case_manifest(safe_case_manifest_path(package_root, case_id))
     source_path = review_finalization.resolve_package_path(package_root, manifest.source_path)
     if source_path is None or not source_path.exists():
         raise ValueError(f"{case_id}: source video is missing")
@@ -1240,7 +1351,7 @@ def materialize_latest_reviewed(
     )
     effective_duration_ms = int((time.monotonic() - effective_start) * 1000)
     region_hash = stable_hash([record.to_dict() for record in final_regions])
-    base_region_path = package_root / "regions" / f"{case_id}_current_regions.jsonl"
+    base_region_path = safe_case_region_path(package_root, case_id)
     base_region_hash = (
         stable_hash(
             [
@@ -1504,8 +1615,9 @@ def render_correction_preview(
 
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
+    correction_case_id = case_ids.validate_case_id(correction.case_id)
     manifest = case_manifests.load_case_manifest(
-        package_root / "cases" / f"{correction.case_id}.json"
+        safe_case_manifest_path(package_root, correction_case_id)
     )
     source_path = review_finalization.resolve_package_path(package_root, manifest.source_path)
     if source_path is None or not source_path.exists():
@@ -1520,7 +1632,7 @@ def render_correction_preview(
     local_start = max(0, correction.source_frame_start - manifest.source_frame_start)
     local_end = max(local_start, correction.source_frame_end - manifest.source_frame_start)
     fps = rational_to_float(manifest.fps) or 30.0
-    preview_dir = session_dir / "previews" / correction.case_id / correction.correction_id
+    preview_dir = session_dir / "previews" / correction_case_id / correction.correction_id
     preview_dir.mkdir(parents=True, exist_ok=True)
     original_preview = preview_dir / "original_interval.mp4"
     corrected_preview = preview_dir / "corrected_interval.mp4"
@@ -1567,14 +1679,21 @@ def render_correction_preview(
     )
     token_path = preview_token_path(session_dir, token_payload["preview_token"])
     write_json(token_path, token_payload)
+    publication_deferred = latest_reviewed_publication_deferred(package_root)
     return {
         "audio_handling": audio_handling,
         "corrected_preview": corrected_preview.relative_to(package_root).as_posix(),
+        "diagnostic_preview": True,
         "draft_hash": token_payload["draft_hash"],
         "effective_regions_hash": effective_regions_hash,
         "frame_end": correction.source_frame_end,
         "frame_start": correction.source_frame_start,
-        "latest_reviewed": corrected_preview.relative_to(package_root).as_posix(),
+        "latest_reviewed": None
+        if publication_deferred
+        else corrected_preview.relative_to(package_root).as_posix(),
+        "latest_reviewed_publication_status": "deferred"
+        if publication_deferred
+        else "preview_only",
         "ok": True,
         "original_preview": original_preview.relative_to(package_root).as_posix(),
         "preview_sha256": preview_hash,
@@ -1735,10 +1854,16 @@ def create_correction_verification_task(
 ) -> dict[str, Any]:
     plan = dict(materialization_plan or {})
     category_label = manual_redaction_category_label(correction.category)
+    deferred = (
+        publication_status == "deferred"
+        or plan.get("latest_reviewed_publication_status") == "deferred"
+    )
     return {
         "accepted_working_state_revision": accepted_working_state_revision,
-        "actionable": False,
-        "allowed_actions": [],
+        "actionable": deferred,
+        "allowed_actions": ["looks_correct", "privacy_leak", "uncertain_escalate"]
+        if deferred
+        else [],
         "blocking": True,
         "case_id": correction.case_id,
         "category": correction.category,
@@ -1746,8 +1871,9 @@ def create_correction_verification_task(
         "changed_frame_intervals": plan.get("changed_source_frame_intervals") or [],
         "correction_id": correction.correction_id,
         "correction_required": False,
-        "decision_state": "waiting_for_latest_reviewed",
+        "decision_state": "pending" if deferred else "waiting_for_latest_reviewed",
         "issue_type": "correction_verification",
+        "latest_reviewed_publication_status": "deferred" if deferred else None,
         "materialization_required": plan.get("materialization_required"),
         "normal_task_class": "correction_verification",
         "publication_status": publication_status,
@@ -1762,7 +1888,11 @@ def create_correction_verification_task(
         "technical_only": False,
         "title": f"Verify saved {category_label} correction",
         "what_happened": f"A reviewer supplied manual {category_label} redaction geometry.",
-        "what_to_inspect": "Waiting for Latest reviewed media.",
+        "what_to_inspect": (
+            "Correction saved; reviewed output publication is deferred."
+            if deferred
+            else "Waiting for Latest reviewed media."
+        ),
     }
 
 
@@ -1914,6 +2044,8 @@ def restart_review_workflow(
     selected_case = str(case_id or "")
     if not selected_case:
         raise ValueError("case_id is required to restart review workflow")
+    selected_case = case_ids.validate_case_id(selected_case)
+    require_safe_case_manifest_path(package_root, selected_case)
     before = derive_working_state(package_root, session_dir)
     after_state: dict[str, Any] = {
         "active_projection_reset": True,
@@ -1958,7 +2090,7 @@ def reset_to_automatic_baseline(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
-    selected_case = str(case_id or "")
+    selected_case = case_ids.validate_case_id(case_id) if case_id else ""
     event_type = (
         "case_edits_reset_to_automatic_baseline" if selected_case else "reset_to_automatic_baseline"
     )
@@ -1966,8 +2098,13 @@ def reset_to_automatic_baseline(
     reset_case_ids = (
         [selected_case]
         if selected_case
-        else sorted(path.stem for path in (package_root / "cases").glob("*.json"))
+        else sorted(
+            case_ids.validate_case_id(path.stem)
+            for path in (package_root / "cases").glob("*.json")
+        )
     )
+    for item_case in reset_case_ids:
+        require_safe_case_manifest_path(package_root, item_case)
     baseline_summaries = {
         item_case: baseline_case_active_state_summary(package_root, item_case)
         for item_case in reset_case_ids
@@ -1977,9 +2114,13 @@ def reset_to_automatic_baseline(
         for item_case in reset_case_ids
     }
     other_case_summaries_before = {
-        path.stem: normalized_case_active_state_summary(package_root, before, path.stem)
+        case_ids.validate_case_id(path.stem): normalized_case_active_state_summary(
+            package_root,
+            before,
+            case_ids.validate_case_id(path.stem),
+        )
         for path in sorted((package_root / "cases").glob("*.json"))
-        if path.stem not in set(reset_case_ids)
+        if case_ids.validate_case_id(path.stem) not in set(reset_case_ids)
     }
     after_state: dict[str, Any] = {
         "active_projection_reset": True,
@@ -2049,6 +2190,7 @@ def reset_to_automatic_baseline(
 
 
 def baseline_case_active_state_summary(package_root: Path, case_id: str) -> dict[str, Any]:
+    case_id = case_ids.validate_case_id(case_id)
     entities = load_entity_index(package_root)
     baseline_state = {
         "active_correction_ids": [],
@@ -2067,6 +2209,7 @@ def normalized_case_active_state_summary(
     state: dict[str, Any],
     case_id: str,
 ) -> dict[str, Any]:
+    case_id = case_ids.validate_case_id(case_id)
     entities_by_case = load_entity_index(package_root)
     case_entities = entities_by_case.get(case_id, [])
     entity_case_by_id = entity_case_index(entities_by_case)
@@ -2233,7 +2376,10 @@ def load_checkpoints(session_dir: Path) -> list[dict[str, Any]]:
 def case_versions(package_root: Path, session_dir: Path | None, *, case_id: str) -> dict[str, Any]:
     package_root = package_root.resolve()
     session_dir = session_dir.resolve() if session_dir is not None else None
-    manifest = case_manifests.load_case_manifest(package_root / "cases" / f"{case_id}.json")
+    case_id = case_ids.validate_case_id(case_id)
+    manifest = case_manifests.load_case_manifest(
+        require_safe_case_manifest_path(package_root, case_id)
+    )
     by_role = {role.role: role.to_dict() for role in manifest.video_roles}
     roles: list[dict[str, Any]] = []
     if "original" in by_role:
@@ -2243,6 +2389,13 @@ def case_versions(package_root: Path, session_dir: Path | None, *, case_id: str)
         automatic["label"] = "Automatic"
         automatic["role"] = "automatic"
         roles.append(automatic)
+    if latest_reviewed_publication_deferred(package_root):
+        return {
+            "case_id": case_id,
+            "ok": True,
+            "schema_version": "case_versions.v1",
+            "versions": roles,
+        }
     latest_role = dict(by_role.get("latest_reviewed") or automatic)
     if latest_role:
         latest_role["label"] = "Latest reviewed"
@@ -2376,6 +2529,7 @@ def face_policy_source_dirs(
     case_id: str,
     manifest: case_manifests.CaseManifest,
 ) -> list[Path]:
+    case_id = case_ids.validate_case_id(case_id)
     candidates: list[Path] = []
     local = package_root / "technical" / f"{case_id}_pipeline" / "face_policy"
     if (local / "track_census.json").exists():

@@ -12,8 +12,10 @@ from typing import Any
 import cv2 as cv
 import numpy as np
 import pytest
+from click.testing import CliRunner
 
 from redactor import (
+    case_ids,
     case_manifests,
     privacy_entities,
     review_api_contract,
@@ -23,6 +25,7 @@ from redactor import (
     review_working_state,
     review_workspace,
 )
+from redactor.cli import main
 from redactor.privacy_records import (
     APPROVAL_ACCEPTED,
     CATEGORY_FACE,
@@ -69,19 +72,24 @@ def post_json_error(url: str, payload: dict[str, object]) -> tuple[int, dict[str
     return error.code, json.loads(error.read().decode("utf-8"))
 
 
-def synthetic_case_manifest(package_root: Path) -> case_manifests.CaseManifest:
-    source = package_root / "media" / "synthetic" / "original_reference.mp4"
+def synthetic_case_manifest_for(
+    package_root: Path,
+    case_id: str,
+    *,
+    display_name: str | None = None,
+) -> case_manifests.CaseManifest:
+    source = package_root / "media" / case_id / "original_reference.mp4"
     source.parent.mkdir(parents=True, exist_ok=True)
     write_synthetic_video(source)
     manifest = case_manifests.case_manifest_from_media(
-        case_id="synthetic",
-        display_name="Synthetic",
-        source_path="media/synthetic/original_reference.mp4",
+        case_id=case_id,
+        display_name=display_name or case_id.title(),
+        source_path=f"media/{case_id}/original_reference.mp4",
         source_video=source,
         video_roles=[
             case_manifests.VideoRole(
                 label="Original",
-                path="media/synthetic/original_reference.mp4",
+                path=f"media/{case_id}/original_reference.mp4",
                 role="original",
                 sha256=None,
                 source_frame_end=4,
@@ -89,8 +97,83 @@ def synthetic_case_manifest(package_root: Path) -> case_manifests.CaseManifest:
             )
         ],
     )
-    case_manifests.write_case_manifest(package_root / "cases" / "synthetic.json", manifest)
+    case_manifests.write_case_manifest(package_root / "cases" / f"{case_id}.json", manifest)
     return manifest
+
+
+def synthetic_case_manifest(package_root: Path) -> case_manifests.CaseManifest:
+    return synthetic_case_manifest_for(package_root, "synthetic", display_name="Synthetic")
+
+
+def add_automatic_role(
+    package_root: Path,
+    manifest: case_manifests.CaseManifest,
+) -> case_manifests.CaseManifest:
+    source = package_root / manifest.source_path
+    automatic = package_root / "media" / manifest.case_id / "automatic_preview.mp4"
+    automatic.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, automatic)
+    roles = [
+        *manifest.video_roles,
+        case_manifests.VideoRole(
+            label="Automatic preview",
+            path=f"media/{manifest.case_id}/automatic_preview.mp4",
+            role="automatic",
+            sha256=None,
+            source_frame_end=manifest.source_frame_end,
+            source_frame_start=manifest.source_frame_start,
+        ),
+    ]
+    updated = replace(manifest, video_roles=tuple(roles))
+    case_manifests.write_case_manifest(
+        package_root / "cases" / f"{manifest.case_id}.json",
+        updated,
+    )
+    return updated
+
+
+def write_deferred_canonical_workspace_manifest(
+    package_root: Path,
+    manifest: case_manifests.CaseManifest,
+    *,
+    categories: tuple[str, ...],
+) -> None:
+    automatic_role = next(role for role in manifest.video_roles if role.role == "automatic")
+    write_json(
+        package_root / "workspace_manifest.json",
+        {
+            "automatic_preview": {
+                "automatic_preview_sha256": media_sha(package_root / automatic_role.path),
+                "region_count": 1,
+                "source_sha256": manifest.source_video_hash,
+            },
+            "case_id": manifest.case_id,
+            "cases": {manifest.case_id: f"cases/{manifest.case_id}.json"},
+            "latest_reviewed_publication": {
+                "error_code": "latest_reviewed_publication_deferred",
+                "reason": "mixed_reviewed_region_compilation_not_implemented",
+                "schema_version": "latest_reviewed_publication_capability.v1",
+                "status": "deferred",
+            },
+            "lifecycle": {
+                "evaluation": {"status": "not_run"},
+                "finalization": {"status": "not_run"},
+                "latest_reviewed": {"status": "not_run"},
+                "review_session": {"status": "not_started"},
+                "review_workspace": "ready",
+            },
+            "schema_version": "final_review_workspace.v2.3.4",
+            "selected_categories": list(categories),
+            "workspace_kind": "unified_case_review_workspace",
+            "workspace_status": "ready",
+        },
+    )
+
+
+def media_sha(path: Path) -> str:
+    from redactor import media
+
+    return media.sha256_file(path)
 
 
 def write_review_entity_shell(package_root: Path, case_id: str) -> None:
@@ -1571,6 +1654,92 @@ def test_region_compatible_job_publishes_after_non_media_decision(tmp_path: Path
         server.server_close()
 
 
+def test_reset_supersedes_running_materialization_job(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    manifest, entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    entered = review_workspace.threading.Event()
+    release = review_workspace.threading.Event()
+
+    def fake_materialize_latest_reviewed(
+        package_root: Path,
+        job_session_dir: Path,
+        *,
+        case_id: str,
+        accepted_revision: str | None = None,
+        actor: dict[str, Any] | None = None,
+        event_reason: str | None = None,
+    ) -> dict[str, Any]:
+        del package_root, job_session_dir, actor, event_reason
+        entered.set()
+        assert release.wait(5)
+        return {
+            "accepted_working_state_revision": accepted_revision,
+            "case_id": case_id,
+            "effective_regions_hash": "old-effective-hash",
+            "latest_reviewed": {
+                "label": "Latest reviewed",
+                "path": "sessions/stale/media/synthetic/latest_reviewed_old.mp4",
+                "role": "latest_reviewed",
+                "source_frame_end": manifest.source_frame_end,
+                "source_frame_start": manifest.source_frame_start,
+            },
+            "media_validation": {"passed": True},
+            "schema_version": "latest_reviewed_materialization.v1",
+            "timing": {},
+            "video_sha256": "old-video-hash",
+        }
+
+    monkeypatch.setattr(
+        review_workspace.review_working_state,
+        "materialize_latest_reviewed",
+        fake_materialize_latest_reviewed,
+    )
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = post_json(
+            f"{base_url}/api/v1/object-policy",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "entity_id": entity["entity_id"],
+                "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                "session_id": session_dir.name,
+            },
+        )
+        old_job_id = str(response["materialization_job"]["job_id"])
+        assert entered.wait(5)
+        server.materialization_jobs.debounce_seconds = 60
+
+        reset = post_json(
+            f"{base_url}/api/checkpoints/reset",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "session_id": session_dir.name,
+            },
+        )
+        release.set()
+        old_job = wait_for_materialization_job(server, old_job_id)
+        state = review_working_state.derive_working_state(package, session_dir)
+
+        assert reset["ok"] is True
+        assert old_job["status"] == "superseded"
+        assert old_job["publication_status"] == "superseded"
+        assert old_job["queue_state"] == "discarded_stale_generation"
+        assert manifest.case_id not in state["materialized_latest_reviewed"]
+        assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+
+
 def test_react_workspace_assets_copy_app_and_legacy_fallback(tmp_path: Path) -> None:
     package = tmp_path / "package"
     frontend = tmp_path / "frontend"
@@ -2340,9 +2509,10 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     assert ".decision-correct" in css
     assert ".decision-needs-correction" in css
     assert ".decision-unsure" in css
-    assert "Correct', action:ACTIONS.looks" in js
-    assert "Needs correction', action:ACTIONS.leak" in js
-    assert "Unsure', action:ACTIONS.unsure" in js
+    assert "task.allowed_actions?.length" in js
+    assert "[ACTIONS.looks, ACTIONS.leak, ACTIONS.unsure]" in js
+    assert "actionLabel(action)" in js
+    assert "actionTone(action)" in js
     assert 'data-action="filter"' in js
     assert "Saving..." in js
     assert "Could not save:" in js
@@ -2732,6 +2902,409 @@ def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
+    ("categories", "correction_category"),
+    [
+        ((CATEGORY_FACE,), CATEGORY_FACE),
+        ((CATEGORY_PLATE,), CATEGORY_PLATE),
+        ((CATEGORY_FACE, CATEGORY_PLATE), CATEGORY_PLATE),
+    ],
+)
+def test_deferred_canonical_workspace_persists_correction_without_latest_reviewed(
+    tmp_path: Path,
+    categories: tuple[str, ...],
+    correction_category: str,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_deferred_canonical_workspace_manifest(package, manifest, categories=categories)
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": correction_category,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "reviewed",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 0,
+            "source_frame_start": 0,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_1",
+        }
+
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
+        correction_response = post_json(
+            f"{base_url}/api/corrections",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "preview_token": preview_response["preview"]["preview_token"],
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
+        session_dir = package / "sessions" / session["session_id"]
+        state = review_working_state.derive_working_state(package, session_dir)
+        with urllib.request.urlopen(
+            f"{base_url}/api/v1/cases/{manifest.case_id}/versions?session_id={session['session_id']}",
+            timeout=5,
+        ) as response:
+            versions = json.loads(response.read().decode("utf-8"))["versions"]
+
+        assert preview_response["preview"]["latest_reviewed"] is None
+        assert preview_response["preview"]["corrected_preview"]
+        assert correction_response["ok"] is True
+        assert correction_response["publication_status"] == "deferred"
+        assert correction_response["materialization_job"] is None
+        assert correction_response["materialization_required"] is False
+        assert correction_response["verification_task"]["publication_status"] == "deferred"
+        assert correction_response["verification_task"]["actionable"] is True
+        assert server.materialization_jobs.jobs == {}
+        assert state["active_correction_ids"] == [
+            correction_response["event"]["after_state"]["correction_id"]
+        ]
+        assert state["materialized_latest_reviewed"] == {}
+        latest_reviewed_outputs = list(
+            (package / "sessions" / session["session_id"]).glob("**/latest_reviewed_*.mp4")
+        )
+        assert not latest_reviewed_outputs
+        assert "latest_reviewed" not in {role["role"] for role in versions}
+
+        status, body = post_json_error(
+            f"{base_url}/api/materialization-jobs/retry",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "job_id": "materialize_missing",
+                "session_id": session["session_id"],
+            },
+        )
+        assert status == 409
+        assert body["error_code"] == "latest_reviewed_publication_deferred"
+
+        finalization = review_finalization.finalization_blockers(
+            package_root=package,
+            case_id=manifest.case_id,
+            session_dir=session_dir,
+        )
+        assert any(
+            "latest_reviewed_publication_deferred" in item
+            for item in finalization["blockers"]
+        )
+        assert (
+            json.loads((package / "workspace_manifest.json").read_text())["lifecycle"][
+                "latest_reviewed"
+            ]["status"]
+            == "not_run"
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("route", ["/api/entity-events", "/api/finalize"])
+@pytest.mark.parametrize("case_id", ["../outside", "/tmp/outside", "unknown_case"])
+def test_mutation_routes_reject_unsafe_or_unknown_case_ids_without_events(
+    tmp_path: Path,
+    route: str,
+    case_id: str,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    payload: dict[str, object]
+    if route == "/api/entity-events":
+        payload = {
+            "actor": {"reviewer_id": "analyst@example.test"},
+            "case_id": case_id,
+            "event": {
+                "case_id": case_id,
+                "event_type": "manual_issue_created",
+                "payload": {"after": {"case_id": case_id}},
+            },
+            "session_id": session_dir.name,
+        }
+    else:
+        payload = {
+            "actor": {"reviewer_id": "analyst@example.test"},
+            "case_id": case_id,
+            "session_id": session_dir.name,
+        }
+    try:
+        before = review_sessions.load_events(session_dir)
+        status, body = post_json_error(f"{base_url}{route}", payload)
+        after = review_sessions.load_events(session_dir)
+
+        assert status == 400
+        assert body["ok"] is False
+        assert after == before
+        assert case_id not in {str(event.get("case_id") or "") for event in after}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    "route_name",
+    [
+        "decisions",
+        "sweep",
+        "correction_preview",
+        "correction_save",
+        "object_policy",
+        "bulk_object_policy",
+        "checkpoint_restore",
+        "checkpoint_restart",
+        "checkpoint_reset",
+        "entity_merge",
+        "entity_split",
+    ],
+)
+@pytest.mark.parametrize("case_id", ["../outside", "/tmp/outside", "unknown_case"])
+def test_all_case_mutation_routes_reject_unsafe_or_unknown_case_ids_without_events(
+    tmp_path: Path,
+    route_name: str,
+    case_id: str,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+
+    valid_correction = {
+        "case_id": manifest.case_id,
+        "category": CATEGORY_PLATE,
+        "configuration_freeze_hash": stable_hash({"schema_version": "freeze.test", "value": 1}),
+        "interpolation_method": review_corrections.INTERPOLATION_NONE,
+        "keyframe_boxes": [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+        "operation": review_corrections.OP_ADD,
+        "reason": "reviewed",
+        "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+        "source_frame_end": 0,
+        "source_frame_start": 0,
+        "source_video_hash": manifest.source_video_hash,
+        "task_id": "task_1",
+    }
+
+    try:
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": valid_correction,
+                "reason": "reviewed",
+                "session_id": session_dir.name,
+            },
+        )
+        unsafe_correction = dict(valid_correction)
+        unsafe_correction["case_id"] = case_id
+        payloads = {
+            "decisions": (
+                "/api/decisions",
+                {
+                    "action": review_sessions.ACTION_LOOKS_CORRECT,
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "case_id": case_id,
+                    "note": "correct",
+                    "session_id": session_dir.name,
+                    "task_id": "task_1",
+                },
+            ),
+            "sweep": (
+                "/api/events/sweep",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "case_id": case_id,
+                    "session_id": session_dir.name,
+                    "viewed_ranges": [{"start": 0, "end": 4}],
+                },
+            ),
+            "correction_preview": (
+                "/api/corrections/preview",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "correction": unsafe_correction,
+                    "reason": "reviewed",
+                    "session_id": session_dir.name,
+                },
+            ),
+            "correction_save": (
+                "/api/corrections",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "correction": unsafe_correction,
+                    "preview_token": preview_response["preview"]["preview_token"],
+                    "reason": "reviewed",
+                    "session_id": session_dir.name,
+                },
+            ),
+            "object_policy": (
+                "/api/object-policy",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "case_id": case_id,
+                    "entity_id": "entity_1",
+                    "policy": privacy_entities.POLICY_REDACT,
+                    "session_id": session_dir.name,
+                },
+            ),
+            "bulk_object_policy": (
+                "/api/bulk-object-policy",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "case_id": case_id,
+                    "entity_ids": ["entity_1"],
+                    "policy": privacy_entities.POLICY_REDACT,
+                    "session_id": session_dir.name,
+                },
+            ),
+            "checkpoint_restore": (
+                "/api/checkpoints/restore",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "case_id": case_id,
+                    "checkpoint_uuid": "checkpoint_missing",
+                    "session_id": session_dir.name,
+                },
+            ),
+            "checkpoint_restart": (
+                "/api/checkpoints/restart-review",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "case_id": case_id,
+                    "session_id": session_dir.name,
+                },
+            ),
+            "checkpoint_reset": (
+                "/api/checkpoints/reset",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "case_id": case_id,
+                    "session_id": session_dir.name,
+                },
+            ),
+            "entity_merge": (
+                "/api/entities/merge",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "after_state": {
+                        "primary": {"case_id": case_id, "category": CATEGORY_PLATE},
+                        "retired_entity_ids": ["entity_2"],
+                    },
+                    "before_state": {
+                        "source": {"case_id": case_id, "category": CATEGORY_PLATE},
+                        "target": {
+                            "case_id": case_id,
+                            "category": CATEGORY_PLATE,
+                            "entity_id": "entity_2",
+                        },
+                    },
+                    "case_id": case_id,
+                    "reason": "merge",
+                    "session_id": session_dir.name,
+                },
+            ),
+            "entity_split": (
+                "/api/entities/split",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "after_state": {"case_id": case_id},
+                    "before_state": {"case_id": case_id},
+                    "case_id": case_id,
+                    "reason": "split",
+                    "session_id": session_dir.name,
+                },
+            ),
+        }
+        route, payload = payloads[route_name]
+        before = review_sessions.load_events(session_dir)
+        status, body = post_json_error(f"{base_url}{route}", payload)
+        after = review_sessions.load_events(session_dir)
+
+        assert status in {400, 404}
+        assert body["ok"] is False
+        assert after == before
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_lower_level_and_cli_finalization_reject_unsafe_case_id(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+
+    with pytest.raises(case_ids.CaseIdError):
+        review_finalization.finalize_reviewed_case(
+            package_root=package,
+            case_id="../outside",
+            session_dir=session_dir,
+        )
+    with pytest.raises(case_ids.CaseIdError):
+        review_sessions.append_event(
+            session_dir,
+            event_type="manual_issue_created",
+            actor={"reviewer_id": "analyst@example.test"},
+            case_id="../outside",
+            task_id=None,
+            before_state=None,
+            after_state={},
+            note="invalid",
+            application_hashes={},
+        )
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "finalize-reviewed-case",
+            "--package-root",
+            str(package),
+            "--case-id",
+            "../outside",
+            "--session-dir",
+            str(session_dir),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "unsafe case_id" in result.output
+    assert "../outside" not in {
+        str(event.get("case_id") or "") for event in review_sessions.load_events(session_dir)
+    }
+
+
+@pytest.mark.parametrize(
     ("name", "category", "start", "end", "method", "keyframes", "expected_frames"),
     [
         (
@@ -3062,6 +3635,70 @@ def test_workspace_server_rejects_stale_manual_correction_preview_token(
 
         assert status == 409
         assert "draft changed" in str(body["error"])
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_workspace_server_rejects_cross_case_manual_correction_preview_token(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    other_manifest = synthetic_case_manifest_for(package, "other", display_name="Other")
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_PLATE,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "reviewed",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 0,
+            "source_frame_start": 0,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_1",
+        }
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
+        cross_case = dict(correction)
+        cross_case["case_id"] = other_manifest.case_id
+        cross_case["source_video_hash"] = other_manifest.source_video_hash
+
+        status, body = post_json_error(
+            f"{base_url}/api/corrections",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": cross_case,
+                "preview_token": preview_response["preview"]["preview_token"],
+                "reason": "reviewed",
+                "session_id": session["session_id"],
+            },
+        )
+
+        assert status == 409
+        assert "different case" in str(body["error"])
     finally:
         server.shutdown()
         server.server_close()

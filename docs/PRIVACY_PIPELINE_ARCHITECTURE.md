@@ -82,7 +82,7 @@ The current plate partial-span safety behavior is preserved: a normal full-durat
 
 Review tasks now have a common category-aware shape: category, object or track ID, interval, issue type, blocking state, available media roles, allowed reviewer actions, and whether corrected privacy regions are required.
 
-The existing face and plate review pages are not redesigned in this milestone. Category-specific labels and wording remain in their current builders while the common task concepts are available for future shared review logic.
+The existing face and plate review pages are not redesigned in this milestone. Category-specific labels and wording remain in their current builders, and the case pipeline now normalizes their task outputs into one mixed review workspace queue. That workspace is a packaging and review-state layer only; it does not change detector, tracker, recovery, automatic preview, Latest reviewed, final rendering, or evaluation behavior.
 
 ## Case-Based Final Review Workspace
 
@@ -116,8 +116,8 @@ The migration is deliberately incremental:
 2. Plate tracking now uses the shared temporal evidence engine for confirmation, hysteresis, retrospective promotion, and bounded stitch decisions while preserving the existing association and gap-recovery parameters.
 3. Face automatic-preview rendering now adapts accepted face regions to the shared renderer while preserving detector, tracking, privacy gap recovery, policy, and review behavior.
 4. Future tracking lifecycle work can use the common states and transition records without embedding accumulated-evidence behavior inside a category module.
-5. The automatic case-preview checkpoint can consume `PrivacyRegionRecord`s from both categories for a non-final combined preview.
-6. A later reviewed/final unified face/plate render can consume reviewed `PrivacyRegionRecord`s from both categories once mixed review and reviewed plate corrections exist.
+5. The automatic case-preview checkpoint can consume `PrivacyRegionRecord`s from both categories for a non-final combined preview and package a source-backed review workspace whose sole runtime authority is `workspace_manifest.json`. This workspace is reviewable after validation, binds one category-run identity per selected category, and persists shared decisions and corrections without publishing authoritative reviewed media.
+6. Mixed reviewed-region compilation remains the next backend step. Authoritative mixed Latest reviewed publication, mixed finalization, reviewed/final renderer migration, and plate Ground Truth/evaluation remain deferred until that compiler and validation path exist.
 
 ## Intentionally Not Unified
 

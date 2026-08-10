@@ -2,7 +2,7 @@
 
 This document records the backend refactor that moves full-video automatic privacy-preview orchestration from separate face and plate command paths toward one case-level checkpoint. It does not change detector selection, detector thresholds, tracker behavior, rendering semantics, review policy, or finalization gates.
 
-This checkpoint is not a completed mixed review or finalization pipeline. The canonical `redact-video` command produces automatic, non-final preview evidence and a fail-closed case artifact manifest.
+This checkpoint is not a completed mixed finalization pipeline. The canonical `redact-video` command produces automatic, non-final preview evidence, a fail-closed case artifact manifest, and a mixed review workspace package whose review session starts only when a reviewer opens review.
 
 ## Verified Before-State
 
@@ -23,12 +23,14 @@ INGEST
 -> PRIVACY_REGIONS
 -> REVIEW_TASKS
 -> AUTOMATIC_PREVIEW
+-> REVIEW_WORKSPACE
+-> REVIEW_SESSION
 -> LATEST_REVIEWED
 -> FINALIZATION
 -> EVALUATION
 ```
 
-Each selected category runs through an adapter. The adapters wrap the existing face and plate implementations rather than replacing them. The pipeline writes one authoritative case source identity, category run manifests, a unified render plan, effective privacy-region JSONL, a validated combined automatic preview when multiple selected categories have effective regions, and `case_manifest.json`.
+Each selected category runs through an adapter. The adapters wrap the existing face and plate implementations rather than replacing them. The pipeline writes one authoritative case source identity, category run manifests, a unified render plan, effective privacy-region JSONL, a validated combined automatic preview when multiple selected categories have effective regions, one mixed review workspace, and `case_manifest.json`.
 
 Executed by the canonical command:
 
@@ -38,11 +40,12 @@ Executed by the canonical command:
 - face policy and effective privacy-region conversion;
 - category review-task evidence;
 - automatic preview rendering;
+- mixed review workspace generation;
 - fail-closed case manifest publication.
 
 Represented but not executed:
 
-- mixed review session generation;
+- review session start and human decisions;
 - Latest reviewed publication;
 - case-level finalization;
 - Ground Truth evaluation.
@@ -84,11 +87,21 @@ Faces and plates remain different where the object geometry and evidence model r
 
 ## Review And Finalization
 
-The canonical `redact-video` command does not create one mixed review session, does not publish Latest reviewed, and does not run case-level finalization. Category review artifacts may be generated as automatic-stage evidence, but mixed review generation remains deferred.
+The canonical `redact-video` command now creates one mixed review workspace under `review_workspace/`. The workspace consumes case-level automatic artifacts, not detector internals: original media, the authoritative automatic preview, category review task files, the effective render plan, and category run lineage. It normalizes face and license-plate review tasks into one deterministic `reviewer_tasks.json` queue, writes one Person/Plate review entity registry, writes media inventory and validation artifacts, and keeps one `sessions/` namespace for future local review history.
+
+`review_workspace/workspace_manifest.json` is the sole runtime authority for new case-generated workspaces. `case_manifest.json` records and hashes that file rather than a separate mixed manifest. The workspace manifest binds the case content identity, source hash, automatic-preview hash, renderer backend, category run manifest identities, entity registry, task index, media inventory, validation report, session namespace, blockers, and lifecycle statuses. The category-run identity map contains exactly one hashed `category_run_manifest.json` identity per selected category, and workspace creation fails closed if a selected run is missing, stale, for a different case/source/category/configuration, has an incompatible processed span, or reports failed run stages. The top-level case manifest mirrors the same identity hash.
+
+Entities are source-backed temporal targets. Face records come from face policy and track census artifacts, including redact, keep-visible, and review-required tracks; plate records come from accepted and review-required plate tracking artifacts. Rejected wrong-class or inactive duplicate proposals are excluded from active reviewer entities. Tasks are normalized only after entity binding, preserve category-specific allowed actions, and reject invalid intervals, out-of-span frames, duplicate task IDs, unsupported actions, or unbound generic intervals.
+
+The primary media pair is the original source and the authoritative automatic preview. Both roles carry required hashes, frame spans, frame count, dimensions, rational FPS, and source-frame mapping. A zero-region case materializes a distinct no-op automatic-preview artifact by hardlink or copy with `noop_source_copy` lineage instead of aliasing the original source path.
+
+Case IDs use the shared conservative grammar `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` before filesystem joins, route lookup, entity-event construction, session mutations, reset/restore, correction handling, finalization, and browser tab generation. Correction saves keep the preview-token flow: public clients preview first, receive a token bound to the draft and current session revision, and save with that token. New canonical workspaces advertise `latest_reviewed_publication.status = deferred`, so correction saves persist without queuing case-level reviewed materialization. Legacy workspaces that do not carry that deferred capability retain the existing materialization guard so resets or newer mutations supersede queued or running jobs before they can publish stale authoritative media.
+
+Review session creation is deliberately not automatic. `REVIEW_WORKSPACE` is recorded as `ready`, while `REVIEW_SESSION` is recorded as `not_started` until a reviewer starts a session. New canonical face-only, plate-only, and mixed workspaces record Latest reviewed, finalization, and evaluation as `not_run`; valid finalization attempts fail closed until authoritative reviewed-region compilation and Latest reviewed publication exist.
 
 `review_workspace`, `review_working_state`, `review_sessions`, `review_corrections`, and `review_finalization` remain the authority for reviewer decisions, latest reviewed state, correction provenance, full sweep acknowledgement, hash checks, and final reviewed rendering. Face reviewed/final rendering remains on the existing reviewed-rendering boundary.
 
-The case manifest records these later phases as `not_run`, never `succeeded`.
+The case manifest records Latest reviewed, finalization, and evaluation as `not_run`, never `succeeded`.
 
 ## Evaluation
 
@@ -100,11 +113,11 @@ License-plate evaluation currently writes a capability report rather than scores
 
 Existing commands remain available, including `detect-plates`, `track-plates`, `render-plates`, `build-plate-review-bundle`, `render-faces`, `evaluate-faces`, `face-pipeline`, and the final review workspace commands. The unified case pipeline is additive around those pieces.
 
-Existing face-only `redact-video` output still includes `audit_manifest.json`; it now also writes `case_manifest.json`, category run manifests, source identity metadata, and render-plan artifacts. Multi-category runs add category-scoped plate outputs and a combined non-final automatic preview when effective regions exist and validation passes.
+Existing face-only `redact-video` output still includes `audit_manifest.json`; it now also writes `case_manifest.json`, category run manifests, source identity metadata, render-plan artifacts, and `review_workspace/`. Multi-category runs add category-scoped plate outputs and a combined non-final automatic preview when effective regions exist and validation passes.
 
 ## Deferred Work
 
 - Migrate reviewed/final face rendering after the automatic-preview migration remains stable.
 - Add machine-readable plate ground truth before publishing plate scores.
-- Generate one mixed review case, one Latest reviewed publication, and one mixed finalization result once reviewed plate corrections and entity-level UX are fully aligned.
+- Publish one Latest reviewed result and one mixed finalization result once reviewed plate corrections and final rendering gates are fully aligned.
 - Add performance instrumentation for multi-category runs after behavior parity remains stable.

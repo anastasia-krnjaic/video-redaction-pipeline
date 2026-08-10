@@ -67,7 +67,7 @@ PYTHONPATH=src .venv/bin/python -m redactor.cli serve-final-review-workspace \
 
 React assets are served from `/app/`; the legacy generated workspace remains available at `/legacy.html`. The stable API contract is checked in at `docs/api/final_review_workspace_v1.schema.json` and served at `/api/v1/schema`.
 
-Frontend v1.4.1 fixes manual-redaction Save persistence so the exact previewed draft becomes active working state, creates a correction-verification task, and appears in a content-hashed Latest reviewed publication. Frontend v1.5 keeps that corrected behavior and adds exact changed-frame planning/progress metadata while retaining the proven full-render publication fallback. Segment-level reviewed-media reuse is deferred until parity can be proven. Evidence lives under `artifacts/manual_redaction_save_fix_v1_4_1/` and `artifacts/incremental_materialization_v1_5/`.
+Frontend v1.4.1 fixes manual-redaction Save persistence so the exact previewed draft becomes active working state and creates a correction-verification task. Legacy workspaces that already support reviewed-media publication retain the content-hashed Latest reviewed path and v1.5 changed-frame planning/progress metadata. New case-generated canonical workspaces persist decisions and corrections in the shared session history, but mark `latest_reviewed_publication.status` as `deferred`; correction preview media is diagnostic and is not a reviewed output. Segment-level reviewed-media reuse is deferred until parity can be proven. Evidence lives under `artifacts/manual_redaction_save_fix_v1_4_1/` and `artifacts/incremental_materialization_v1_5/`.
 
 Frontend details:
 
@@ -117,7 +117,7 @@ redactor redact-video input.mp4 \
   --overwrite
 ```
 
-This writes one authoritative source identity, category run manifests, one effective-region render plan, one fail-closed `case_manifest.json`, and, when multiple selected categories have validated effective regions, one combined non-final automatic preview. The command does not create one mixed reviewed result, does not publish Latest reviewed, and does not run case-level mixed finalization.
+This writes one authoritative source identity, category run manifests, one effective-region render plan, one fail-closed `case_manifest.json`, and, when multiple selected categories have validated effective regions, one combined non-final automatic preview. It also builds `review_workspace/`, a single review workspace with source-backed Person and Plate entities, one normalized task list, original and automatic-preview media roles, media inventory, validation, category-run identities, and a not-started session namespace. The workspace runtime authority is `review_workspace/workspace_manifest.json`, which is referenced and hashed by `case_manifest.json`. Corrections are persisted in the shared review session, but the command does not publish Latest reviewed and does not run case-level mixed finalization.
 
 One canonical automatic-preview renderer now handles faces, plates, and combined cases while preserving the source-frame span through strict decoded-frame validation. Face and plate detectors, temporal logic, and privacy policy remain category-specific. Face automated evaluation remains available through `evaluate-faces`; plate evaluation is currently a capability report only and does not publish scores.
 
@@ -360,6 +360,7 @@ A full-video `redact-video` run writes a case directory:
 | `final/` | Final render artifacts or a blocked final-status JSON. |
 | `audit_manifest.json` | Source, detection, tracking, policy, privacy, rendering, review, and final-status summary. |
 | `case_source_identity.json`, `case_manifest.json`, `render_plan/` | Automatic case-preview source identity, fail-closed artifact inventory, category lineage, and effective regions. |
+| `review_workspace/` | Case review package with dynamic case tabs, source-backed Person/Plate entities, normalized review tasks, original/automatic media inventory, validation, and `sessions/` for local review history. |
 
 Generated artifacts belong under `artifacts/` and are ignored by Git.
 
@@ -440,4 +441,4 @@ redactor summarize-review-session --session-dir SESSION_DIR
 - No universal or production-wide zero-leak claim has been established.
 - Plate detection, minimal tracking, non-final previews, and case-based review/correction records are implemented. Reviewed-final plate output still requires human decisions and verified reviewed corrections for blockers.
 - Plate tracking bridges only short, defensible two-anchor gaps. Longer gaps and unstable plate-like tracks remain review-required evidence.
-- The unified automatic command can produce a combined non-final preview and manifest for face plus plate evidence, but mixed review, Latest reviewed, and mixed finalization remain deferred.
+- The unified automatic command can produce a combined non-final preview, manifest, and mixed review workspace for face plus plate evidence. Review-session creation is user-started, and Latest reviewed plus mixed finalization remain deferred.

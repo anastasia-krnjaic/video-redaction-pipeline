@@ -28,6 +28,18 @@ artifacts/final_pipeline_package_frontend_v1_5/
 
 It does not change detectors, thresholds, tracking, evidence accumulation, recovery, or rendering configuration. It gives a reviewer one case at a time, a single versioned source-frame-aware player, timeline-linked tasks, local correction records, stable Person/Plate review objects with representative thumbnails, an append-only audit trail, and finalization gates.
 
+The unified automatic case pipeline also writes a package under each case output:
+
+```text
+<case-output>/review_workspace/
+```
+
+That generated package reuses the same local session, entity, task, correction, and media-serving contracts. It contains one case tab for the source case, mixed Person/Plate entities when both categories were selected, original plus automatic-preview media roles, one normalized task queue, media inventory, validation, and an empty `sessions/` namespace. Starting review still happens explicitly through the workspace UI or session API.
+
+For new case-generated packages, `workspace_manifest.json` is the only runtime workspace authority. The case manifest points to and hashes that file, and the server binds new sessions to the workspace manifest, source, automatic preview, category-run identity mapping, entity registry, task index, media inventory, validation report, and per-case content hashes. New sessions are rejected if those identities no longer match the package on disk.
+
+New canonical face-only, plate-only, and mixed packages also carry `latest_reviewed_publication.status = deferred`. Reviewers can still start a session, record decisions, preview corrections, and save preview-token-bound corrections. Those corrections remain append-only session history and working-state inputs, but no case-level `latest_reviewed` media role is published for the new canonical workspace yet.
+
 ## Launch
 
 Serve the package locally:
@@ -74,12 +86,14 @@ Legacy `/api/...` endpoints remain available during this milestone.
 
 ## Case Tabs
 
-The workspace has four top-level tabs:
+The workspace builds case tabs from `workspace_manifest.json` and validates every case ID before routing or DOM lookup. The frozen package has:
 
 - Day
 - Night
 - Final Results
 - Audit Trail
+
+A unified automatic case package has one tab for its safe case ID plus Final Results and Audit Trail. The root page redirects to the first validated discovered case rather than hardcoding `day` or `night`. The same dynamic tab contract also supports future multi-case packages.
 
 Each primary case has two modes plus the object registry:
 
@@ -93,11 +107,16 @@ Manual redaction drafts are keyed only by source frame. The interval modes are S
 
 Entity merges are backend-owned append-only events. The React modal selects multiple same-case, same-category entities, warns on overlap, and the backend creates one canonical active entity while retiring the selected aliases. Merged entities get stable case/category-scoped labels such as `Merged Person 01` and inherit a shared policy when all source entities agree; conflicting policies become Needs review. Entity thumbnail jumps pause the player, seek to the representative source frame, and show a temporary red source-bbox focus outline for source-backed redacted, kept-visible, needs-review, unresolved, merged, person, and plate entities. The focus outline is not rendered into media.
 
-Object policy changes, merges, correction saves, checkpoint restores, and destructive baseline resets return accepted working-state revisions plus local materialization job IDs only when media publication is required. The workspace computes deterministic effective privacy-region hashes before and after each media-aware mutation. If the hash is unchanged and current media is already compatible, media rendering is skipped and audited; if a compatible publication is already queued or running, that job is reused. v1.5 also records the exact source frames whose normalized effective region sets changed and exposes that plan through job progress. Publication still uses the proven full-render path unless a future segment renderer proves output parity.
+Object policy changes, merges, correction saves, checkpoint restores, and destructive baseline resets return accepted working-state revisions plus local materialization job IDs only when media publication is supported and required. The workspace computes deterministic effective privacy-region hashes before and after each media-aware mutation. If a new canonical workspace reports deferred Latest reviewed publication, the mutation response records the changed-frame plan with `publication_status: deferred` and queues no job. If a legacy workspace hash is unchanged and current media is already compatible, media rendering is skipped and audited; if a compatible publication is already queued or running, that job is reused. v1.5 also records the exact source frames whose normalized effective region sets changed and exposes that plan through job progress. Publication still uses the proven full-render path unless a future segment renderer proves output parity.
+
+Queued materialization jobs capture the accepted revision, session head, target effective-region hash, case ID, and a materialization generation. Reset and restore invalidate queued jobs for the affected cases, and a running job must pass the publication guard again before writing an authoritative Latest reviewed projection. Explicit materialization retry on a deferred canonical workspace returns `latest_reviewed_publication_deferred` and does not queue a job. This protects existing package publication from stale reset races; it does not add a canonical mixed Latest reviewed output for new case-generated workspaces.
 
 `Restart review` is a narrow case-scoped workflow action. It clears active review decisions, task buckets, task selection, sweep acknowledgement, and transient review progress for the selected case while preserving entity policy overrides, canonical merges, manual corrections, checkpoints, History, and Latest reviewed. `Reset all edits to Automatic baseline` is the separate destructive case-scoped action that removes active entity edits, merges, manual corrections, reviewer-created manual issues, review decisions, sweep acknowledgement, and the active Latest reviewed projection while preserving append-only History and checkpoints.
 
 Review mode shows one large video player with a version selector:
+
+- New canonical packages expose only media roles that actually exist, such as Original and Automatic preview. Task-local correction preview media may be selected as a diagnostic preview after a preview action, but it is not labeled or stored as Latest reviewed.
+- Legacy packages that already publish Latest reviewed retain their existing version selector behavior.
 
 - Original
 - Automatic
@@ -115,6 +134,9 @@ case, session, source media, working-state revision, draft hash, and preview
 hash. Save validates that token, persists an immutable correction revision,
 appends `manual_correction_saved`, creates the verification task, schedules
 Latest reviewed materialization, and preserves the current source frame.
+The public browser flow calls Preview before Save and sends the returned
+`preview_token` with the exact correction draft. Missing, stale, cross-case, or
+changed-draft tokens are rejected.
 
 Long raw review intervals are preserved in audit lineage but projected into
 non-overlapping reviewer-facing child tasks. The chunking target is about three
@@ -226,6 +248,8 @@ Finalization is allowed only when:
 - frame spans are complete;
 - output media validation passes;
 - rendered-region verification passes.
+
+For new canonical workspaces, finalization also requires an authoritative Latest reviewed publication. Until mixed reviewed-region compilation and Latest reviewed publication are implemented, valid finalization attempts fail closed with `latest_reviewed_publication_deferred`; correction-only preview media is never used as the finalization candidate.
 
 Finalize with:
 

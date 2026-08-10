@@ -343,11 +343,16 @@ def test_redact_video_runs_policy_flow_without_target_ids(
         write_json(case_dir / "privacy_regions" / "interval_decisions.json", {})
         write_json(case_dir / "review" / "review_tasks.json", {"tasks": []})
         (case_dir / "automatic_preview").mkdir(parents=True, exist_ok=True)
-        (case_dir / "automatic_preview" / "redacted_preview.mp4").write_bytes(b"preview")
+        preview_path = case_dir / "automatic_preview" / "redacted_preview.mp4"
+        preview_path.write_bytes(Path(input_video_arg).read_bytes())
         write_json(
             case_dir / "automatic_preview" / "render_manifest.json",
-            {"source_video_hash": info.sha256},
-        )
+                {
+                    "output_video_hash": media.sha256_file(preview_path),
+                    "rendered_region_count": 0,
+                    "source_video_hash": info.sha256,
+                },
+            )
         write_json(case_dir / "automatic_preview" / "validation.json", {"passed": True})
         write_json(
             case_dir / "final" / "final_status.json",

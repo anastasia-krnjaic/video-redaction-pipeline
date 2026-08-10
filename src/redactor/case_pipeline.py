@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from redactor import (
+    case_ids,
     case_manifests,
     detection,
     face_policy,
     face_rendering,
     media,
+    mixed_review_workspace,
     plate_detection,
     plate_rendering,
     plate_tracking,
@@ -41,11 +43,15 @@ STAGE_POLICY = "POLICY"
 STAGE_PRIVACY_REGIONS = "PRIVACY_REGIONS"
 STAGE_REVIEW_TASKS = "REVIEW_TASKS"
 STAGE_AUTOMATIC_PREVIEW = "AUTOMATIC_PREVIEW"
+STAGE_REVIEW_WORKSPACE = "REVIEW_WORKSPACE"
+STAGE_REVIEW_SESSION = "REVIEW_SESSION"
 STAGE_LATEST_REVIEWED = "LATEST_REVIEWED"
 STAGE_FINALIZATION = "FINALIZATION"
 STAGE_EVALUATION = "EVALUATION"
 
 STATUS_SUCCEEDED = "succeeded"
+STATUS_READY = "ready"
+STATUS_NOT_STARTED = "not_started"
 STATUS_BLOCKED = "blocked"
 STATUS_SKIPPED = "skipped"
 STATUS_NOT_RUN = "not_run"
@@ -703,8 +709,9 @@ def run_case_pipeline(
     ensure_case_output_dir(output_dir, overwrite=options.overwrite)
     source_info = media.probe_media(input_video)
     source_identity = SourceIdentity.from_video(input_video, info=source_info)
+    case_id = case_ids.validate_case_id(output_dir.name)
     context = CaseContext(
-        case_id=output_dir.name,
+        case_id=case_id,
         output_dir=output_dir,
         selected_categories=categories,
         source_identity=source_identity,
@@ -811,6 +818,7 @@ def run_case_pipeline(
                 category_results=category_results,
                 render_plan=render_plan,
                 combined_preview=None,
+                review_workspace=None,
                 stage_statuses=deferred_case_stage_statuses(stage_statuses),
                 case_phase=CASE_PHASE_AUTOMATIC_PREVIEW_FAILED,
                 case_blockers=(blocker,),
@@ -864,12 +872,94 @@ def run_case_pipeline(
         case_phase = CASE_PHASE_AUTOMATIC_PREVIEW_BLOCKED
     else:
         case_phase = CASE_PHASE_AUTOMATIC_PREVIEW_READY
+    review_workspace_result = None
+    if category_failures:
+        stage_statuses.append(
+            StageStatus(
+                stage=STAGE_REVIEW_WORKSPACE,
+                status=STATUS_FAILED,
+                blockers=category_failure_blockers,
+                reason="requested_category_failed",
+                summary={"review_workspace": "not_created"},
+            )
+        )
+    elif render_plan_blockers:
+        stage_statuses.append(
+            StageStatus(
+                stage=STAGE_REVIEW_WORKSPACE,
+                status=STATUS_BLOCKED,
+                blockers=render_plan_blockers,
+                reason="render_plan_validation_blocked",
+                summary={"review_workspace": "not_created"},
+            )
+        )
+    else:
+        try:
+            review_workspace_result = mixed_review_workspace.build_case_review_workspace(
+                context,
+                category_results=category_results,
+                render_plan=render_plan,
+                combined_preview=combined_preview,
+                case_blockers=case_blockers,
+                overwrite=options.overwrite,
+            )
+        except Exception as exc:
+            blocker = "review_workspace_generation_failed"
+            stage_statuses.append(
+                StageStatus(
+                    stage=STAGE_REVIEW_WORKSPACE,
+                    status=STATUS_FAILED,
+                    blockers=(blocker,),
+                    reason="review_workspace_generation_failed",
+                    summary={"error": str(exc)},
+                )
+            )
+            stage_statuses = deferred_case_stage_statuses(stage_statuses)
+            write_unified_case_manifest(
+                context,
+                category_results=category_results,
+                render_plan=render_plan,
+                combined_preview=combined_preview,
+                review_workspace=None,
+                stage_statuses=stage_statuses,
+                case_phase=case_phase,
+                case_blockers=tuple(sorted((*case_blockers, blocker))),
+                source_identity_artifact=source_identity_artifact,
+                category_failures=category_failures,
+            )
+            raise RuntimeError(f"review workspace generation failed: {exc}") from exc
+        stage_statuses.append(
+            StageStatus(
+                stage=STAGE_REVIEW_WORKSPACE,
+                status=STATUS_READY,
+                artifacts=tuple(review_workspace_result["artifacts"]),
+                reason="review_workspace_ready",
+                summary=review_workspace_result["summary"],
+            )
+        )
+        stage_statuses.append(
+            StageStatus(
+                stage=STAGE_REVIEW_SESSION,
+                status=STATUS_NOT_STARTED,
+                artifacts=tuple(
+                    artifact
+                    for artifact in review_workspace_result["artifacts"]
+                    if artifact.role == "mixed_review_session_state"
+                ),
+                reason="review_session_not_started",
+                summary={
+                    "history_namespace": "review_workspace/sessions",
+                    "reason": "review sessions are created only when a reviewer starts review",
+                },
+            )
+        )
     stage_statuses = deferred_case_stage_statuses(stage_statuses)
     manifest = write_unified_case_manifest(
         context,
         category_results=category_results,
         render_plan=render_plan,
         combined_preview=combined_preview,
+        review_workspace=review_workspace_result,
         stage_statuses=stage_statuses,
         case_phase=case_phase,
         case_blockers=case_blockers,
@@ -887,6 +977,7 @@ def run_case_pipeline(
         "combined_preview": combined_preview,
         "manifest": manifest,
         "render_plan": render_plan,
+        "review_workspace": review_workspace_result,
         "schema_version": SCHEMA_VERSION,
         "stage_statuses": [stage.to_dict() for stage in stage_statuses],
     }
@@ -918,8 +1009,8 @@ def deferred_case_stage_statuses(stage_statuses: list[StageStatus]) -> list[Stag
             reason="latest_reviewed_deferred",
             summary={
                 "reason": (
-                    "Latest reviewed publication is not run by this "
-                    "automatic-preview checkpoint"
+                    "Latest reviewed publication requires a review session and is "
+                    "not run by this automatic-preview checkpoint"
                 )
             },
         ),
@@ -928,7 +1019,7 @@ def deferred_case_stage_statuses(stage_statuses: list[StageStatus]) -> list[Stag
             status=STATUS_NOT_RUN,
             reason="case_level_finalization_deferred",
             summary={
-                "reason": "mixed review and case-level finalization are deferred"
+                "reason": "case-level finalization requires explicit reviewed-case finalization"
             },
         ),
         StageStatus(
@@ -1220,6 +1311,7 @@ def write_unified_case_manifest(
     category_results: list[CategoryRunResult],
     render_plan: dict[str, Any],
     combined_preview: dict[str, Any] | None,
+    review_workspace: dict[str, Any] | None,
     stage_statuses: list[StageStatus],
     case_phase: str,
     case_blockers: tuple[str, ...],
@@ -1239,6 +1331,8 @@ def write_unified_case_manifest(
     ]
     if combined_preview is not None:
         artifacts.extend(combined_preview["artifacts"])
+    if review_workspace is not None:
+        artifacts.extend(review_workspace["artifacts"])
     artifacts = list(
         case_manifests.validate_artifact_inventory(
             artifacts,
@@ -1273,19 +1367,24 @@ def write_unified_case_manifest(
             "case_level": True,
             "status": STATUS_NOT_RUN,
             "reason": (
-                "mixed review and case-level finalization are deferred for this "
-                "automatic-preview checkpoint"
+                "case-level finalization is deferred until reviewed-case finalization "
+                "is explicitly requested"
             ),
         },
         "latest_reviewed": {
             "status": STATUS_NOT_RUN,
-            "reason": "Latest reviewed publication is not run by redact-video in this checkpoint",
+            "reason": (
+                "Latest reviewed publication requires a review session and is not "
+                "run by redact-video in this checkpoint"
+            ),
         },
-        "review": {
-            "category_review_artifacts_created": True,
-            "mixed_review_status": STATUS_NOT_RUN,
-            "reason": "mixed review generation is deferred",
-        },
+        "review": review_manifest_payload(
+            context,
+            review_workspace=review_workspace,
+            category_failures=category_failures or [],
+            render_plan_blockers=tuple(str(item) for item in render_plan.get("blockers", [])),
+        ),
+        "review_session": review_session_manifest_payload(review_workspace),
         "evaluation": {
             "status": STATUS_NOT_RUN,
             "reason": "evaluation requires explicit ground truth inputs",
@@ -1300,6 +1399,74 @@ def write_unified_case_manifest(
         context.output_dir / "case_manifest.json",
         manifest,
     )
+
+
+def review_manifest_payload(
+    context: CaseContext,
+    *,
+    review_workspace: dict[str, Any] | None,
+    category_failures: list[dict[str, Any]],
+    render_plan_blockers: tuple[str, ...],
+) -> dict[str, Any]:
+    if review_workspace is not None:
+        summary = dict(review_workspace.get("summary") or {})
+        workspace_manifest = dict(review_workspace.get("manifest") or {})
+        category_run_identities = dict(
+            workspace_manifest.get("category_run_manifest_identities") or {}
+        )
+        return {
+            "artifact_ids": [
+                artifact.artifact_id for artifact in review_workspace.get("artifacts", ())
+            ],
+            "category_run_manifest_identities": category_run_identities,
+            "category_run_manifest_identity_hash": stable_hash(category_run_identities),
+            "category_review_artifacts_created": True,
+            "entity_count": summary.get("entity_count", 0),
+            "latest_reviewed_publication": workspace_manifest.get(
+                "latest_reviewed_publication"
+            ),
+            "mixed_review_status": STATUS_READY,
+            "reason": "review workspace is ready",
+            "selected_categories": list(context.selected_categories),
+            "task_count": summary.get("task_count", 0),
+            "validation": review_workspace.get("validation", {}),
+            "workspace_path": review_workspace.get("workspace_dir"),
+        }
+    if category_failures:
+        return {
+            "category_review_artifacts_created": False,
+            "mixed_review_status": STATUS_FAILED,
+            "reason": "requested category failed before review workspace generation",
+            "selected_categories": list(context.selected_categories),
+        }
+    if render_plan_blockers:
+        return {
+            "category_review_artifacts_created": True,
+            "mixed_review_status": STATUS_BLOCKED,
+            "reason": "render plan validation blocked review workspace generation",
+            "render_plan_blockers": list(render_plan_blockers),
+            "selected_categories": list(context.selected_categories),
+        }
+    return {
+        "category_review_artifacts_created": True,
+        "mixed_review_status": STATUS_NOT_RUN,
+        "reason": "review workspace was not generated",
+        "selected_categories": list(context.selected_categories),
+    }
+
+
+def review_session_manifest_payload(review_workspace: dict[str, Any] | None) -> dict[str, Any]:
+    if review_workspace is None:
+        return {
+            "reason": "review workspace is not ready",
+            "status": STATUS_NOT_RUN,
+        }
+    return {
+        "history_namespace": "review_workspace/sessions",
+        "reason": "review sessions are created only when a reviewer starts review",
+        "session_state_artifact_id": "case:mixed_review_session_state",
+        "status": STATUS_NOT_STARTED,
+    }
 
 
 def bind_category_run_manifest(

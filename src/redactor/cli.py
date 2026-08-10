@@ -2419,6 +2419,7 @@ def redact_video(
         raise click.ClickException(str(exc)) from exc
 
     manifest = result["manifest"]
+    review_workspace = result.get("review_workspace")
     if selected_categories == (case_pipeline.CATEGORY_FACE,):
         face_summary = manifest["category_summaries"].get(case_pipeline.CATEGORY_FACE, {})
         privacy_summary = face_summary.get("privacy_summary", {})
@@ -2446,6 +2447,14 @@ def redact_video(
         if blockers:
             click.echo(f"Review/final blockers recorded: {', '.join(blockers)}")
         click.echo("Latest reviewed and case finalization were not run.")
+    if review_workspace:
+        workspace_label = (
+            "mixed review workspace" if len(selected_categories) > 1 else "review workspace"
+        )
+        click.echo(
+            f"Wrote {workspace_label}: "
+            f"{output_dir / review_workspace['workspace_dir']}"
+        )
     click.echo(f"Wrote case manifest: {output_dir / 'case_manifest.json'}")
 
 
