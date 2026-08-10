@@ -2,7 +2,7 @@
 
 This document records the backend refactor that moves full-video automatic privacy-preview orchestration from separate face and plate command paths toward one case-level checkpoint. It does not change detector selection, detector thresholds, tracker behavior, rendering semantics, review policy, or finalization gates.
 
-This checkpoint is not a completed mixed finalization pipeline. The canonical `redact-video` command produces automatic, non-final preview evidence, a fail-closed case artifact manifest, and a mixed review workspace package whose review session starts only when a reviewer opens review.
+The canonical `redact-video` command produces automatic, non-final preview evidence, a fail-closed case artifact manifest, and a mixed review workspace package whose review session starts only when a reviewer opens review. Reviewed publication and finalization remain explicit review-session actions, not automatic side effects of the command.
 
 ## Verified Before-State
 
@@ -43,7 +43,7 @@ Executed by the canonical command:
 - mixed review workspace generation;
 - fail-closed case manifest publication.
 
-Represented but not executed:
+Represented but not executed by the automatic command:
 
 - review session start and human decisions;
 - Latest reviewed publication;
@@ -97,13 +97,13 @@ The primary media pair is the original source and the authoritative automatic pr
 
 Case IDs use the shared conservative grammar `^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$` before filesystem joins, route lookup, entity-event construction, session mutations, reset/restore, correction handling, finalization, and browser tab generation. Correction saves keep the preview-token flow: public clients preview first, receive a token bound to the draft and current session revision, and save with that token. Preview media is always a `correction_preview` diagnostic and is never surfaced as Latest reviewed. New canonical workspaces advertise `latest_reviewed_publication.status = supported`, so correction saves can queue case-level reviewed materialization once required blocking review tasks are resolved. Legacy deferred workspaces retain the no-publication path, and all queued or running jobs retain the materialization guard so resets or newer media-affecting mutations supersede stale authoritative media.
 
-Review session creation is deliberately not automatic. `REVIEW_WORKSPACE` is recorded as `ready`, while `REVIEW_SESSION` is recorded as `not_started` until a reviewer starts a session. New canonical face-only, plate-only, and mixed workspaces record Latest reviewed, finalization, and evaluation as `not_run` in the generated workspace manifest. Runtime Latest reviewed readiness is derived from the atomic `latest_reviewed/current.json` pointer and its immutable revision manifest, not from mutable manifest caches. If the active render-state projection changes after publication, readers stop treating the old pointer as current until a matching revision publishes. Finalization and evaluation remain separate explicit lifecycle steps.
+Review session creation is deliberately not automatic. `REVIEW_WORKSPACE` is recorded as `ready`, while `REVIEW_SESSION` is recorded as `not_started` until a reviewer starts a session. New canonical face-only, plate-only, and mixed workspaces record Latest reviewed, finalization, and evaluation as `not_run` in the generated workspace manifest. Runtime Latest reviewed readiness is derived from the atomic `latest_reviewed/current.json` pointer and its immutable revision manifest, not from mutable manifest caches. If the active render-state projection changes after publication, readers stop treating the old pointer as current until a matching revision publishes. The active projection hash is versioned separately from the session audit head: `active_projection.v2` excludes non-media sweep and finalization bookkeeping, while pre-schema pointers validate only through explicit `active_projection.v1` compatibility and unknown schemas fail closed. Canonical finalization resolves that current pointer, requires a revision-bound full-video sweep acknowledgement, revalidates source/config/category lineage, task and correction gates, media validation, region validation, and pending-publication state, then materializes Final by hardlinking or copying the exact Latest reviewed MP4 bytes. The final approval is published through `final/current.json`; failed, partial, or stale attempts are never exposed as current Final. Finalization and evaluation remain separate explicit lifecycle steps.
 
 Reviewed-region identity is deliberately semantic. The compiler excludes generated correction IDs, revision IDs, timestamps, event IDs, preview paths, and preview-token artifacts from `reviewed_region_set_sha256`, while retaining those values in append-only correction records and session hash chains. The semantic identity includes source identity, selected categories, category-run/config binding, automatic baseline semantics, effective keep/redact policy, merge/rejection state, semantic corrections, final reviewed geometry, and renderer configuration where it affects pixels.
 
 `review_workspace`, `review_working_state`, `review_sessions`, `review_corrections`, and `review_finalization` remain the authority for reviewer decisions, latest reviewed state, correction provenance, full sweep acknowledgement, hash checks, and final reviewed rendering. Face reviewed/final rendering remains on the existing reviewed-rendering boundary.
 
-The generated case manifest starts Latest reviewed, finalization, and evaluation as `not_run`. Runtime Latest reviewed may later resolve to `ready` through the current pointer and immutable revision manifest; finalization and evaluation remain separate explicit lifecycle steps.
+The generated case manifest starts Latest reviewed, finalization, and evaluation as `not_run`. Runtime Latest reviewed may later resolve to `ready` through the current pointer and immutable revision manifest. Runtime Final may later resolve to `ready` only through `final/current.json`, whose manifest binds the approved Latest reviewed revision, reviewed-region set, source hash, session projection, sweep acknowledgement, validation artifacts, finalization input hash, and byte-identical final video hash.
 
 ## Evaluation
 
@@ -121,5 +121,5 @@ Existing face-only `redact-video` output still includes `audit_manifest.json`; i
 
 - Migrate reviewed/final face rendering after the automatic-preview migration remains stable.
 - Add machine-readable plate ground truth before publishing plate scores.
-- Implement mixed finalization once reviewed plate corrections and final rendering gates are fully aligned.
+- Clean up legacy reviewed/final renderer boundaries once canonical finalization remains stable.
 - Add performance instrumentation for multi-category runs after behavior parity remains stable.

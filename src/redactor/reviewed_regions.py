@@ -347,6 +347,9 @@ def materialize_latest_reviewed_revision(
         "active_decisions_hash": provenance["reviewed_region_identity"][
             "active_decisions_hash"
         ],
+        "active_projection_hash_schema_version": provenance["reviewed_region_identity"].get(
+            "active_projection_hash_schema_version"
+        ),
         "accepted_working_state_revision": accepted_revision,
         "automatic_baseline_region_set_sha256": provenance["reviewed_region_identity"][
             "automatic_baseline_region_set_sha256"
@@ -553,6 +556,9 @@ def materialize_latest_reviewed_revision(
             after_state={
                 "accepted_working_state_revision": accepted_revision,
                 "active_projection_hash": accepted_revision,
+                "active_projection_hash_schema_version": (
+                    review_working_state.ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+                ),
                 "case_id": case_id,
                 "effective_regions_hash": reviewed_hash,
                 "latest_reviewed": role,
@@ -1314,6 +1320,9 @@ def reviewed_region_identity(
         "active_correction_semantic_sha256": active_correction_semantic_hash,
         "active_corrections_hash": active_correction_audit_hash,
         "active_decisions_hash": active_decisions_hash,
+        "active_projection_hash_schema_version": state.get(
+            "active_projection_hash_schema_version"
+        ),
         "automatic_baseline_region_count": len(baseline_regions),
         "automatic_baseline_region_set_sha256": baseline_hash,
         "case_manifest_input_sha256": case_manifest_review_input_sha256_file(
@@ -1349,6 +1358,7 @@ def reviewed_region_identity(
         not in {
             "active_correction_audit_hash",
             "active_corrections_hash",
+            "active_projection_hash_schema_version",
             "case_manifest_input_sha256",
             "session_head_hash",
             "session_id",
@@ -1495,6 +1505,9 @@ def publication_guard_payload(
         "accepted_working_state_revision": accepted_revision,
         "active_corrections_hash": identity.get("active_corrections_hash"),
         "active_decisions_hash": identity.get("active_decisions_hash"),
+        "active_projection_hash_schema_version": identity.get(
+            "active_projection_hash_schema_version"
+        ),
         "automatic_baseline_region_set_sha256": identity.get(
             "automatic_baseline_region_set_sha256"
         ),
@@ -1542,6 +1555,7 @@ def assert_publication_guard_current(
         "accepted_working_state_revision",
         "active_corrections_hash",
         "active_decisions_hash",
+        "active_projection_hash_schema_version",
         "automatic_baseline_region_set_sha256",
         "case_manifest_sha256",
         "merge_rejection_state_hash",
@@ -1730,6 +1744,9 @@ def write_current_pointer(
     }
     pointer = {
         "accepted_working_state_revision": accepted_revision,
+        "active_projection_hash_schema_version": publication_guard.get(
+            "active_projection_hash_schema_version"
+        ),
         "case_id": case_id,
         "content_identities": content_identities,
         "current": True,
@@ -1755,6 +1772,9 @@ def write_current_pointer(
         "working_state_generation": accepted_revision,
         "working_state_projection_hash": publication_guard.get(
             "working_state_projection_hash"
+        ),
+        "working_state_projection_schema_version": publication_guard.get(
+            "active_projection_hash_schema_version"
         ),
         "workspace_manifest_input_sha256": publication_guard.get(
             "workspace_manifest_input_sha256"
@@ -1788,8 +1808,10 @@ def current_latest_reviewed_role(
     session_dir: Path | None,
     *,
     case_id: str,
-    active_projection_hash: str | None,
+    active_projection_hashes: dict[str, str],
 ) -> dict[str, Any]:
+    from redactor import review_working_state
+
     pointer = load_current_pointer(package_root)
     if not pointer:
         return {}
@@ -1806,7 +1828,16 @@ def current_latest_reviewed_role(
         or validated.get("accepted_working_state_revision")
         or ""
     )
-    if active_projection_hash and expected_revision and active_projection_hash != expected_revision:
+    try:
+        current_revision_candidates = (
+            review_working_state.active_projection_hash_candidates_for_pointer(
+                active_projection_hashes,
+                validated,
+            )
+        )
+    except ValueError:
+        return {}
+    if expected_revision and expected_revision not in current_revision_candidates:
         return {}
     latest = dict(validated.get("latest_reviewed") or {})
     if latest:
@@ -1816,10 +1847,16 @@ def current_latest_reviewed_role(
 
 
 def validate_current_pointer(package_root: Path, pointer: dict[str, Any]) -> dict[str, Any]:
+    from redactor import review_working_state
+
     if pointer.get("schema_version") != CURRENT_POINTER_SCHEMA_VERSION:
         raise ReviewedRegionCompilationError("Latest reviewed current pointer schema mismatch")
     if pointer.get("status") != "ready" or pointer.get("current") is not True:
         raise ReviewedRegionCompilationError("Latest reviewed current pointer is not ready")
+    try:
+        pointer_projection_schema = review_working_state.active_projection_pointer_schema(pointer)
+    except ValueError as exc:
+        raise ReviewedRegionCompilationError(str(exc)) from exc
     case_id = case_ids.validate_case_id(str(pointer.get("case_id") or ""))
     revision_manifest_path = case_ids.contained_path(
         package_root,
@@ -1834,6 +1871,17 @@ def validate_current_pointer(package_root: Path, pointer: dict[str, Any]) -> dic
     revision_manifest = json.loads(revision_manifest_path.read_text(encoding="utf-8"))
     if revision_manifest.get("schema_version") != REVISION_SCHEMA_VERSION:
         raise ReviewedRegionCompilationError("Latest reviewed revision manifest schema mismatch")
+    revision_projection_schema = (
+        revision_manifest.get("active_projection_hash_schema_version")
+        or (revision_manifest.get("publication_guard") or {}).get(
+            "active_projection_hash_schema_version"
+        )
+        or pointer_projection_schema
+    )
+    if revision_projection_schema != pointer_projection_schema:
+        raise ReviewedRegionCompilationError(
+            "Latest reviewed projection hash schema mismatch"
+        )
     for key in (
         "revision_id",
         "reviewed_region_set_sha256",

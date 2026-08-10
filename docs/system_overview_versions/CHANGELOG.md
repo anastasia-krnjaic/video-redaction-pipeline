@@ -1,5 +1,19 @@
 # System Overview Changelog
 
+## v036 — 2026-08-10
+
+Implemented authoritative canonical finalization:
+
+- added explicit canonical finalization for face-only, plate-only, and mixed workspaces through the current `latest_reviewed/current.json` pointer;
+- bound full-video sweep acknowledgement to the exact Latest reviewed revision, video hash, reviewed-region set, source, session, and workspace identity;
+- versioned the active media projection hash as `active_projection.v2`, kept sweep/finalization bookkeeping out of media identity, and validated pre-schema pointers through explicit `active_projection.v1` compatibility when reviewed pixels are unchanged;
+- materialized Final by hardlink or verified copy of the Latest reviewed MP4 and required identical SHA-256 bytes;
+- published current Final only through atomic `final/current.json` plus immutable `final/revisions/<finalization_id>/` manifests;
+- added deterministic `finalization_input_sha256` for idempotent repeat finalization of the same approved state;
+- hid stale Final after later review-state changes while preserving immutable historical artifacts;
+- kept correction previews, automatic previews, failed attempts, and partial artifacts out of the Final version role;
+- left reviewed/final legacy renderer cleanup, machine-readable plate Ground Truth/evaluation, and production-readiness work as separate deferred gates.
+
 ## v035 — 2026-08-10
 
 Implemented authoritative canonical Latest reviewed publication:

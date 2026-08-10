@@ -42,6 +42,10 @@ New canonical face-only, plate-only, and mixed packages carry `latest_reviewed_p
 
 The current Latest reviewed revision has one authority: `latest_reviewed/current.json`. That pointer is written by same-directory temporary file plus atomic replace only after the immutable revision directory, media, reviewed regions, validation files, and revision manifest reopen and validate. Workspace and case manifests do not duplicate mutable current revision state; readers resolve Latest reviewed from the pointer and reject it when the pointer, revision manifest, workspace hash, session, source hash, media hash, or active render-state projection no longer match.
 
+The active render-state projection is a media identity, not the session audit head. Its current hash schema, `active_projection.v2`, includes the review state that can change compiled reviewed pixels and excludes sweep acknowledgements, finalization attempts, materialization job IDs, timestamps, paths, and other audit-only bookkeeping. Older pointers without an explicit schema are treated as `active_projection.v1` and validate only through the declared legacy hash contract, with compatibility limited to unchanged media-affecting state. Unknown projection hash schemas fail closed.
+
+The current Final revision also has one authority: `final/current.json`. Canonical finalization consumes the current Latest reviewed pointer and validates the exact immutable revision behind it. It does not run detection, tracking, reviewed-region compilation for output construction, privacy rendering, FFmpeg encoding, or OpenCV video writing to create Final. If a separate final MP4 is materialized, it is a hardlink or verified copy of the Latest reviewed MP4 and must have the same SHA-256.
+
 The reviewed-region hash is semantic, not an audit-record hash. Correction records still keep generated `correction_id`, `revision_id`, timestamps, reviewer metadata, preview tokens, and event lineage for append-only history and session hash chains. The compiler hashes a separate semantic correction projection plus the selected source/category/config identities, effective policy, merge/rejection state, active reviewed geometry, and renderer behavior. Different audit histories can therefore share the same `reviewed_region_set_sha256`, while their publication manifests and session heads remain distinct.
 
 ## Launch
@@ -115,6 +119,8 @@ Object policy changes, merges, correction saves, checkpoint restores, and destru
 
 Queued materialization jobs capture the accepted render-state revision, session head, target reviewed-region hash, case ID, workspace manifest hash, category-run baseline identity, renderer identity, and a materialization generation. Reset, restore, newer media-affecting decisions, policies, merges, and corrections supersede queued or running jobs. Durable correction-verification task scaffolding remains in audit/finalization state but does not by itself make the just-published media stale. Explicit materialization retry on a legacy deferred workspace returns `latest_reviewed_publication_deferred` and does not queue a job.
 
+Sweep acknowledgement and canonical finalization events affect approval eligibility and the session hash chain. They do not change active media projection identity unless they also carry a media-affecting review mutation; a stale pointer still stays hidden when decisions, policies, merges, correction geometry, or reset generation change the compiled reviewed regions.
+
 `Restart review` is a narrow case-scoped workflow action. It clears active review decisions, task buckets, task selection, sweep acknowledgement, and transient review progress for the selected case while preserving entity policy overrides, canonical merges, manual corrections, checkpoints, History, and immutable Latest reviewed artifacts; supported-canonical readers still hide any pointer that no longer matches the active render-state projection. `Reset all edits to Automatic baseline` is the separate destructive case-scoped action that removes active entity edits, merges, manual corrections, reviewer-created manual issues, review decisions, sweep acknowledgement, and the active Latest reviewed projection while preserving append-only History and checkpoints.
 
 Review mode shows one large video player with explicit media roles:
@@ -123,17 +129,22 @@ Review mode shows one large video player with explicit media roles:
 - Automatic is the non-final automatic preview.
 - Correction preview is a transient, task-local diagnostic render returned by Preview. It is not persisted as a normal version, never fills a `latest_reviewed` field, never satisfies finalization, and remains separate after Save.
 - Latest reviewed appears only after the compiler publishes a validated immutable revision and `latest_reviewed/current.json` points to it for the current session projection.
+- Final appears only after explicit finalization publishes `final/current.json` for the same current Latest reviewed revision and matching sweep acknowledgement.
 - Stale or failed revisions remain historical artifacts only; they are not shown as current Latest reviewed.
+- A previous Final remains immutable history after a later decision, correction, merge, or reset, but it is not shown as current Final for the changed review state.
 - Legacy packages that already publish Latest reviewed retain their existing version selector behavior.
 
 - Original
 - Automatic
 - Latest reviewed
+- Final
 
-The normal selector remains exactly these three options in Day, Night, and Final
-Results. Switching versions preserves the active source frame, and a package
-build fails if the displayed versions do not share source-frame mapping, frame
-count, FPS, resolution, and decoded-frame evidence at the audited sample frames.
+Before finalization, the normal selector shows Original, Automatic, and Latest
+reviewed when the reviewed pointer is current. After finalization, Final is
+added only through the valid final pointer. Switching versions preserves the
+active source frame, and a package build fails if the displayed versions do not
+share source-frame mapping, frame count, FPS, resolution, and decoded-frame
+evidence at the audited sample frames.
 
 Manual redaction Preview is transient. It does not create a persistent
 Correction preview version and does not create a verification task until Save.
@@ -250,14 +261,16 @@ Finalization is allowed only when:
 - every required task is green;
 - every correction has been verified;
 - no Uncertain / Escalate task remains;
-- the full-video sweep has been acknowledged or overridden with a written reason;
+- the full-video sweep has been explicitly acknowledged for the exact current Latest reviewed revision and video hash;
 - the session event hash chain is valid;
 - source hashes and configuration-freeze hashes match;
 - frame spans are complete;
 - output media validation passes;
 - rendered-region verification passes.
 
-For new canonical workspaces, finalization also requires an authoritative Latest reviewed publication whose reviewed-region hash still matches the active review projection. Correction-only preview media is never used as the finalization candidate.
+For new canonical workspaces, finalization also requires an authoritative Latest reviewed publication whose reviewed-region hash still matches the active media-affecting review projection. The sweep acknowledgement record binds the case ID, source SHA-256, session ID, Latest reviewed revision ID, Latest reviewed video SHA-256, reviewed-region set hash, and workspace manifest SHA-256. A sweep for an older revision cannot approve a newer reviewed output. Correction-only preview media is never used as the finalization candidate.
+
+Canonical finalization writes one immutable revision under `final/revisions/<finalization_id>/` and publishes `final/current.json` only after the final video hash equals the Latest reviewed video hash and the publication guard still matches. Repeating finalization for the same approved state reuses the existing finalization input identity instead of overwriting an immutable revision.
 
 Finalize with:
 

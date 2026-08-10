@@ -1156,6 +1156,131 @@ def wait_for_materialization_job(
     raise AssertionError(f"materialization job did not finish: {job_id}")
 
 
+def write_canonical_base_regions(
+    package: Path,
+    case_id: str,
+    categories: tuple[str, ...],
+) -> None:
+    records: list[PrivacyRegionRecord] = []
+    if CATEGORY_FACE in categories:
+        records.append(
+            PrivacyRegionRecord(
+                approval_state=APPROVAL_ACCEPTED,
+                bbox_xyxy=(18, 18, 50, 36),
+                category=CATEGORY_FACE,
+                object_id="face_track_1",
+                provenance="face_detector_observation",
+                render_eligible=True,
+                source_frame=0,
+                source_record={"region_id": "face_region_1", "track_uid": "face_track_1"},
+            )
+        )
+    if CATEGORY_PLATE in categories:
+        records.append(
+            PrivacyRegionRecord(
+                approval_state=APPROVAL_ACCEPTED,
+                bbox_xyxy=(20, 20, 54, 34),
+                category=CATEGORY_PLATE,
+                object_id="plate_track_1",
+                provenance="plate_detector_observation",
+                render_eligible=True,
+                source_frame=0,
+                source_record={"region_id": "plate_region_1", "track_uid": "plate_track_1"},
+            )
+        )
+    review_finalization.write_privacy_region_records(
+        package / "regions" / f"{case_id}_current_regions.jsonl",
+        records,
+    )
+    write_review_entity_shell(package, case_id)
+
+
+def acknowledge_current_latest_reviewed(
+    package: Path,
+    session_dir: Path,
+    case_id: str,
+) -> dict[str, object]:
+    binding = review_finalization.sweep_acknowledgement_binding(
+        package_root=package,
+        session_dir=session_dir,
+        case_id=case_id,
+    )
+    return review_sessions.append_sweep_acknowledgement(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=case_id,
+        viewed_ranges=[{"start": 0, "end": 4}],
+        binding=binding,
+    )
+
+
+def publish_latest_and_acknowledge(
+    package: Path,
+    session_dir: Path,
+    case_id: str,
+) -> dict[str, object]:
+    state = review_working_state.derive_working_state(package, session_dir)
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=case_id,
+        accepted_revision=state["active_projection_hash"],
+    )
+    acknowledge_current_latest_reviewed(package, session_dir, case_id)
+    return materialization
+
+
+def rewrite_latest_reviewed_pointer_as_legacy_projection_v1(
+    package: Path,
+    session_dir: Path,
+    case_id: str,
+) -> str:
+    projection = review_working_state.derive_active_review_projection(
+        package_root=package,
+        session_dir=session_dir,
+        entities=review_working_state.load_entity_index(package),
+    )
+    legacy_hash = review_working_state.active_projection_hash(
+        projection,
+        schema_version=review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
+    )
+    pointer_path = package / "latest_reviewed" / "current.json"
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    revision_manifest_path = package / pointer["revision_manifest"]
+    revision_manifest = json.loads(revision_manifest_path.read_text(encoding="utf-8"))
+    publication_guard = dict(revision_manifest.get("publication_guard") or {})
+    for payload in (revision_manifest, publication_guard):
+        payload["accepted_working_state_revision"] = legacy_hash
+        payload["working_state_projection_hash"] = legacy_hash
+        payload.pop("active_projection_hash_schema_version", None)
+        payload.pop("working_state_projection_schema_version", None)
+        payload.pop("projection_hash_schema_version", None)
+    revision_manifest["publication_guard"] = publication_guard
+    revision_manifest["accepted_working_state_revision"] = legacy_hash
+    revision_manifest.pop("revision_manifest_sha256", None)
+    revision_manifest["revision_manifest_sha256"] = stable_hash(revision_manifest)
+    write_json(revision_manifest_path, revision_manifest)
+    revision_manifest_artifact_sha256 = media_sha(revision_manifest_path)
+
+    pointer["accepted_working_state_revision"] = legacy_hash
+    pointer["working_state_generation"] = legacy_hash
+    pointer["working_state_projection_hash"] = legacy_hash
+    pointer["publication_guard"] = publication_guard
+    pointer["revision_manifest_artifact_sha256"] = revision_manifest_artifact_sha256
+    pointer["revision_manifest_sha256"] = revision_manifest["revision_manifest_sha256"]
+    pointer.pop("active_projection_hash_schema_version", None)
+    pointer.pop("working_state_projection_schema_version", None)
+    pointer["content_identities"]["latest_reviewed_revision_manifest"][
+        "sha256"
+    ] = revision_manifest_artifact_sha256
+    latest = dict(pointer.get("latest_reviewed") or {})
+    latest["accepted_working_state_revision"] = legacy_hash
+    latest["published_working_state_revision"] = legacy_hash
+    pointer["latest_reviewed"] = latest
+    write_json(pointer_path, pointer)
+    return legacy_hash
+
+
 def test_finalization_blocks_required_unresolved_task(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest = synthetic_case_manifest(package)
@@ -1785,6 +1910,41 @@ def test_repeated_same_policy_reuses_existing_pending_materialization_job(tmp_pa
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_workspace_server_shutdown_cancels_pending_materialization_timer(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest, entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    timer: review_workspace.threading.Timer | None = None
+    try:
+        post_json(
+            f"{base_url}/api/v1/object-policy",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "entity_id": entity["entity_id"],
+                "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                "session_id": session_dir.name,
+            },
+        )
+        state = server.materialization_jobs.case_state[(session_dir.name, manifest.case_id)]
+        timer = state["debounce_timer"]
+        assert isinstance(timer, review_workspace.threading.Timer)
+        assert timer.is_alive()
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    state = server.materialization_jobs.case_state[(session_dir.name, manifest.case_id)]
+    assert state["debounce_timer"] is None
+    assert timer is not None
+    assert not timer.is_alive()
 
 
 def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> None:
@@ -4057,6 +4217,232 @@ def test_supported_canonical_public_workflow_publishes_authoritative_latest_only
         server.server_close()
 
 
+def test_supported_canonical_public_sweep_finalize_and_versions(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        session_dir = review_sessions.session_directory(package, session["session_id"])
+        state = review_working_state.derive_working_state(package, session_dir)
+        materialization = review_working_state.materialize_latest_reviewed(
+            package,
+            session_dir,
+            case_id=manifest.case_id,
+            accepted_revision=state["active_projection_hash"],
+        )
+        before_finalize = json.loads(
+            urllib.request.urlopen(
+                (
+                    f"{base_url}/api/v1/cases/{manifest.case_id}/versions"
+                    f"?session_id={session['session_id']}"
+                ),
+                timeout=5,
+            )
+            .read()
+            .decode("utf-8")
+        )["versions"]
+        sweep_response = post_json(
+            f"{base_url}/api/events/sweep",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "session_id": session["session_id"],
+                "viewed_ranges": [{"start": 0, "end": 4}],
+            },
+        )
+        finalize_response = post_json(
+            f"{base_url}/api/finalize",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "session_id": session["session_id"],
+            },
+        )
+        after_finalize = json.loads(
+            urllib.request.urlopen(
+                (
+                    f"{base_url}/api/v1/cases/{manifest.case_id}/versions"
+                    f"?session_id={session['session_id']}"
+                ),
+                timeout=5,
+            )
+            .read()
+            .decode("utf-8")
+        )["versions"]
+
+        assert "final_reviewed" not in {role["role"] for role in before_finalize}
+        assert sweep_response["event"]["after_state"]["schema_version"] == (
+            "full_video_sweep_acknowledgement.v2"
+        )
+        assert finalize_response["ok"] is True
+        assert finalize_response["result"]["final_video_sha256"] == materialization["video_sha256"]
+        assert "final_reviewed" in {role["role"] for role in after_finalize}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_supported_canonical_legacy_projection_pointer_survives_sweep_and_finalization(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    state = review_working_state.derive_working_state(package, session_dir)
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=state["active_projection_hash"],
+    )
+    legacy_hash = rewrite_latest_reviewed_pointer_as_legacy_projection_v1(
+        package,
+        session_dir,
+        manifest.case_id,
+    )
+    latest_path = package / materialization["latest_reviewed"]["path"]
+
+    before_sweep = review_working_state.derive_working_state(package, session_dir)
+    blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+    acknowledge_current_latest_reviewed(package, session_dir, manifest.case_id)
+    after_sweep = review_working_state.derive_working_state(package, session_dir)
+    result = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+    after_final = review_working_state.derive_working_state(package, session_dir)
+    versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+
+    assert legacy_hash == before_sweep["active_projection_hashes"][
+        review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+    ]
+    assert before_sweep["active_projection_hash"] == after_sweep["active_projection_hash"]
+    assert before_sweep["active_projection_hash"] == after_final["active_projection_hash"]
+    assert before_sweep["active_projection_hashes"][
+        review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+    ] != after_sweep["active_projection_hashes"][
+        review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+    ]
+    assert manifest.case_id in before_sweep["materialized_latest_reviewed"]
+    assert manifest.case_id in after_sweep["materialized_latest_reviewed"]
+    assert manifest.case_id in after_final["materialized_latest_reviewed"]
+    assert any("full-video sweep" in item for item in blockers["blockers"])
+    assert result["finalized"] is True
+    assert result["latest_reviewed_revision_id"] == materialization["revision_id"]
+    assert result["final_video_sha256"] == media_sha(latest_path)
+    assert "final_reviewed" in {role["role"] for role in versions}
+
+
+def test_supported_canonical_unknown_projection_schema_blocks_pointer(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    state = review_working_state.derive_working_state(package, session_dir)
+    review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=state["active_projection_hash"],
+    )
+    pointer_path = package / "latest_reviewed" / "current.json"
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer["active_projection_hash_schema_version"] = "active_projection.future"
+    write_json(pointer_path, pointer)
+
+    stale_state = review_working_state.derive_working_state(package, session_dir)
+    result = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+
+    assert manifest.case_id not in stale_state["materialized_latest_reviewed"]
+    assert result["finalized"] is False
+    assert any("unknown active projection hash schema" in item for item in result["blockers"])
+
+
+def test_supported_canonical_projection_hash_is_copy_independent_and_corrupt_hash_blocks(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    state = review_working_state.derive_working_state(package, session_dir)
+    review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=state["active_projection_hash"],
+    )
+    copied = tmp_path / "copied" / "package"
+    shutil.copytree(package, copied)
+    copied_session_dir = copied / session_dir.relative_to(package)
+
+    original = review_working_state.derive_working_state(package, session_dir)
+    copied_state = review_working_state.derive_working_state(copied, copied_session_dir)
+    pointer_path = copied / "latest_reviewed" / "current.json"
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer["working_state_projection_hash"] = "0" * 64
+    pointer["accepted_working_state_revision"] = "0" * 64
+    write_json(pointer_path, pointer)
+    corrupted = review_working_state.derive_working_state(copied, copied_session_dir)
+
+    assert original["active_projection_hashes"] == copied_state["active_projection_hashes"]
+    assert manifest.case_id in copied_state["materialized_latest_reviewed"]
+    assert manifest.case_id not in corrupted["materialized_latest_reviewed"]
+
+
 def test_supported_canonical_public_required_task_blocks_then_allows_publication(
     tmp_path: Path,
 ) -> None:
@@ -4274,6 +4660,251 @@ def test_supported_canonical_materializes_revision_versions_and_reset(
     assert "latest_reviewed_current" not in reset_manifest
     assert reset_pointer["status"] == "not_current"
     assert latest_path.exists()
+
+
+@pytest.mark.parametrize(
+    "categories",
+    [
+        (CATEGORY_FACE,),
+        (CATEGORY_PLATE,),
+        (CATEGORY_FACE, CATEGORY_PLATE),
+    ],
+)
+def test_supported_canonical_finalization_approves_latest_reviewed_bytes(
+    tmp_path: Path,
+    categories: tuple[str, ...],
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, categories)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=categories,
+    )
+    session_dir = create_session(package, manifest)
+    materialization = publish_latest_and_acknowledge(package, session_dir, manifest.case_id)
+    latest_path = package / materialization["latest_reviewed"]["path"]
+    before_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+
+    result = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+    )
+    final_path = package / result["final_video"]
+    after_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+    pointer = json.loads((package / "final" / "current.json").read_text(encoding="utf-8"))
+    repeat = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+    )
+
+    assert "final_reviewed" not in {role["role"] for role in before_versions}
+    assert result["finalized"] is True
+    assert result["byte_equal_to_latest_reviewed"] is True
+    assert result["latest_reviewed_video_sha256"] == media_sha(latest_path)
+    assert result["final_video_sha256"] == media_sha(final_path)
+    assert result["final_video_sha256"] == result["latest_reviewed_video_sha256"]
+    assert result["final_video_materialization_mode"] in {"hardlink", "verified_copy"}
+    assert pointer["finalization_id"] == result["finalization_id"]
+    assert pointer["finalization_input_sha256"] == result["finalization_input_sha256"]
+    assert [role["role"] for role in after_versions] == [
+        "original",
+        "automatic",
+        "latest_reviewed",
+        "final_reviewed",
+    ]
+    assert repeat["reused_existing_finalization"] is True
+    assert repeat["finalization_id"] == result["finalization_id"]
+    assert len([path for path in (package / "final" / "revisions").iterdir() if path.is_dir()]) == 1
+
+
+def test_supported_canonical_sweep_acknowledgement_is_revision_bound(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "review_task_id": "task_plate_boundary",
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id="task_plate_boundary",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="resolved",
+    )
+    first = publish_latest_and_acknowledge(package, session_dir, manifest.case_id)
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id="task_plate_boundary",
+        action=review_sessions.ACTION_COSMETIC_ONLY,
+        note="still resolved",
+    )
+    second_state = review_working_state.derive_working_state(package, session_dir)
+    second = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=second_state["active_projection_hash"],
+    )
+
+    blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+
+    assert first["revision_id"] != second["revision_id"]
+    assert blockers["ready"] is False
+    assert any(
+        "sweep_acknowledgement:latest_reviewed_revision_id mismatch" in item
+        for item in blockers["blockers"]
+    )
+
+
+def test_supported_canonical_review_change_invalidates_current_final(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "review_task_id": "task_plate_boundary",
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id="task_plate_boundary",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="resolved",
+    )
+    publish_latest_and_acknowledge(package, session_dir, manifest.case_id)
+    finalized = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+    current_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id="task_plate_boundary",
+        action=review_sessions.ACTION_COSMETIC_ONLY,
+        note="changed after final",
+    )
+    stale_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+    pointer = json.loads((package / "final" / "current.json").read_text(encoding="utf-8"))
+
+    assert finalized["finalized"] is True
+    assert "final_reviewed" in {role["role"] for role in current_versions}
+    assert "final_reviewed" not in {role["role"] for role in stale_versions}
+    assert pointer["finalization_id"] == finalized["finalization_id"]
+
+
+def test_supported_canonical_finalization_failure_does_not_publish_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    materialization = publish_latest_and_acknowledge(package, session_dir, manifest.case_id)
+    latest_path = package / materialization["latest_reviewed"]["path"]
+    latest_hash = media_sha(latest_path)
+    monkeypatch.setenv(
+        "REDACTOR_FINALIZATION_FAIL_AT",
+        "after_final_video_link_copy",
+    )
+
+    with pytest.raises(ValueError, match="injected finalization failure"):
+        review_finalization.finalize_reviewed_case(
+            package_root=package,
+            case_id=manifest.case_id,
+            session_dir=session_dir,
+        )
+    current_after_failure = package / "final" / "current.json"
+    assert not current_after_failure.exists()
+
+    monkeypatch.delenv("REDACTOR_FINALIZATION_FAIL_AT")
+    retry = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+
+    assert media_sha(latest_path) == latest_hash
+    assert retry["finalized"] is True
+    assert retry["final_video_sha256"] == latest_hash
 
 
 def test_supported_canonical_new_event_invalidates_current_latest_until_republish(

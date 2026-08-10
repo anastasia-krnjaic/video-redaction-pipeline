@@ -323,7 +323,14 @@ def append_sweep_acknowledgement(
     case_id: str,
     viewed_ranges: list[dict[str, Any]],
     override_reason: str | None = None,
+    binding: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    after_state = {
+        "override_reason": override_reason,
+        "viewed_ranges": viewed_ranges,
+    }
+    if binding is not None:
+        after_state = dict(binding) | after_state
     return append_event(
         session_dir,
         event_type="full_video_sweep_acknowledged",
@@ -331,10 +338,7 @@ def append_sweep_acknowledgement(
         case_id=case_id,
         task_id=None,
         before_state=None,
-        after_state={
-            "override_reason": override_reason,
-            "viewed_ranges": viewed_ranges,
-        },
+        after_state=after_state,
         note=override_reason or "Reviewer acknowledged full-video sweep.",
         application_hashes={},
     )

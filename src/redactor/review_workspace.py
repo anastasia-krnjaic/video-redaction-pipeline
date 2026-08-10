@@ -4773,6 +4773,14 @@ class FinalReviewWorkspaceServer(ThreadingHTTPServer):
         self.materialization_jobs = MaterializationJobManager(self.package_root)
         super().__init__(server_address, FinalReviewWorkspaceHandler)
 
+    def shutdown(self) -> None:
+        self.materialization_jobs.shutdown()
+        super().shutdown()
+
+    def server_close(self) -> None:
+        self.materialization_jobs.shutdown()
+        super().server_close()
+
 
 class MaterializationJobManager:
     def __init__(self, package_root: Path) -> None:
@@ -4784,6 +4792,31 @@ class MaterializationJobManager:
         self.watchdog_seconds = 15 * 60
         self.metrics: dict[str, dict[str, Any]] = {}
         self.timing_records: list[dict[str, Any]] = []
+        self._closed = False
+        self._worker_threads: set[threading.Thread] = set()
+
+    def shutdown(self, *, join_timeout: float = 5.0) -> None:
+        timers: list[threading.Timer] = []
+        threads: list[threading.Thread] = []
+        with self.lock:
+            self._closed = True
+            for state in self.case_state.values():
+                timer = state.get("debounce_timer")
+                if isinstance(timer, threading.Timer):
+                    timers.append(timer)
+                    timer.cancel()
+                state["debounce_timer"] = None
+            threads = [thread for thread in self._worker_threads if thread.is_alive()]
+        current = threading.current_thread()
+        for timer in timers:
+            timer.cancel()
+            if timer is current:
+                continue
+            timer.join(timeout=min(join_timeout, 1.0))
+        for thread in threads:
+            if thread is current:
+                continue
+            thread.join(timeout=join_timeout)
 
     def enqueue(
         self,
@@ -5099,6 +5132,17 @@ class MaterializationJobManager:
             key,
             {"debounce_timer": None, "generation": 0, "latest_requested": None, "running": None},
         )
+        if self._closed:
+            job = self.jobs.get(job_id)
+            if job is not None:
+                job["completed_at_utc"] = media.utc_timestamp()
+                job["current_stage"] = "cancelled"
+                job["error"] = "Materialization job cancelled because the server is shutting down."
+                job["publication_status"] = "cancelled"
+                job["queue_state"] = "server_closing"
+                job["progress"] = 1.0
+                job["status"] = "cancelled"
+            return
         timer = state.get("debounce_timer")
         if isinstance(timer, threading.Timer):
             timer.cancel()
@@ -5119,7 +5163,20 @@ class MaterializationJobManager:
             args=(key, job_id, session_dir.resolve(), dict(actor)),
             daemon=True,
         )
-        thread.start()
+        self._worker_threads.add(thread)
+        try:
+            thread.start()
+        except RuntimeError as exc:
+            self._worker_threads.discard(thread)
+            state["running"] = None
+            job["completed_at_utc"] = media.utc_timestamp()
+            job["current_stage"] = "failed"
+            job["error"] = f"Materialization job could not start: {exc}"
+            job["publication_status"] = "failed"
+            job["queue_state"] = "failed_to_start"
+            job["progress"] = 1.0
+            job["status"] = "failed"
+            self._write_audit_locked()
 
     def _schedule_locked(
         self,
@@ -5136,6 +5193,17 @@ class MaterializationJobManager:
             timer.cancel()
         job_id = str(state.get("latest_requested") or "")
         job = self.jobs.get(job_id)
+        if self._closed:
+            if job is not None:
+                job["completed_at_utc"] = media.utc_timestamp()
+                job["current_stage"] = "cancelled"
+                job["error"] = "Materialization job cancelled because the server is shutting down."
+                job["publication_status"] = "cancelled"
+                job["queue_state"] = "server_closing"
+                job["progress"] = 1.0
+                job["status"] = "cancelled"
+            state["debounce_timer"] = None
+            return
         if job is not None:
             job["queued_until_utc"] = media.utc_timestamp()
             job["publication_status"] = "queued"
@@ -5158,6 +5226,8 @@ class MaterializationJobManager:
         actor: dict[str, Any],
     ) -> None:
         with self.lock:
+            if self._closed:
+                return
             state = self.case_state.setdefault(
                 key,
                 {
@@ -5360,6 +5430,9 @@ class MaterializationJobManager:
                 before_state={"job_id": job_id, "started_event_hash": start_event["event_hash"]},
                 after_state={
                     "accepted_working_state_revision": accepted_revision,
+                    "active_projection_hash_schema_version": (
+                        review_working_state.ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+                    ),
                     "case_id": case_id,
                     "effective_regions_hash": materialization.get("effective_regions_hash"),
                     "job_id": job_id,
@@ -5448,6 +5521,8 @@ class MaterializationJobManager:
                 self._write_audit_locked()
         finally:
             self._start_next_if_needed(key, session_dir, actor, completed_job_id=job_id)
+            with self.lock:
+                self._worker_threads.discard(threading.current_thread())
 
     def _start_next_if_needed(
         self,
@@ -5469,6 +5544,8 @@ class MaterializationJobManager:
             )
             if state.get("running") == completed_job_id:
                 state["running"] = None
+            if self._closed:
+                return
             latest = state.get("latest_requested")
             if latest and latest != completed_job_id:
                 next_job = self.jobs.get(str(latest))
@@ -5943,12 +6020,29 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 self.server.package_root,
                 str(payload["case_id"]),
             )
+            sweep_binding = None
+            if review_working_state.latest_reviewed_publication_supported(
+                self.server.package_root
+            ):
+                try:
+                    sweep_binding = review_finalization.sweep_acknowledgement_binding(
+                        package_root=self.server.package_root,
+                        session_dir=session_dir,
+                        case_id=sweep_case_id,
+                    )
+                except (FileNotFoundError, ValueError) as exc:
+                    self.send_json(
+                        {"error": str(exc), "ok": False},
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
             event = review_sessions.append_sweep_acknowledgement(
                 session_dir,
                 actor=actor,
                 case_id=sweep_case_id,
                 viewed_ranges=list(payload.get("viewed_ranges") or []),
                 override_reason=payload.get("override_reason"),
+                binding=sweep_binding,
             )
             self.send_json({"event": event, "ok": True})
             return

@@ -36,6 +36,13 @@ from redactor.review_sessions import (
 )
 
 WORKING_STATE_SCHEMA_VERSION = "review_working_state.v1"
+ACTIVE_PROJECTION_HASH_SCHEMA_VERSION = "active_projection.v2"
+LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION = "active_projection.v1"
+LEGACY_ACTIVE_PROJECTION_COMPATIBILITY_HASH_KEY = "active_projection.v1.compatibility"
+SUPPORTED_ACTIVE_PROJECTION_HASH_SCHEMA_VERSIONS = {
+    ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
+    LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
+}
 CHECKPOINT_SCHEMA_VERSION = "review_checkpoint.v1"
 PREVIEW_TOKEN_SCHEMA_VERSION = "correction_preview_token.v2"
 LATEST_REVIEWED_PUBLICATION_DEFERRED_ERROR_CODE = "latest_reviewed_publication_deferred"
@@ -145,13 +152,14 @@ def derive_working_state(package_root: Path, session_dir: Path) -> dict[str, Any
         session_dir=session_dir,
         entities=entities,
     )
-    projection_hash = active_projection_hash(projection)
+    projection_hashes = active_projection_hashes(projection)
+    projection_hash = projection_hashes[ACTIVE_PROJECTION_HASH_SCHEMA_VERSION]
     if latest_reviewed_publication_supported(package_root):
         projection = projection_with_authoritative_latest_reviewed(
             package_root=package_root,
             session_dir=session_dir,
             projection=projection,
-            projection_hash=projection_hash,
+            projection_hashes=projection_hashes,
         )
     corrections = load_active_corrections(
         session_dir,
@@ -163,6 +171,8 @@ def derive_working_state(package_root: Path, session_dir: Path) -> dict[str, Any
         "active_correction_ids": sorted(correction.correction_id for correction in corrections),
         "active_manual_tasks": projection["active_manual_tasks"],
         "active_projection_hash": projection_hash,
+        "active_projection_hash_schema_version": ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
+        "active_projection_hashes": projection_hashes,
         "baseline": baseline,
         "checkpoints": checkpoints,
         "current_event_chain_head": chain_head,
@@ -171,6 +181,7 @@ def derive_working_state(package_root: Path, session_dir: Path) -> dict[str, Any
             "decision_hash": stable_hash(projection["task_decisions"]),
             "object_policy_hash": stable_hash(projection["object_policy_overrides"]),
             "projection_hash": projection_hash,
+            "projection_hash_schema_version": ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
         },
         "manual_corrections": [
             correction.to_dict() | {"correction_hash": correction.correction_hash()}
@@ -451,6 +462,7 @@ def derive_active_review_projection(
                 or after.get("accepted_working_state_revision")
                 or ""
             )
+            accepted_projection_schema = active_projection_pointer_schema(after)
             hash_manual_tasks = {key: dict(value) for key, value in manual_tasks.items()}
             hash_decisions = {key: dict(value) for key, value in decisions.items()}
             decorate_correction_verification_tasks(
@@ -474,7 +486,8 @@ def derive_active_review_projection(
                     "object_policy_overrides": overrides,
                     "sweep_acknowledgements": sweep_acknowledgements,
                     "task_decisions": hash_decisions,
-                }
+                },
+                schema_version=accepted_projection_schema,
             )
             if accepted_projection_hash and accepted_projection_hash != current_projection_hash:
                 continue
@@ -522,7 +535,7 @@ def projection_with_authoritative_latest_reviewed(
     package_root: Path,
     session_dir: Path,
     projection: dict[str, Any],
-    projection_hash: str,
+    projection_hashes: dict[str, str],
 ) -> dict[str, Any]:
     from redactor import reviewed_regions
 
@@ -532,14 +545,21 @@ def projection_with_authoritative_latest_reviewed(
             package_root,
             session_dir,
             case_id=case_id,
-            active_projection_hash=projection_hash,
+            active_projection_hashes=projection_hashes,
         )
         if latest:
             materialized[case_id] = latest
     return dict(projection) | {"materialized_latest_reviewed": materialized}
 
 
-def active_projection_hash(projection: dict[str, Any]) -> str:
+def active_projection_payload(
+    projection: dict[str, Any],
+    *,
+    schema_version: str = ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
+    normalize_legacy_non_media: bool = False,
+) -> dict[str, Any]:
+    if schema_version not in SUPPORTED_ACTIVE_PROJECTION_HASH_SCHEMA_VERSIONS:
+        raise ValueError(f"unknown active projection hash schema: {schema_version}")
     render_tasks = [
         dict(task)
         for task in list(projection.get("active_manual_tasks") or [])
@@ -550,24 +570,96 @@ def active_projection_hash(projection: dict[str, Any]) -> str:
         for task_id, decision in dict(projection.get("task_decisions") or {}).items()
         if not durable_edit_verification_task_id(str(task_id))
     }
+    payload = {
+        "active_correction_ids": sorted(
+            str(item) for item in list(projection.get("active_correction_ids") or [])
+        ),
+        "active_manual_tasks": sorted(
+            render_tasks,
+            key=lambda task: (
+                str(task.get("case_id") or ""),
+                int(task.get("source_frame_start") or 0),
+                str(task.get("review_task_id") or ""),
+            ),
+        ),
+        "object_policy_overrides": dict(projection.get("object_policy_overrides") or {}),
+        "task_decisions": render_decisions,
+    }
+    if schema_version == LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION:
+        payload["sweep_acknowledgements"] = (
+            {}
+            if normalize_legacy_non_media
+            else dict(projection.get("sweep_acknowledgements") or {})
+        )
+    return payload
+
+
+def active_projection_hash(
+    projection: dict[str, Any],
+    *,
+    schema_version: str = ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
+    normalize_legacy_non_media: bool = False,
+) -> str:
     return stable_hash(
-        {
-            "active_correction_ids": sorted(
-                str(item) for item in list(projection.get("active_correction_ids") or [])
-            ),
-            "active_manual_tasks": sorted(
-                render_tasks,
-                key=lambda task: (
-                    str(task.get("case_id") or ""),
-                    int(task.get("source_frame_start") or 0),
-                    str(task.get("review_task_id") or ""),
-                ),
-            ),
-            "object_policy_overrides": dict(projection.get("object_policy_overrides") or {}),
-            "sweep_acknowledgements": dict(projection.get("sweep_acknowledgements") or {}),
-            "task_decisions": render_decisions,
-        }
+        active_projection_payload(
+            projection,
+            schema_version=schema_version,
+            normalize_legacy_non_media=normalize_legacy_non_media,
+        )
     )
+
+
+def active_projection_hashes(projection: dict[str, Any]) -> dict[str, str]:
+    return {
+        schema_version: active_projection_hash(projection, schema_version=schema_version)
+        for schema_version in sorted(SUPPORTED_ACTIVE_PROJECTION_HASH_SCHEMA_VERSIONS)
+    } | {
+        LEGACY_ACTIVE_PROJECTION_COMPATIBILITY_HASH_KEY: active_projection_hash(
+            projection,
+            schema_version=LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
+            normalize_legacy_non_media=True,
+        )
+    }
+
+
+def active_projection_pointer_schema(payload: dict[str, Any]) -> str:
+    schema_version = str(
+        payload.get("active_projection_hash_schema_version")
+        or payload.get("working_state_projection_schema_version")
+        or payload.get("projection_hash_schema_version")
+        or ""
+    )
+    if not schema_version:
+        return LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+    if schema_version not in SUPPORTED_ACTIVE_PROJECTION_HASH_SCHEMA_VERSIONS:
+        raise ValueError(f"unknown active projection hash schema: {schema_version}")
+    return schema_version
+
+
+def active_projection_hash_for_pointer(
+    projection_hashes: dict[str, str],
+    payload: dict[str, Any],
+) -> str:
+    schema_version = active_projection_pointer_schema(payload)
+    try:
+        return str(projection_hashes[schema_version])
+    except KeyError as exc:
+        raise ValueError(f"missing active projection hash for schema: {schema_version}") from exc
+
+
+def active_projection_hash_candidates_for_pointer(
+    projection_hashes: dict[str, str],
+    payload: dict[str, Any],
+) -> tuple[str, ...]:
+    schema_version = active_projection_pointer_schema(payload)
+    current_hash = active_projection_hash_for_pointer(projection_hashes, payload)
+    if schema_version == LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION:
+        compatibility_hash = projection_hashes.get(
+            LEGACY_ACTIVE_PROJECTION_COMPATIBILITY_HASH_KEY
+        )
+        if compatibility_hash and compatibility_hash != current_hash:
+            return (current_hash, str(compatibility_hash))
+    return (current_hash,)
 
 
 def baseline_policy_overrides(
@@ -1590,6 +1682,7 @@ def materialize_latest_reviewed(
             after_state={
                 "accepted_working_state_revision": accepted_revision,
                 "active_projection_hash": accepted_revision,
+                "active_projection_hash_schema_version": ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
                 "case_id": case_id,
                 "effective_regions_hash": region_hash,
                 "latest_reviewed": role,
@@ -2506,6 +2599,21 @@ def case_versions(package_root: Path, session_dir: Path | None, *, case_id: str)
     if latest_role:
         roles = [role for role in roles if role.get("role") != "latest_reviewed"]
         roles.append(latest_role)
+    final_role = {}
+    if latest_reviewed_publication_supported(package_root) and session_dir is not None:
+        from redactor import review_finalization
+
+        final_role = review_finalization.current_final_role(
+            package_root,
+            session_dir,
+            case_id=case_id,
+        )
+    elif not latest_reviewed_publication_supported(package_root):
+        final_role = dict(by_role.get("final_reviewed") or {})
+    if final_role:
+        final_role["label"] = "Final"
+        final_role["role"] = "final_reviewed"
+        roles.append(final_role)
     return {
         "case_id": case_id,
         "ok": True,

@@ -82,7 +82,7 @@ The current plate partial-span safety behavior is preserved: a normal full-durat
 
 Review tasks now have a common category-aware shape: category, object or track ID, interval, issue type, blocking state, available media roles, allowed reviewer actions, and whether corrected privacy regions are required.
 
-The existing face and plate review pages are not redesigned in this milestone. Category-specific labels and wording remain in their current builders, and the case pipeline now normalizes their task outputs into one mixed review workspace queue. That workspace is a packaging and review-state layer for detector/tracker/recovery/automatic-preview/evaluation behavior. Canonical Latest reviewed publication is now implemented as a later review-session step by compiling reviewed regions, rendering from Original, and atomically selecting an immutable revision; mixed finalization remains a separate gate.
+The existing face and plate review pages are not redesigned in this milestone. Category-specific labels and wording remain in their current builders, and the case pipeline now normalizes their task outputs into one mixed review workspace queue. That workspace is a packaging and review-state layer for detector/tracker/recovery/automatic-preview/evaluation behavior. Canonical Latest reviewed publication is implemented as a later review-session step by compiling reviewed regions, rendering from Original, and atomically selecting an immutable revision. Canonical finalization is the next explicit gate: it approves the exact current Latest reviewed bytes after revision-bound sweep, lineage, task, correction, media, and region validation.
 
 ## Case-Based Final Review Workspace
 
@@ -104,9 +104,11 @@ are drawn on the Original frame, interpolate only between explicit reviewed
 keyframes, and require checkpoint verification before finalization.
 
 Corrections are reviewed provenance records, not threshold changes. Finalization
-is blocked until required tasks are green, corrections are verified, full-video
-sweep acknowledgement exists, source/config hashes match, and rendered media
-validation passes.
+is blocked until required tasks are green, corrections are verified, the
+full-video sweep acknowledgement is bound to the current Latest reviewed
+revision, source/config hashes match, and media plus region validation artifacts
+pass. Canonical Final is a hardlink or verified copy of Latest reviewed, not a
+new privacy render.
 
 ## Migration Strategy
 
@@ -117,7 +119,8 @@ The migration is deliberately incremental:
 3. Face automatic-preview rendering now adapts accepted face regions to the shared renderer while preserving detector, tracking, privacy gap recovery, policy, and review behavior.
 4. Future tracking lifecycle work can use the common states and transition records without embedding accumulated-evidence behavior inside a category module.
 5. The automatic case-preview checkpoint can consume `PrivacyRegionRecord`s from both categories for a non-final combined preview and package a source-backed review workspace whose sole runtime authority is `workspace_manifest.json`. This workspace is reviewable after validation, binds one category-run identity per selected category, persists shared decisions and corrections, and installs the automatic baseline region set used by the reviewed-region compiler.
-6. Mixed reviewed-region compilation now publishes authoritative Latest reviewed revisions for canonical face-only, plate-only, and mixed workspaces after required review blockers are resolved. Correction previews remain diagnostic, semantic reviewed-region identity excludes generated audit metadata, and `latest_reviewed/current.json` is the sole current authority. Full-span day, night, and representative mixed evidence lives under `artifacts/mixed_latest_reviewed_v1_final_stabilization/`. Mixed finalization, reviewed/final renderer migration, and plate Ground Truth/evaluation remain deferred behind their separate gates.
+6. Mixed reviewed-region compilation now publishes authoritative Latest reviewed revisions for canonical face-only, plate-only, and mixed workspaces after required review blockers are resolved. Correction previews remain diagnostic, semantic reviewed-region identity excludes generated audit metadata, and `latest_reviewed/current.json` is the sole current authority. Full-span day, night, and representative mixed evidence lives under `artifacts/mixed_latest_reviewed_v1_final_stabilization/`.
+7. Authoritative canonical finalization now approves the exact current Latest reviewed revision for face-only, plate-only, and mixed workspaces. `final/current.json` is the sole current Final authority, Final video bytes must match Latest reviewed SHA-256 exactly, active media projection hashes are schema-versioned separately from audit/finalization events, and stale sweeps, stale Latest reviewed pointers, unknown projection schemas, unverified corrections, unresolved tasks, partial publication, and post-final review changes fail closed. Reviewed/final legacy renderer cleanup, plate Ground Truth/evaluation, and performance or production-readiness audits remain deferred behind separate gates.
 
 ## Intentionally Not Unified
 
