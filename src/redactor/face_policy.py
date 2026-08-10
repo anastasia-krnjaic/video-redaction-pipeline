@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from redactor import media, privacy_gap_recovery, rendering, tracking
+from redactor import face_rendering, media, privacy_gap_recovery, rendering, tracking
 from redactor.detection import DETECTOR_BACKEND_ADAS, rational_to_float
 
 SCHEMA_VERSION = "1.0"
@@ -671,7 +671,7 @@ def run_full_video_policy_flow(
         overwrite=overwrite,
     )
     preview_dir = output_dir / "automatic_preview"
-    render_summary = rendering.run_face_render(
+    render_summary = face_rendering.run_shared_face_preview(
         input_video,
         privacy_regions_path=privacy_dir / "privacy_regions.jsonl",
         interval_decisions_path=privacy_dir / "interval_decisions.json",

@@ -119,7 +119,7 @@ redactor redact-video input.mp4 \
 
 This writes one authoritative source identity, category run manifests, one effective-region render plan, one fail-closed `case_manifest.json`, and, when multiple selected categories have validated effective regions, one combined non-final automatic preview. The command does not create one mixed reviewed result, does not publish Latest reviewed, and does not run case-level mixed finalization.
 
-Face-only preview still uses the frozen face renderer. The combined face+plate automatic preview uses the shared renderer after parity and render-plan validation. Face automated evaluation remains available through `evaluate-faces`; plate evaluation is currently a capability report only and does not publish scores.
+One canonical automatic-preview renderer now handles faces, plates, and combined cases while preserving the source-frame span through strict decoded-frame validation. Face and plate detectors, temporal logic, and privacy policy remain category-specific. Face automated evaluation remains available through `evaluate-faces`; plate evaluation is currently a capability report only and does not publish scores.
 
 To keep a person visible, create an explicit case-policy choice:
 
@@ -152,7 +152,7 @@ redactor render-faces input.mp4 \
   --overwrite
 ```
 
-Preview mode may render accepted regions even when some intervals still need review, and the output is explicitly marked non-final. Final mode refuses export when relevant intervals are `needs_review` or `rejected`, when privacy-required frames remain unresolved, or when invalid boxes are present. Preserved reviewed corrections can be rendered in final mode while keeping their provenance.
+Preview mode may render accepted regions even when some intervals still need review, and the output is explicitly marked non-final. Final mode remains a separate reviewed-rendering boundary: it refuses export when relevant intervals are `needs_review` or `rejected`, when privacy-required frames remain unresolved, or when invalid boxes are present. Preserved reviewed corrections can be rendered in final mode while keeping their provenance.
 
 ## Face Evaluation
 

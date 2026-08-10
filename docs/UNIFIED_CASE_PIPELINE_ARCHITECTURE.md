@@ -53,13 +53,13 @@ Represented but not executed:
 
 `PrivacyDisposition`, `EvidenceDisposition`, `ReviewAction`, and `ScoringDisposition` now make the semantic namespaces explicit. Compatibility aliases normalize existing terms, while cross-namespace values raise errors instead of silently becoming policy.
 
-The render plan consumes common `PrivacyRegionRecord` objects. Face records are adapted from frozen face render regions. Plate records are adapted from accepted plate render regions. The combined automatic preview uses the shared renderer only when multiple categories are selected and render-plan validation passes. Face-only automatic preview remains on the frozen face renderer.
+The render plan consumes common `PrivacyRegionRecord` objects. Face records are adapted from frozen face render regions. Plate records are adapted from accepted plate render regions. Default face-only, explicit face-only, plate-only, and combined automatic previews now use the shared privacy renderer after render-plan validation. Face detector, tracking, recovery, policy, and review behavior remain category-specific.
 
 ## Face Shared-Renderer Parity Evidence
 
 Face shared-renderer parity evidence is versioned to distinguish raw render parity, exact final-file span parity, and migration safety. Raw render parity compares the pre-encoding rendered frame content. Exact final-file parity uses sequential decode counts and terminal timestamps instead of metadata-only frame counts. Migration safety requires the shared renderer to preserve the complete source processing span, even when a frozen legacy output has a documented file-level defect.
 
-The current known baseline defect is limited to the frozen legacy face mux path. The legacy face renderer final mux can drop the final video frame when `-shortest` terminates against the shorter stream. This was observed on the night evaluation clip: source and shared outputs sequentially decode to `1589` frames, while the frozen legacy output decodes to `1588`. The raw rendered frame content remained identical for the generated frames, and the combined shared-renderer path preserved the complete source span. The defect is not reproduced intentionally; removal of this legacy divergence remains part of the later shared face-renderer migration.
+The current known baseline defect is limited to the frozen legacy face mux path. The legacy face renderer final mux can drop the final video frame when `-shortest` terminates against the shorter stream. This was observed on the night evaluation clip: source and shared outputs sequentially decode to `1589` frames, while the frozen legacy output decodes to `1588`. The raw rendered frame content remained identical for the generated frames, and the shared automatic-preview path preserved the complete source span. The defect is not reproduced intentionally; the canonical face automatic-preview path no longer uses the defective mux boundary.
 
 ## Adapter Boundaries
 
@@ -68,7 +68,7 @@ The face adapter preserves:
 - ADAS detector backend and thresholds;
 - existing face policy modes and policy files;
 - existing ordinary tracking and privacy gap recovery;
-- existing face automatic preview rendering through `rendering.run_face_render`;
+- existing face automatic preview semantics through the shared privacy renderer;
 - existing face audit manifest output.
 
 The plate adapter preserves:
@@ -80,13 +80,13 @@ The plate adapter preserves:
 
 ## Deliberate Category Differences
 
-Faces and plates remain different where the object geometry and evidence model require it. Face full-video behavior stays on the frozen face tracking/recovery/render path. Plates continue to use plate geometry filters, accepted-track eligibility, temporal evidence, and bounded plate interpolation. The unified pipeline shares orchestration and manifests, not detector math or category thresholds.
+Faces and plates remain different where the object geometry and evidence model require it. Face full-video detection, tracking, privacy recovery, and policy stay on the frozen face path, while automatic preview rendering uses the shared privacy renderer. Plates continue to use plate geometry filters, accepted-track eligibility, temporal evidence, and bounded plate interpolation. The unified pipeline shares orchestration, manifests, and automatic-preview rendering, not detector math or category thresholds.
 
 ## Review And Finalization
 
 The canonical `redact-video` command does not create one mixed review session, does not publish Latest reviewed, and does not run case-level finalization. Category review artifacts may be generated as automatic-stage evidence, but mixed review generation remains deferred.
 
-`review_workspace`, `review_working_state`, `review_sessions`, `review_corrections`, and `review_finalization` remain the authority for reviewer decisions, latest reviewed state, correction provenance, full sweep acknowledgement, hash checks, and final reviewed rendering.
+`review_workspace`, `review_working_state`, `review_sessions`, `review_corrections`, and `review_finalization` remain the authority for reviewer decisions, latest reviewed state, correction provenance, full sweep acknowledgement, hash checks, and final reviewed rendering. Face reviewed/final rendering remains on the existing reviewed-rendering boundary.
 
 The case manifest records these later phases as `not_run`, never `succeeded`.
 
@@ -104,7 +104,7 @@ Existing face-only `redact-video` output still includes `audit_manifest.json`; i
 
 ## Deferred Work
 
-- Migrate face automatic preview rendering to the shared renderer after the documented legacy frozen-output frame-loss divergence is removed or accepted by an explicit migration gate.
+- Migrate reviewed/final face rendering after the automatic-preview migration remains stable.
 - Add machine-readable plate ground truth before publishing plate scores.
 - Generate one mixed review case, one Latest reviewed publication, and one mixed finalization result once reviewed plate corrections and entity-level UX are fully aligned.
 - Add performance instrumentation for multi-category runs after behavior parity remains stable.

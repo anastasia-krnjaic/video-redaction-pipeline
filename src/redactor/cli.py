@@ -1111,7 +1111,7 @@ def render_faces(
     overwrite: bool,
 ) -> None:
     """Render accepted face privacy regions into a redacted MP4."""
-    from redactor import rendering
+    from redactor import face_rendering, rendering
 
     settings = rendering.RenderSettings(
         mode=mode,
@@ -1122,16 +1122,28 @@ def render_faces(
         pixel_size=pixel_size,
     )
     try:
-        summary = rendering.run_face_render(
-            input_path,
-            privacy_regions_path=privacy_regions_path,
-            interval_decisions_path=interval_decisions_path,
-            output_dir=output_dir,
-            output_video_path=output_video_path,
-            settings=settings,
-            comparison_frames=comparison_frames,
-            overwrite=overwrite,
-        )
+        if mode == rendering.MODE_PREVIEW:
+            summary = face_rendering.run_shared_face_preview(
+                input_path,
+                privacy_regions_path=privacy_regions_path,
+                interval_decisions_path=interval_decisions_path,
+                output_dir=output_dir,
+                output_video_path=output_video_path,
+                settings=settings,
+                comparison_frames=comparison_frames,
+                overwrite=overwrite,
+            )
+        else:
+            summary = rendering.run_face_render(
+                input_path,
+                privacy_regions_path=privacy_regions_path,
+                interval_decisions_path=interval_decisions_path,
+                output_dir=output_dir,
+                output_video_path=output_video_path,
+                settings=settings,
+                comparison_frames=comparison_frames,
+                overwrite=overwrite,
+            )
     except (
         FileExistsError,
         FileNotFoundError,

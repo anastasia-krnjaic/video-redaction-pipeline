@@ -10,6 +10,7 @@ from redactor import (
     case_manifests,
     detection,
     face_policy,
+    face_rendering,
     media,
     plate_detection,
     plate_rendering,
@@ -420,7 +421,7 @@ class FaceCategoryAdapter:
                 ),
             )
         )
-        privacy_records = face_privacy_region_records(
+        privacy_records = face_rendering.face_privacy_region_records(
             context.output_dir / "privacy_regions" / "privacy_regions.jsonl"
         )
         blockers = tuple(
@@ -1594,45 +1595,6 @@ def validate_optional_fps(context: CaseContext, actual: Any, *, label: str) -> N
     actual_fps = float(actual)
     if expected_fps is not None and round(actual_fps, 6) != round(expected_fps, 6):
         raise ValueError(f"{label} mismatch: {actual_fps} != {expected_fps}")
-
-
-def face_privacy_region_records(path: Path) -> list[PrivacyRegionRecord]:
-    if not path.exists():
-        return []
-    face_input = rendering.load_privacy_regions(path)
-    records: list[PrivacyRegionRecord] = []
-    for frame_index, regions in face_input.regions_by_frame.items():
-        for index, region in enumerate(regions):
-            if not region.is_renderable:
-                continue
-            source = dict(region.source_record)
-            track_ids = source.get("target_track_ids") or []
-            object_id = (
-                f"face_track_{track_ids[0]}"
-                if track_ids
-                else source.get("track_uid") or source.get("track_id")
-            )
-            records.append(
-                PrivacyRegionRecord(
-                    approval_state=APPROVAL_ACCEPTED,
-                    bbox_xyxy=region.bbox_xyxy,
-                    category=CATEGORY_FACE,
-                    object_id=None if object_id is None else str(object_id),
-                    provenance=region.provenance,
-                    render_eligible=True,
-                    source_frame=frame_index,
-                    source_record={
-                        **source,
-                        "category": CATEGORY_FACE,
-                        "render_order": index,
-                        "region_id": source.get(
-                            "region_id",
-                            f"face_region_{frame_index}_{index}",
-                        ),
-                    },
-                )
-            )
-    return records
 
 
 def plate_privacy_region_records(tracks_path: Path) -> list[PrivacyRegionRecord]:

@@ -70,7 +70,7 @@ Face profiles record compatibility metadata only in this milestone. Production f
 - H.264/yuv420p/faststart MP4 output;
 - decoded rendered-region verification.
 
-`render-plates` now uses this shared core through its existing plate renderer wrapper. Combined multi-category automatic previews also use the shared core after render-plan validation. Face-only rendering stays on the frozen face renderer until a later migration removes that divergence with full-run parity evidence.
+Automatic previews now use this shared core for face-only, plate-only, and combined category runs after render-plan validation. Reviewed and final face rendering remain a separate migration boundary.
 
 ## Frame-Span Safety
 
@@ -114,7 +114,7 @@ The migration is deliberately incremental:
 
 1. Plate rendering uses the shared rendering core because plate rendering already has accepted-track eligibility, span validation, and decoded-region checks.
 2. Plate tracking now uses the shared temporal evidence engine for confirmation, hysteresis, retrospective promotion, and bounded stitch decisions while preserving the existing association and gap-recovery parameters.
-3. Face artifacts are adapted to shared records and parity-tested, but the current face tracking, privacy gap recovery, and renderer behavior stay frozen.
+3. Face automatic-preview rendering now adapts accepted face regions to the shared renderer while preserving detector, tracking, privacy gap recovery, policy, and review behavior.
 4. Future tracking lifecycle work can use the common states and transition records without embedding accumulated-evidence behavior inside a category module.
 5. The automatic case-preview checkpoint can consume `PrivacyRegionRecord`s from both categories for a non-final combined preview.
 6. A later reviewed/final unified face/plate render can consume reviewed `PrivacyRegionRecord`s from both categories once mixed review and reviewed plate corrections exist.

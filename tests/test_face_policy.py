@@ -7,7 +7,7 @@ import cv2 as cv
 import numpy as np
 from click.testing import CliRunner
 
-from redactor import face_policy, media
+from redactor import face_policy, face_rendering, media, rendering
 from redactor.cli import main
 
 
@@ -388,6 +388,191 @@ def test_redact_video_runs_policy_flow_without_target_ids(
     assert captured["mode"] == "redact_all"
     assert captured["keep_track_ids"] == ()
     assert captured["selected_track_ids"] == ()
+
+
+def test_render_faces_preview_uses_shared_renderer_adapter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_video = tmp_path / "input.mp4"
+    synthetic_video(input_video)
+    privacy_regions = tmp_path / "privacy_regions.jsonl"
+    privacy_regions.write_text(
+        json.dumps(
+            {
+                "bbox_xyxy": [10, 10, 24, 24],
+                "frame_index": 1,
+                "provenance": "detector",
+                "state": "covered",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "render"
+    captured: dict[str, object] = {}
+
+    def fail_legacy(*args, **kwargs):
+        raise AssertionError("legacy face renderer called for automatic preview")
+
+    def fake_shared(input_video_arg, **kwargs):
+        captured["input_video"] = input_video_arg
+        captured.update(kwargs)
+        return {
+            "final_approval_status": False,
+            "output_video": "redacted_preview.mp4",
+            "preview_non_final": True,
+            "processed_frame_count": 5,
+            "rendered_region_count": 1,
+        }
+
+    monkeypatch.setattr(rendering, "run_face_render", fail_legacy)
+    monkeypatch.setattr(face_rendering, "run_shared_face_preview", fake_shared)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "render-faces",
+            str(input_video),
+            "--privacy-regions",
+            str(privacy_regions),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["input_video"] == input_video
+    assert captured["privacy_regions_path"] == privacy_regions
+    assert captured["output_dir"] == output_dir
+    assert captured["settings"].mode == rendering.MODE_PREVIEW
+    assert "non-final preview" in result.output
+
+
+def test_render_faces_final_keeps_legacy_renderer_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_video = tmp_path / "input.mp4"
+    synthetic_video(input_video)
+    privacy_regions = tmp_path / "privacy_regions.jsonl"
+    privacy_regions.write_text("", encoding="utf-8")
+    output_dir = tmp_path / "render"
+    captured: dict[str, object] = {}
+
+    def fail_shared(*args, **kwargs):
+        raise AssertionError("shared preview renderer called for final render")
+
+    def fake_legacy(input_video_arg, **kwargs):
+        captured["input_video"] = input_video_arg
+        captured.update(kwargs)
+        return {
+            "final_approval_status": True,
+            "output_video": "redacted_final.mp4",
+            "preview_non_final": False,
+            "processed_frame_count": 5,
+            "rendered_region_count": 0,
+        }
+
+    monkeypatch.setattr(face_rendering, "run_shared_face_preview", fail_shared)
+    monkeypatch.setattr(rendering, "run_face_render", fake_legacy)
+
+    result = CliRunner().invoke(
+        main,
+        [
+            "render-faces",
+            str(input_video),
+            "--privacy-regions",
+            str(privacy_regions),
+            "--output-dir",
+            str(output_dir),
+            "--mode",
+            "final",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert captured["input_video"] == input_video
+    assert captured["settings"].mode == rendering.MODE_FINAL
+    assert "Final approval status: True" in result.output
+
+
+def test_full_video_policy_flow_uses_shared_renderer_for_automatic_preview(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    input_video = tmp_path / "input.mp4"
+    synthetic_video(input_video)
+    detections = tmp_path / "detections.jsonl"
+    detections.write_text("", encoding="utf-8")
+    output_dir = tmp_path / "case"
+    captured: dict[str, object] = {}
+
+    def fake_tracking(input_video_arg, *, output_dir: Path, **kwargs):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        write_tracks(output_dir / "tracks.jsonl")
+        write_quality(output_dir / "track_quality.json")
+        return {
+            "auto_confirmed_tracks": 2,
+            "schema_version": "tracking_summary.v1",
+        }
+
+    def fail_legacy(*args, **kwargs):
+        raise AssertionError("legacy face renderer called for automatic preview")
+
+    def fake_shared(input_video_arg, **kwargs):
+        captured["input_video"] = input_video_arg
+        captured.update(kwargs)
+        render_dir = Path(kwargs["output_dir"])
+        render_dir.mkdir(parents=True, exist_ok=True)
+        (render_dir / "redacted_preview.mp4").write_bytes(b"preview")
+        (render_dir / "render_manifest.json").write_text(
+            json.dumps(
+                {
+                    "output_video": "redacted_preview.mp4",
+                    "renderer_backend": face_rendering.RENDERER_BACKEND,
+                    "source_video_hash": media.sha256_file(input_video_arg),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (render_dir / "validation.json").write_text(
+            json.dumps({"media_validation": {"passed": True}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "final_approval_status": False,
+            "output_video": "redacted_preview.mp4",
+            "preview_non_final": True,
+            "processed_frame_count": 5,
+            "rendered_region_count": 4,
+            "renderer_backend": face_rendering.RENDERER_BACKEND,
+        }
+
+    monkeypatch.setattr(face_policy.tracking, "run_tracking", fake_tracking)
+    monkeypatch.setattr(face_policy.rendering, "run_face_render", fail_legacy)
+    monkeypatch.setattr(face_policy.face_rendering, "run_shared_face_preview", fake_shared)
+    monkeypatch.setattr(
+        face_policy,
+        "build_policy_review_bundle",
+        lambda *args, **kwargs: {"summary": {"review_tasks": 1}},
+    )
+
+    audit = face_policy.run_full_video_policy_flow(
+        input_video,
+        output_dir=output_dir,
+        detections_path=detections,
+        overwrite=True,
+    )
+
+    assert captured["input_video"] == input_video
+    assert captured["output_dir"] == output_dir / "automatic_preview"
+    assert captured["settings"] == face_policy.DEFAULT_PREVIEW_RENDER_SETTINGS
+    assert audit["render_summary"]["renderer_backend"] == face_rendering.RENDERER_BACKEND
+    assert audit["final_export_status"] == "blocked_review_required"
 
 
 def test_face_policy_source_has_no_benchmark_specific_logic() -> None:

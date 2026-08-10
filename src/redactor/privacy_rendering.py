@@ -9,10 +9,12 @@ import cv2 as cv
 import numpy as np
 
 from redactor import media, rendering
+from redactor.detection import rational_to_float
 from redactor.privacy_records import PrivacyRegionRecord
 
 SCHEMA_VERSION = "privacy_rendering_core.v1"
 AUDIO_POLICY_VIDEO_DURATION_AUTHORITATIVE = "video_duration_authoritative"
+FULL_SPAN_TIMESTAMP_TOLERANCE_SECONDS = 0.05
 
 Box = tuple[int, int, int, int]
 
@@ -49,6 +51,115 @@ def provenance_counts(records: list[PrivacyRegionRecord]) -> dict[str, int]:
     for record in records:
         counts[record.provenance] = counts.get(record.provenance, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def sequential_video_summary(path: Path) -> dict[str, Any]:
+    capture = cv.VideoCapture(str(path))
+    if not capture.isOpened():
+        raise ValueError(f"could not open video: {path}")
+
+    frame_count = 0
+    first_timestamp: float | None = None
+    last_timestamp: float | None = None
+    width: int | None = None
+    height: int | None = None
+    max_pixel_value = 0
+    try:
+        while True:
+            ok, frame = capture.read()
+            if not ok:
+                break
+            timestamp = capture.get(cv.CAP_PROP_POS_MSEC)
+            timestamp_seconds = (
+                round(timestamp / 1000.0, 6) if np.isfinite(timestamp) else None
+            )
+            if frame_count == 0:
+                first_timestamp = timestamp_seconds
+                height, width = frame.shape[:2]
+            last_timestamp = timestamp_seconds
+            max_pixel_value = max(max_pixel_value, int(frame.max()))
+            frame_count += 1
+    finally:
+        capture.release()
+
+    return {
+        "decoded_frame_count": frame_count,
+        "first_timestamp": first_timestamp,
+        "has_non_black_frame": max_pixel_value > 0,
+        "height": height,
+        "last_timestamp": last_timestamp,
+        "max_pixel_value": max_pixel_value,
+        "path": path.as_posix(),
+        "width": width,
+    }
+
+
+def validate_full_span_output(
+    source_video: Path,
+    output_video: Path,
+    *,
+    expected_frame_count: int,
+    expected_width: int,
+    expected_height: int,
+    expected_fps: float,
+    source_has_audio: bool,
+) -> dict[str, Any]:
+    source_summary = sequential_video_summary(source_video)
+    output_summary = sequential_video_summary(output_video)
+    output_info = media.probe_media(output_video)
+    output_fps = rational_to_float(output_info.video_stream.nominal_frame_rate) or 0.0
+    source_count_ok = source_summary["decoded_frame_count"] == expected_frame_count
+    output_count_ok = output_summary["decoded_frame_count"] == expected_frame_count
+    dimensions_ok = (
+        output_summary["width"] == expected_width
+        and output_summary["height"] == expected_height
+        and output_info.video_stream.width == expected_width
+        and output_info.video_stream.height == expected_height
+    )
+    fps_ok = abs(output_fps - expected_fps) <= 0.01
+    first_timestamp_ok = _timestamps_close(
+        source_summary["first_timestamp"],
+        output_summary["first_timestamp"],
+    )
+    last_timestamp_ok = _timestamps_close(
+        source_summary["last_timestamp"],
+        output_summary["last_timestamp"],
+    )
+    audio_ok = (output_info.audio_stream is not None) if source_has_audio else True
+    non_black_ok = bool(output_summary["has_non_black_frame"]) or not bool(
+        source_summary["has_non_black_frame"]
+    )
+    passed = all(
+        [
+            source_count_ok,
+            output_count_ok,
+            dimensions_ok,
+            fps_ok,
+            first_timestamp_ok,
+            last_timestamp_ok,
+            audio_ok,
+            non_black_ok,
+        ]
+    )
+    return {
+        "audio_ok": audio_ok,
+        "dimensions_ok": dimensions_ok,
+        "expected_frame_count": expected_frame_count,
+        "expected_fps": round(expected_fps, 6),
+        "expected_height": expected_height,
+        "expected_width": expected_width,
+        "first_timestamp_ok": first_timestamp_ok,
+        "fps_ok": fps_ok,
+        "last_timestamp_ok": last_timestamp_ok,
+        "non_black_ok": non_black_ok,
+        "output_audio_present": output_info.audio_stream is not None,
+        "output_summary": output_summary,
+        "passed": passed,
+        "source_count_ok": source_count_ok,
+        "source_summary": source_summary,
+        "timestamp_tolerance_seconds": FULL_SPAN_TIMESTAMP_TOLERANCE_SECONDS,
+        "video_duration_authoritative": True,
+    }
 
 
 def render_privacy_video(
@@ -137,6 +248,14 @@ def render_privacy_video(
             },
         )
     return rendered_frames, rendered_regions, audio_handling
+
+
+def _timestamps_close(left: float | None, right: float | None) -> bool:
+    if left is None and right is None:
+        return True
+    if left is None or right is None:
+        return False
+    return abs(left - right) <= FULL_SPAN_TIMESTAMP_TOLERANCE_SECONDS
 
 
 def encode_browser_mp4(

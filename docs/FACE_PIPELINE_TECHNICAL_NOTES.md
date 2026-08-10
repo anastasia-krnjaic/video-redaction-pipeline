@@ -201,7 +201,7 @@ This provenance separation is required because raw detector recall, tracking con
 
 ## Face Redaction Rendering
 
-`rendering.run_face_render(...)` renders accepted face privacy regions on original-resolution frames. The renderer supports:
+Automatic face previews adapt accepted face privacy regions into the shared privacy renderer while preserving the existing face detector, tracking, recovery, and policy semantics. The legacy face renderer remains available for final-render compatibility and parity evidence. The rendering paths support:
 
 - Gaussian blur;
 - pixelation;
