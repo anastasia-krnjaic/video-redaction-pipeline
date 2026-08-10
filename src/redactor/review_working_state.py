@@ -88,6 +88,15 @@ def latest_reviewed_publication_deferred(package_root: Path) -> bool:
     return latest_reviewed_publication_state(package_root).get("status") == "deferred"
 
 
+def latest_reviewed_publication_supported(package_root: Path) -> bool:
+    manifest = workspace_manifest_payload(package_root)
+    publication = latest_reviewed_publication_state(package_root)
+    return (
+        manifest.get("workspace_kind") == "unified_case_review_workspace"
+        and publication.get("status") in {"supported", "ready"}
+    )
+
+
 def latest_reviewed_publication_deferred_plan(
     *,
     case_id: str,
@@ -136,13 +145,20 @@ def derive_working_state(package_root: Path, session_dir: Path) -> dict[str, Any
         session_dir=session_dir,
         entities=entities,
     )
+    projection_hash = active_projection_hash(projection)
+    if latest_reviewed_publication_supported(package_root):
+        projection = projection_with_authoritative_latest_reviewed(
+            package_root=package_root,
+            session_dir=session_dir,
+            projection=projection,
+            projection_hash=projection_hash,
+        )
     corrections = load_active_corrections(
         session_dir,
         active_correction_ids=set(projection["active_correction_ids"]),
     )
     checkpoints = load_checkpoints(session_dir)
     chain_head = current_event_chain_head(session_dir)
-    projection_hash = active_projection_hash(projection)
     state = {
         "active_correction_ids": sorted(correction.correction_id for correction in corrections),
         "active_manual_tasks": projection["active_manual_tasks"],
@@ -501,14 +517,46 @@ def derive_active_review_projection(
     }
 
 
+def projection_with_authoritative_latest_reviewed(
+    *,
+    package_root: Path,
+    session_dir: Path,
+    projection: dict[str, Any],
+    projection_hash: str,
+) -> dict[str, Any]:
+    from redactor import reviewed_regions
+
+    materialized: dict[str, dict[str, Any]] = {}
+    for case_id in sorted((dict(package_baseline(package_root).get("cases") or {})).keys()):
+        latest = reviewed_regions.current_latest_reviewed_role(
+            package_root,
+            session_dir,
+            case_id=case_id,
+            active_projection_hash=projection_hash,
+        )
+        if latest:
+            materialized[case_id] = latest
+    return dict(projection) | {"materialized_latest_reviewed": materialized}
+
+
 def active_projection_hash(projection: dict[str, Any]) -> str:
+    render_tasks = [
+        dict(task)
+        for task in list(projection.get("active_manual_tasks") or [])
+        if not durable_edit_verification_task_id(str(dict(task).get("review_task_id") or ""))
+    ]
+    render_decisions = {
+        str(task_id): dict(decision)
+        for task_id, decision in dict(projection.get("task_decisions") or {}).items()
+        if not durable_edit_verification_task_id(str(task_id))
+    }
     return stable_hash(
         {
             "active_correction_ids": sorted(
                 str(item) for item in list(projection.get("active_correction_ids") or [])
             ),
             "active_manual_tasks": sorted(
-                list(projection.get("active_manual_tasks") or []),
+                render_tasks,
                 key=lambda task: (
                     str(task.get("case_id") or ""),
                     int(task.get("source_frame_start") or 0),
@@ -517,7 +565,7 @@ def active_projection_hash(projection: dict[str, Any]) -> str:
             ),
             "object_policy_overrides": dict(projection.get("object_policy_overrides") or {}),
             "sweep_acknowledgements": dict(projection.get("sweep_acknowledgements") or {}),
-            "task_decisions": dict(projection.get("task_decisions") or {}),
+            "task_decisions": render_decisions,
         }
     )
 
@@ -897,6 +945,16 @@ def compute_effective_privacy_regions(
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
     case_id = case_ids.validate_case_id(case_id)
+    if latest_reviewed_publication_supported(package_root):
+        from redactor import reviewed_regions
+
+        return reviewed_regions.compile_reviewed_regions(
+            package_root,
+            session_dir,
+            case_id=case_id,
+            include_unsaved_correction=include_unsaved_correction,
+            require_blockers_resolved=False,
+        )
     manifest = case_manifests.load_case_manifest(safe_case_manifest_path(package_root, case_id))
     base_path = safe_case_region_path(package_root, case_id)
     base_regions = (
@@ -954,6 +1012,15 @@ def effective_privacy_region_digest(
     *,
     case_id: str,
 ) -> dict[str, Any]:
+    if latest_reviewed_publication_supported(package_root):
+        from redactor import reviewed_regions
+
+        return reviewed_regions.reviewed_region_digest(
+            package_root,
+            session_dir,
+            case_id=case_id,
+            require_blockers_resolved=False,
+        )
     started = time.monotonic()
     regions, provenance = compute_effective_privacy_regions(
         package_root,
@@ -1005,6 +1072,11 @@ def published_effective_regions_hash(
     latest = dict(state.get("materialized_latest_reviewed") or {}).get(case_id)
     if isinstance(latest, dict) and latest.get("effective_regions_hash"):
         return str(latest["effective_regions_hash"])
+    if latest_reviewed_publication_supported(package_root):
+        publication = latest_reviewed_publication_state(package_root)
+        if publication.get("status") == "ready" and publication.get("reviewed_region_set_sha256"):
+            return str(publication["reviewed_region_set_sha256"])
+        return None
     return str(
         baseline_effective_privacy_region_digest(package_root, case_id=case_id)[
             "effective_regions_hash"
@@ -1338,6 +1410,17 @@ def materialize_latest_reviewed(
             f"{LATEST_REVIEWED_PUBLICATION_DEFERRED_ERROR_CODE}: "
             "decisions and corrections are persisted, but reviewed output publication "
             "is deferred until the reviewed-region compiler is available"
+        )
+    if latest_reviewed_publication_supported(package_root):
+        from redactor import reviewed_regions
+
+        return reviewed_regions.materialize_latest_reviewed_revision(
+            package_root,
+            session_dir,
+            case_id=case_id,
+            accepted_revision=accepted_revision,
+            actor=actor,
+            event_reason=event_reason,
         )
     manifest = case_manifests.load_case_manifest(safe_case_manifest_path(package_root, case_id))
     source_path = review_finalization.resolve_package_path(package_root, manifest.source_path)
@@ -1688,18 +1771,17 @@ def render_correction_preview(
         "effective_regions_hash": effective_regions_hash,
         "frame_end": correction.source_frame_end,
         "frame_start": correction.source_frame_start,
-        "latest_reviewed": None
-        if publication_deferred
-        else corrected_preview.relative_to(package_root).as_posix(),
+        "latest_reviewed": None,
         "latest_reviewed_publication_status": "deferred"
         if publication_deferred
-        else "preview_only",
+        else "supported",
         "ok": True,
         "original_preview": original_preview.relative_to(package_root).as_posix(),
         "preview_sha256": preview_hash,
         "preview_token": token_payload["preview_token"],
         "rendered_frames": rendered_frames,
         "rendered_regions": rendered_regions,
+        "role": "correction_preview",
         "schema_version": "correction_interval_preview.v2",
         "source_video_hash": source_video_hash,
         "working_state_revision": working_state_revision,
@@ -2150,6 +2232,16 @@ def reset_to_automatic_baseline(
         },
         "restores": ["automatic_baseline", "source_backed_initial_object_policies"],
     }
+    if latest_reviewed_publication_supported(package_root):
+        from redactor import reviewed_regions
+
+        after_state["latest_reviewed_publication_clear"] = (
+            reviewed_regions.clear_current_publication(
+                package_root,
+                case_ids_to_clear=reset_case_ids,
+                reason="reset_to_automatic_baseline",
+            )
+        )
     event = append_event(
         session_dir,
         event_type=event_type,
@@ -2396,15 +2488,21 @@ def case_versions(package_root: Path, session_dir: Path | None, *, case_id: str)
             "schema_version": "case_versions.v1",
             "versions": roles,
         }
-    latest_role = dict(by_role.get("latest_reviewed") or automatic)
-    if latest_role:
-        latest_role["label"] = "Latest reviewed"
-        latest_role["role"] = "latest_reviewed"
     if session_dir is not None and session_dir.exists():
+        latest_role = {}
         state = derive_working_state(package_root, session_dir)
         latest = dict(state.get("materialized_latest_reviewed") or {}).get(case_id)
         if latest:
             latest_role = latest
+    else:
+        latest_role = (
+            {}
+            if latest_reviewed_publication_supported(package_root)
+            else dict(by_role.get("latest_reviewed") or automatic)
+        )
+    if latest_role:
+        latest_role["label"] = "Latest reviewed"
+        latest_role["role"] = "latest_reviewed"
     if latest_role:
         roles = [role for role in roles if role.get("role") != "latest_reviewed"]
         roles.append(latest_role)

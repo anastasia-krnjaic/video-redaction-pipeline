@@ -4804,6 +4804,17 @@ class MaterializationJobManager:
         session_id = session_dir.name
         plan = dict(materialization_plan or {})
         session_head_hash = review_sessions.last_event_hash(session_dir)
+        workspace_manifest_path = self.package_root / "workspace_manifest.json"
+        workspace_manifest_hash = (
+            media.sha256_file(workspace_manifest_path)
+            if workspace_manifest_path.exists()
+            else None
+        )
+        case_manifest_path = workspace_case_manifest_path(self.package_root, case_id)
+        case_manifest_hash = (
+            media.sha256_file(case_manifest_path) if case_manifest_path.exists() else None
+        )
+        reviewed_identity = dict(plan.get("after_reviewed_region_identity") or {})
         job = {
             "accepted_working_state_revision": accepted_revision,
             "affected_entity_ids": affected_entity_ids or [],
@@ -4859,12 +4870,30 @@ class MaterializationJobManager:
             )
             job["publication_guard"] = {
                 "accepted_working_state_revision": accepted_revision,
+                "active_corrections_hash": reviewed_identity.get("active_corrections_hash"),
+                "active_decisions_hash": reviewed_identity.get("active_decisions_hash"),
+                "automatic_baseline_region_set_sha256": reviewed_identity.get(
+                    "automatic_baseline_region_set_sha256"
+                ),
+                "case_manifest_sha256": case_manifest_hash,
                 "case_id": case_id,
                 "generation": int(state.get("generation") or 0),
+                "merge_rejection_state_hash": reviewed_identity.get(
+                    "merge_rejection_state_hash"
+                ),
+                "object_policy_hash": reviewed_identity.get("object_policy_hash"),
+                "renderer_configuration_sha256": reviewed_identity.get(
+                    "renderer_configuration_sha256"
+                ),
+                "reviewed_region_set_sha256": target_effective_regions_hash,
                 "schema_version": "materialization_publication_guard.v1",
                 "session_head_hash": session_head_hash,
                 "session_id": session_id,
                 "target_effective_regions_hash": target_effective_regions_hash,
+                "working_state_projection_hash": reviewed_identity.get(
+                    "working_state_projection_hash"
+                ),
+                "workspace_manifest_sha256": workspace_manifest_hash,
             }
             previous_pending = state.get("latest_requested")
             self._metric(case_id, "accepted_state_mutations", 1)
@@ -5279,7 +5308,11 @@ class MaterializationJobManager:
             )
             generation_stale = False
             with self.lock:
-                generation_stale = self._publication_guard_stale_locked(key, job)
+                generation_stale = self._publication_guard_stale_locked(
+                    key,
+                    job,
+                    check_workspace_manifest=False,
+                )
             render_target_stale = bool(
                 target_effective_hash
                 and after_render_digest.get("effective_regions_hash") != target_effective_hash
@@ -5446,10 +5479,30 @@ class MaterializationJobManager:
         self,
         key: tuple[str, str],
         job: dict[str, Any],
+        *,
+        check_workspace_manifest: bool = True,
     ) -> bool:
         guard = dict(job.get("publication_guard") or {})
         state = self.case_state.get(key) or {}
-        return int(guard.get("generation") or 0) != int(state.get("generation") or 0)
+        if int(guard.get("generation") or 0) != int(state.get("generation") or 0):
+            return True
+        if not check_workspace_manifest:
+            return False
+        expected_workspace_hash = guard.get("workspace_manifest_sha256")
+        workspace_manifest_path = self.package_root / "workspace_manifest.json"
+        if expected_workspace_hash and workspace_manifest_path.exists():
+            if media.sha256_file(workspace_manifest_path) != expected_workspace_hash:
+                return True
+        expected_case_hash = guard.get("case_manifest_sha256")
+        case_id = str(guard.get("case_id") or "")
+        if expected_case_hash and case_id:
+            case_manifest_path = workspace_case_manifest_path(self.package_root, case_id)
+            if (
+                case_manifest_path.exists()
+                and media.sha256_file(case_manifest_path) != expected_case_hash
+            ):
+                return True
+        return False
 
     def _apply_watchdog_locked(self) -> None:
         now = time.monotonic()
@@ -6502,6 +6555,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             "affected_source_frame_intervals": change_summary["changed_source_frame_intervals"],
             "after_effective_region_count": int(after_digest.get("region_count") or 0),
             "after_effective_regions_hash": after_hash,
+            "after_reviewed_region_identity": after_digest.get("reviewed_region_identity"),
             "before_effective_region_count": int(before_digest.get("region_count") or 0),
             "before_effective_regions_hash": before_hash,
             "case_id": case_id,
@@ -7675,12 +7729,16 @@ def require_workspace_case(package_root: Path, case_id: str) -> str:
 
 
 def workspace_identity_hashes(package_root: Path) -> dict[str, str]:
+    from redactor import reviewed_regions
+
     hashes: dict[str, str] = {}
     manifest_path = package_root / "workspace_manifest.json"
     if not manifest_path.exists():
         return hashes
     manifest = read_json_file(manifest_path)
-    hashes["workspace_manifest_sha256"] = media.sha256_file(manifest_path)
+    workspace_manifest_hash = reviewed_regions.workspace_review_input_sha256_file(manifest_path)
+    if workspace_manifest_hash:
+        hashes["workspace_manifest_sha256"] = workspace_manifest_hash
     for key, relative in (
         ("entity_registry_sha256", manifest.get("review_entities")),
         ("reviewer_task_index_sha256", manifest.get("review_tasks")),
@@ -7711,7 +7769,11 @@ def workspace_identity_hashes(package_root: Path) -> dict[str, str]:
     for case_id in workspace_case_ids(package_root):
         case_path = workspace_case_manifest_path(package_root, case_id)
         if case_path.exists():
-            hashes[f"case:{case_id}:content_sha256"] = stable_hash(read_json_file(case_path))
+            case_manifest_hash = reviewed_regions.case_manifest_review_input_sha256_file(
+                case_path
+            )
+            if case_manifest_hash:
+                hashes[f"case:{case_id}:content_sha256"] = case_manifest_hash
     return dict(sorted(hashes.items()))
 
 
@@ -7953,6 +8015,7 @@ const state = {
   tab: localStorage.getItem(storageKey('active_tab')) || '',
   mode: {}, frame: {}, version: {}, filter: {}, selectedTask: {},
   session: null, attribution: null, decisions: {}, events: [], corrections: [], correctionPreview: {},
+  workingState: null,
   draft: { caseId: null, start: null, end: null, keyframes: [], selectedEntityId: null, selectedTaskId: null },
   savedFlash: {}, entityOverrides: {}, manualTasks: [],
   mergeDraft: { caseId: null, sourceEntityId: null, targetEntityId: null }
@@ -7965,6 +8028,7 @@ function esc(value) { return String(value ?? '').replace(/[&<>"]/g, c => ({'&':'
 function clamp(n, min, max) { return Math.min(max, Math.max(min, n)); }
 function isSafeCaseId(value) { return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(String(value || '')); }
 function latestReviewedPublicationDeferred() { return DATA.workspace?.latest_reviewed_publication?.status === 'deferred'; }
+function latestReviewedPublicationSupported() { return DATA.workspace?.workspace_kind === 'unified_case_review_workspace' && ['supported', 'ready'].includes(DATA.workspace?.latest_reviewed_publication?.status); }
 function caseIds() { return Object.keys(DATA.workspace?.cases || {}).filter(isSafeCaseId); }
 function casePanelId(caseId) { if (!isSafeCaseId(caseId)) throw new Error(`Unsafe case ID: ${caseId}`); return `case-${caseId}`; }
 function casePanel(caseId) { return document.getElementById(casePanelId(caseId)); }
@@ -8037,14 +8101,16 @@ function playerHtml(caseId) {
 function availableVersions(caseId) {
   const roles = caseData(caseId).video_roles || [];
   const original = roles.find(r => r.role === 'original'); const automatic = roles.find(r => r.role === 'automatic') || roles.find(r => r.role === 'current_result'); const current = roles.find(r => r.role === 'current_result'); const latest = roles.find(r => r.role === 'latest_reviewed'); const final = roles.find(r => r.role === 'final_reviewed');
+  const authoritativeLatest = state.workingState?.materialized_latest_reviewed?.[caseId] || null;
   const versions = [];
   if (original) versions.push({ key: 'original', label: 'Original', path: original.path, role: original.role });
   if (automatic) versions.push({ key: 'automatic', label: 'Automatic', path: automatic.path, role: automatic.role });
   if (state.correctionPreview[caseId]) {
-    if (latestReviewedPublicationDeferred()) versions.push({ key: 'correction_preview', label: 'Correction preview', path: state.correctionPreview[caseId].path, role: 'correction_preview', note: 'Diagnostic preview' });
-    else versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: state.correctionPreview[caseId].path, role: 'latest_reviewed', note: 'Correction preview' });
+    versions.push({ key: 'correction_preview', label: 'Correction preview', path: state.correctionPreview[caseId].path, role: 'correction_preview', note: 'Diagnostic preview' });
   }
-  if (!latestReviewedPublicationDeferred() && latest) versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: latest.path, role: latest.role, note: 'Current result' });
+  if (latestReviewedPublicationSupported()) {
+    if (authoritativeLatest) versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: authoritativeLatest.path, role: 'latest_reviewed', note: 'Current authoritative revision', revision_id: authoritativeLatest.revision_id });
+  } else if (!latestReviewedPublicationDeferred() && latest) versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: latest.path, role: latest.role, note: 'Current result' });
   else if (!latestReviewedPublicationDeferred() && current) versions.push({ key: 'latest_reviewed', label: 'Latest reviewed', path: current.path, role: current.role, note: 'Current result' });
   if (final) versions.push({ key: 'final_reviewed', label: 'Final reviewed', path: final.path, role: final.role });
   return versions;
@@ -8129,7 +8195,7 @@ function bindReviewPanel(caseId) { const panel = casePanel(caseId); if (panel.da
 function refreshSidePanel(caseId, opts = {}) { const panel = casePanel(caseId); const side = panel?.querySelector('.side-panel'); if (!side) return; const scrollTop = side.scrollTop; side.innerHTML = state.mode[caseId] === 'edit' ? editPanelHtml(caseId) : reviewPanelHtml(caseId); if (state.mode[caseId] === 'edit') { bindEditPanel(caseId); bindEntityPanel(caseId); } bindTimeline(caseId); if (opts.preserveScroll) side.scrollTop = scrollTop; if (opts.scrollActive !== false) setTimeout(() => document.querySelector(`${caseSelector(caseId)} .side-panel [data-task-id="${CSS.escape(state.selectedTask[caseId] || '')}"]`)?.scrollIntoView({block:'nearest'}), 0); }
 async function selectTask(caseId, taskId, opts = {}) { state.selectedTask[caseId] = taskId; const task = selectedTask(caseId); if (task && opts.jump) { const targetFrame = clamp(task.source_frame_start - caseData(caseId).source_frame_start, 0, caseFrameCount(caseId) - 1); await seekToFrame(caseId, targetFrame, { keepPaused: true }); state.frame[caseId] = targetFrame; persistFrame(caseId); updatePlayerUi(caseId); assertActiveTaskFrame(caseId, task); } refreshSidePanel(caseId, {preserveScroll: Boolean(opts.preserveScroll)}); }
 function assertActiveTaskFrame(caseId, task) { const expected = task.source_frame_start - caseData(caseId).source_frame_start; if (state.frame[caseId] !== expected) showSessionError(`Frame navigation mismatch: expected case frame ${expected}, got ${state.frame[caseId]}.`); }
-async function recordDecision(caseId, taskId, action, button = null) { if (!state.session) return showSessionError('Start review before recording decisions.'); const task = allTasks(caseId).find(t => t.review_task_id === taskId); setDecisionPending(button); try { const event = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: decisionNote(action, task) }); state.decisions[taskId] = event.event.after_state; state.savedFlash[taskId] = true; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); if (action === ACTIONS.leak && task?.issue_type === 'spot_check') await createManualIssue(caseId, task.source_frame_start, task.source_frame_end, 'Privacy issue from spot check'); const next = firstOpenTask(caseId); if (next) { await selectTask(caseId, next.review_task_id, {jump:true, preserveScroll:true}); } else { refreshSidePanel(caseId, {preserveScroll:true}); } setTimeout(() => { delete state.savedFlash[taskId]; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); }, 1200); } catch (err) { setDecisionError(button, err.message); showSessionError(`Decision was not saved: ${err.message}`); } }
+async function recordDecision(caseId, taskId, action, button = null) { if (!state.session) return showSessionError('Start review before recording decisions.'); const task = allTasks(caseId).find(t => t.review_task_id === taskId); setDecisionPending(button); try { const event = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: decisionNote(action, task) }); state.decisions[taskId] = event.event.after_state; state.workingState = null; state.savedFlash[taskId] = true; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); if (action === ACTIONS.leak && task?.issue_type === 'spot_check') await createManualIssue(caseId, task.source_frame_start, task.source_frame_end, 'Privacy issue from spot check'); const next = firstOpenTask(caseId); if (next) { await selectTask(caseId, next.review_task_id, {jump:true, preserveScroll:true}); } else { refreshSidePanel(caseId, {preserveScroll:true}); } setTimeout(() => { delete state.savedFlash[taskId]; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); }, 1200); } catch (err) { setDecisionError(button, err.message); showSessionError(`Decision was not saved: ${err.message}`); } }
 function setDecisionPending(button) { const card = button?.closest('.task-card'); if (!card) return; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.classList.toggle('selected', choice === button); choice.setAttribute('aria-pressed', choice === button ? 'true' : 'false'); choice.disabled = true; }); const note = card.querySelector('.saved-note'); if (note) note.textContent = 'Saving...'; }
 function setDecisionError(button, message) { const card = button?.closest('.task-card'); if (!card) return; const savedAction = state.decisions[card.dataset.taskId]?.action || ''; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.disabled = false; choice.classList.toggle('selected', choice.dataset.decision === savedAction); choice.setAttribute('aria-pressed', choice.dataset.decision === savedAction ? 'true' : 'false'); }); const note = card.querySelector('.saved-note'); if (note) note.textContent = `Could not save: ${message}`; }
 function decisionNote(action, task) { if (action === ACTIONS.leak || action === ACTIONS.partial) return 'Reviewer marked this item for correction.'; if (action === ACTIONS.falseRedaction) return 'Reviewer requested bounded redaction removal.'; return `Reviewer selected ${actionLabel(action)} for ${task?.review_task_id || 'task'}.`; }
@@ -8155,14 +8221,14 @@ async function saveCorrection(caseId, opts = {}) {
   try {
     const previewResponse = await postJson('/api/corrections/preview', { session_id: state.session.session_id, actor: currentActor(), correction, reason: correction.reason });
     const preview = previewResponse.preview || {};
-    if (preview.corrected_preview || preview.latest_reviewed) {
-      const roleKey = latestReviewedPublicationDeferred() ? 'correction_preview' : 'latest_reviewed';
-      state.correctionPreview[caseId] = { path: preview.corrected_preview || preview.latest_reviewed, frame_start: preview.frame_start, frame_end: preview.frame_end };
-      state.version[caseId] = roleKey;
-      localStorage.setItem(storageKey(`version_${caseId}`), roleKey);
+    if (preview.corrected_preview) {
+      state.correctionPreview[caseId] = { path: preview.corrected_preview, frame_start: preview.frame_start, frame_end: preview.frame_end, role: 'correction_preview' };
+      state.version[caseId] = 'correction_preview';
+      localStorage.setItem(storageKey(`version_${caseId}`), 'correction_preview');
     }
     if (opts.previewOnly) { renderCase(caseId); return; }
     const response = await postJson('/api/corrections', { session_id: state.session.session_id, actor: currentActor(), correction, preview_token: preview.preview_token, reason: correction.reason });
+    state.workingState = response.working_state || state.workingState;
     state.corrections.push(response.event.after_state);
     state.savedFlash[task.review_task_id] = true;
     renderCase(caseId);
@@ -8195,7 +8261,7 @@ function closeEntities() { const modal = document.getElementById('entitiesModal'
 function possibleDuplicateSuggestions(caseId) { const entities = effectiveEntities(caseId); const suggestions = []; for (let i=0; i<entities.length; i++) for (let j=i+1; j<entities.length; j++) { const a=entities[i], b=entities[j]; if (a.category !== b.category || entitiesOverlap(a,b)) continue; const gap = Math.max(0, Math.max(a.first_visible_source_frame || 0, b.first_visible_source_frame || 0) - Math.min(a.last_visible_source_frame || 0, b.last_visible_source_frame || 0)); if (gap <= 30) suggestions.push({entity_ids:[a.entity_id,b.entity_id], labels:[a.label,b.label], reason:'nearby_non_overlapping_tracklets'}); } return suggestions.slice(0, 20); }
 function findEntity(caseId, id) { return effectiveEntities(caseId).find(e => e.entity_id === id); }
 function policyLabel(policy) { return {redact:'Redact', keep_visible:'Keep visible', not_sensitive:'Invalid / not sensitive', review_required:'Needs review'}[policy] || policy; }
-async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; const reason = 'Reviewer object policy update.'; const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; if (verificationTaskId && !state.manualTasks.some(t => t.review_task_id === verificationTaskId)) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after, child_track_ids: entity.member_detector_tracker_ids || entity.automatic_source_track_ids || [] } }, reason }); refreshSidePanel(caseId, {preserveScroll:true}); refreshOpenEntities(caseId); }
+async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; const reason = 'Reviewer object policy update.'; const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; state.workingState = null; if (verificationTaskId && !state.manualTasks.some(t => t.review_task_id === verificationTaskId)) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); const response = await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after, child_track_ids: entity.member_detector_tracker_ids || entity.automatic_source_track_ids || [] } }, reason }); state.workingState = response.working_state || state.workingState; renderCase(caseId); refreshSidePanel(caseId, {preserveScroll:true}); refreshOpenEntities(caseId); }
 function policyTask(caseId, entity, taskId) { return { blocking: true, case_id: caseId, category: entity.category, correction_required: false, decision_state: 'pending', issue_type: 'entity_policy_verification', raw_signal_ids: [], review_task_id: taskId, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: entity.first_visible_source_frame || caseData(caseId).source_frame_start, source_frame_end: entity.first_visible_source_frame || caseData(caseId).source_frame_start, technical_only: false, title: `Verify ${policyLabel(entity.current_policy)} for ${entity.label}`, what_to_inspect: 'Confirm this object policy is correct before finalization.' }; }
 function refreshOpenEntities(caseId) { const modal = document.getElementById('entitiesModal'); if (!modal?.classList.contains('open')) return; const content = document.getElementById('entitiesModalContent'); const filter = modal.dataset.filter || 'all'; content.innerHTML = `<div class="entity-filter-row">${entityFilterButtons(filter)}</div><div class="object-list">${entityCardsHtml(caseId, filter)}</div><details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; bindEntityPanel(caseId, content); }
 function openMergeModal(caseId, entityId) { if (!state.session) return showSessionError('Start review before merging objects.'); const source = findEntity(caseId, entityId); if (!source) return; const modal = document.getElementById('mergeModal'); const content = document.getElementById('mergeModalContent'); const candidates = mergeCandidates(caseId, source); state.mergeDraft = {caseId, sourceEntityId: entityId, targetEntityId: candidates[0]?.entity_id || null}; content.innerHTML = `<p class="task-title">Merge ${esc(source.label)} with...</p><p class="muted">Only same-category, non-overlapping candidates are shown.</p><div class="merge-candidates">${candidates.map((candidate, index) => mergeCandidateHtml(candidate, index === 0)).join('') || '<p class="muted">No safe merge candidates are available.</p>'}</div>`; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); content.querySelectorAll('.merge-card').forEach(card => card.addEventListener('click', () => { state.mergeDraft.targetEntityId = card.dataset.entityId; content.querySelectorAll('.merge-card').forEach(item => item.classList.toggle('selected', item === card)); })); }
@@ -8207,7 +8273,7 @@ function entityGap(a,b) { const a1=a.first_visible_source_frame, a2=a.last_visib
 function entitiesOverlap(a,b) { const a1=a.first_visible_source_frame, a2=a.last_visible_source_frame, b1=b.first_visible_source_frame, b2=b.last_visible_source_frame; if ([a1,a2,b1,b2].some(v => v === null || v === undefined)) return false; return Math.max(a1,b1) <= Math.min(a2,b2); }
 
 async function restoreSession() { const sessionId = localStorage.getItem(storageKey('session_id')); if (!sessionId) return; try { await loadSessionState(sessionId); } catch { localStorage.removeItem(storageKey('session_id')); } }
-async function loadSessionState(sessionId) { const res = await fetch(`/api/session-state?session_id=${encodeURIComponent(sessionId)}`); if (!res.ok) throw new Error(await res.text()); const payload = await res.json(); state.session = payload.session; state.attribution = payload.attribution; state.decisions = payload.decisions || {}; state.events = payload.events || []; state.corrections = payload.corrections || []; rebuildFromEvents(); }
+async function loadSessionState(sessionId) { const res = await fetch(`/api/session-state?session_id=${encodeURIComponent(sessionId)}`); if (!res.ok) throw new Error(await res.text()); const payload = await res.json(); state.session = payload.session; state.attribution = payload.attribution; state.decisions = payload.decisions || {}; state.events = payload.events || []; state.corrections = payload.corrections || []; state.workingState = payload.working_state || null; rebuildFromEvents(); }
 function rebuildFromEvents() { state.manualTasks = []; state.entityOverrides = {}; for (const event of state.events) { if (event.event_type === 'manual_issue_created' && event.after_state?.task) state.manualTasks.push(event.after_state.task); if (event.event_type === 'entity_policy_changed' && event.after_state?.entity_id) { state.entityOverrides[event.after_state.entity_id] = event.after_state; if (event.after_state.verification_task_id) state.manualTasks.push(policyTask(event.case_id, event.after_state, event.after_state.verification_task_id)); } if (event.event_type === 'entities_merged' && event.after_state?.primary) { state.entityOverrides[event.after_state.primary.entity_id] = event.after_state.primary; for (const id of event.after_state.retired_entity_ids || []) state.entityOverrides[id] = { entity_id: id, current_status: 'merged' }; } } }
 function renderSessionBanner() { const banner = document.getElementById('sessionBanner'); const start = document.getElementById('startSession'); if (!state.session) { banner.className = 'session-banner'; banner.textContent = 'No local review session yet. Start review to enable decisions and corrections.'; start.disabled = false; return; } banner.className = 'session-banner ready'; banner.textContent = `Local session ${state.session.session_id}${state.attribution?.display_name ? ` · Reviewer ${state.attribution.display_name}` : ' · anonymous until export/finalization'}`; start.disabled = true; }
 function showSessionError(message) { const banner = document.getElementById('sessionBanner'); banner.className = 'session-banner error'; banner.textContent = message; }

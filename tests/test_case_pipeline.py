@@ -281,6 +281,7 @@ def test_case_pipeline_writes_one_manifest_and_combined_render_plan(
         "effective_privacy_regions",
         "mixed_review_entities",
         "mixed_review_media_inventory",
+        "mixed_review_automatic_baseline_regions",
         "mixed_review_session_state",
         "mixed_review_tasks",
         "mixed_review_validation",
@@ -306,8 +307,9 @@ def test_case_pipeline_writes_one_manifest_and_combined_render_plan(
         == workspace_manifest["category_run_manifest_identity_hash"]
     )
     assert workspace_manifest["automatic_preview"]["region_count"] == 2
-    assert workspace_manifest["latest_reviewed_publication"]["status"] == "deferred"
-    assert manifest["review"]["latest_reviewed_publication"]["status"] == "deferred"
+    assert workspace_manifest["content_identities"]["automatic_baseline_regions"]["sha256"]
+    assert workspace_manifest["latest_reviewed_publication"]["status"] == "supported"
+    assert manifest["review"]["latest_reviewed_publication"]["status"] == "supported"
     entities = json.loads((workspace_root / "review_entities.json").read_text())
     tasks = json.loads((workspace_root / "reviewer_tasks.json").read_text())
     assert workspace_manifest["lifecycle"]["review_workspace"] == "ready"

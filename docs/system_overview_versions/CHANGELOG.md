@@ -1,5 +1,19 @@
 # System Overview Changelog
 
+## v035 — 2026-08-10
+
+Implemented authoritative canonical Latest reviewed publication:
+
+- added the reviewed-region compiler for canonical face-only, plate-only, and mixed review workspaces;
+- installed the automatic baseline region set into generated canonical workspaces and bound it into `workspace_manifest.json`;
+- validated selected category-run/config identities directly before compilation and publication;
+- separated semantic reviewed-region identity from audit record identity so generated correction IDs, revision IDs, timestamps, preview tokens, and event IDs do not affect `reviewed_region_set_sha256`;
+- published immutable Latest reviewed revision artifacts only after rendering from Original and passing full-span media plus rendered-region validation;
+- selected current Latest reviewed only through the atomic `latest_reviewed/current.json` pointer and hid stale pointers when the active render-state projection changes;
+- kept correction previews diagnostic and outside the Latest reviewed role;
+- recorded full-span day, night, and representative mixed evidence under `artifacts/mixed_latest_reviewed_v1_final_stabilization/`;
+- left mixed finalization, reviewed/final renderer migration, and plate Ground Truth/evaluation behind separate gates.
+
 ## v034 — 2026-08-08
 
 Implemented the manual-redaction Save persistence fix and v1.5 reviewed-media planning pass:

@@ -98,6 +98,29 @@ def finalization_blockers(
     blockers.extend(object_policy_blockers(working_state, decisions, case_id=case_id))
     if review_working_state.latest_reviewed_publication_deferred(package_root):
         blockers.append(f"{case_id}: latest_reviewed_publication_deferred")
+    elif review_working_state.latest_reviewed_publication_supported(package_root):
+        latest = dict(working_state.get("materialized_latest_reviewed") or {}).get(case_id)
+        if not latest:
+            blockers.append(f"{case_id}: Latest reviewed has not been published")
+        else:
+            latest_path = package_root / str(latest.get("path") or "")
+            if not latest_path.exists():
+                blockers.append(f"{case_id}: Latest reviewed media is missing")
+            if latest.get("media_validation_passed") is not True:
+                blockers.append(f"{case_id}: Latest reviewed media validation has not passed")
+            try:
+                target_digest = review_working_state.effective_privacy_region_digest(
+                    package_root,
+                    session_dir,
+                    case_id=case_id,
+                )
+            except Exception as exc:
+                blockers.append(f"{case_id}: Latest reviewed digest failed: {exc}")
+            else:
+                published_hash = str(latest.get("effective_regions_hash") or "")
+                target_hash = str(target_digest.get("effective_regions_hash") or "")
+                if not published_hash or published_hash != target_hash:
+                    blockers.append(f"{case_id}: Latest reviewed is not current")
 
     chain = validate_event_hash_chain(session_dir)
     if not chain["passed"]:

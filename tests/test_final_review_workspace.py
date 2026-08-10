@@ -18,12 +18,14 @@ from redactor import (
     case_ids,
     case_manifests,
     privacy_entities,
+    privacy_rendering,
     review_api_contract,
     review_corrections,
     review_finalization,
     review_sessions,
     review_working_state,
     review_workspace,
+    reviewed_regions,
 )
 from redactor.cli import main
 from redactor.privacy_records import (
@@ -170,6 +172,139 @@ def write_deferred_canonical_workspace_manifest(
     )
 
 
+def write_supported_canonical_workspace_manifest(
+    package_root: Path,
+    manifest: case_manifests.CaseManifest,
+    *,
+    categories: tuple[str, ...],
+) -> None:
+    automatic_role = next(role for role in manifest.video_roles if role.role == "automatic")
+    baseline_path = package_root / "regions" / f"{manifest.case_id}_current_regions.jsonl"
+    region_count = sum(
+        1 for line in baseline_path.read_text(encoding="utf-8").splitlines() if line.strip()
+    )
+    category_run_identities = {
+        category: write_test_category_run_manifest(package_root, manifest, category)
+        for category in sorted(categories)
+    }
+    configuration_freeze = {
+        "case_id": manifest.case_id,
+        "category_configuration_identities": {
+            category: {
+                "category": category,
+                "configuration_hash": identity["configuration_hash"],
+                "schema_version": "category_configuration_identity.v1",
+                "source_sha256": manifest.source_video_hash,
+            }
+            for category, identity in category_run_identities.items()
+        },
+        "category_run_manifest_identity_hash": stable_hash(category_run_identities),
+        "category_run_manifest_identities": category_run_identities,
+        "schema_version": "mixed_review_configuration_freeze.v1",
+        "selected_categories": list(categories),
+    }
+    write_json(package_root / "configuration_freeze.json", configuration_freeze)
+    write_json(
+        package_root / "workspace_manifest.json",
+        {
+            "automatic_preview": {
+                "automatic_preview_sha256": media_sha(package_root / automatic_role.path),
+                "region_count": region_count,
+                "source_sha256": manifest.source_video_hash,
+            },
+            "case_id": manifest.case_id,
+            "cases": {manifest.case_id: f"cases/{manifest.case_id}.json"},
+            "category_run_manifest_identities": category_run_identities,
+            "category_run_manifest_identity_hash": stable_hash(category_run_identities),
+            "configuration_freeze": "configuration_freeze.json",
+            "configuration_freeze_hash": stable_hash(configuration_freeze),
+            "content_identities": {
+                "automatic_baseline_regions": {
+                    "path": baseline_path.relative_to(package_root).as_posix(),
+                    "role": "automatic_baseline_regions",
+                    "schema_version": "artifact_reference.v1",
+                    "sha256": media_sha(baseline_path),
+                    "size_bytes": baseline_path.stat().st_size,
+                }
+            },
+            "latest_reviewed_publication": {
+                "publication_mode": "reviewed_region_compiler.v1",
+                "schema_version": "latest_reviewed_publication_capability.v1",
+                "status": "supported",
+            },
+            "lifecycle": {
+                "evaluation": {"status": "not_run"},
+                "finalization": {"status": "not_run"},
+                "latest_reviewed": {"status": "not_run"},
+                "review_session": {"status": "not_started"},
+                "review_workspace": "ready",
+            },
+            "schema_version": "final_review_workspace.v2.3.4",
+            "selected_categories": list(categories),
+            "source_identity": {"sha256": manifest.source_video_hash},
+            "source_metadata": {"sha256": manifest.source_video_hash},
+            "workspace_kind": "unified_case_review_workspace",
+            "workspace_status": "ready",
+        },
+    )
+
+
+def write_test_category_run_manifest(
+    package_root: Path,
+    manifest: case_manifests.CaseManifest,
+    category: str,
+) -> dict[str, object]:
+    configuration_identity = {
+        "category": category,
+        "configuration_hash": stable_hash(
+            {
+                "category": category,
+                "schema_version": "test_category_configuration.v1",
+                "source_sha256": manifest.source_video_hash,
+            }
+        ),
+        "schema_version": "category_configuration_identity.v1",
+        "source_sha256": manifest.source_video_hash,
+    }
+    run_manifest = {
+        "artifacts": [],
+        "blockers": [],
+        "case_id": manifest.case_id,
+        "category": category,
+        "configuration_identity": configuration_identity,
+        "schema_version": "category_run_manifest.v1",
+        "source_lineage": {
+            "processed_span": {
+                "first_processed_frame": manifest.source_frame_start,
+                "last_processed_frame": manifest.source_frame_end,
+                "source_frame_count": manifest.frame_count,
+            },
+            "schema_version": "category_source_lineage.v1",
+            "source_sha256": manifest.source_video_hash,
+        },
+        "stage_outcomes": [{"stage": "test", "status": "succeeded"}],
+    }
+    run_manifest["category_run_content_sha256"] = stable_hash(run_manifest)
+    path = package_root / "category_runs" / category / "category_run_manifest.json"
+    write_json(path, run_manifest)
+    return {
+        "artifact_id": f"{category}:category_run_manifest",
+        "artifact_reference_schema_version": "artifact_reference.v1",
+        "case_id": manifest.case_id,
+        "category": category,
+        "category_run_content_sha256": run_manifest["category_run_content_sha256"],
+        "configuration_hash": configuration_identity["configuration_hash"],
+        "configuration_sha256": configuration_identity["configuration_hash"],
+        "path": path.relative_to(package_root).as_posix(),
+        "processed_span": run_manifest["source_lineage"]["processed_span"],
+        "role": "category_run_manifest",
+        "schema_version": "category_run_manifest_identity.v1",
+        "sha256": media_sha(path),
+        "size_bytes": path.stat().st_size,
+        "source_sha256": manifest.source_video_hash,
+    }
+
+
 def media_sha(path: Path) -> str:
     from redactor import media
 
@@ -259,8 +394,12 @@ def write_explicit_keep_face_policy(
 
 
 def create_session(package_root: Path, manifest: case_manifests.CaseManifest) -> Path:
-    freeze = {"schema_version": "freeze.test", "value": 1}
-    write_json(package_root / "configuration_freeze.json", freeze)
+    freeze_path = package_root / "configuration_freeze.json"
+    if freeze_path.exists():
+        freeze = json.loads(freeze_path.read_text(encoding="utf-8"))
+    else:
+        freeze = {"schema_version": "freeze.test", "value": 1}
+        write_json(freeze_path, freeze)
     session = review_sessions.create_review_session(
         package_root=package_root,
         reviewer=review_sessions.ReviewerIdentity("Analyst", "analyst@example.test"),
@@ -268,6 +407,7 @@ def create_session(package_root: Path, manifest: case_manifests.CaseManifest) ->
         configuration_freeze_hash=stable_hash(freeze),
         case_manifest_hashes={manifest.case_id: manifest.manifest_hash()},
         source_hashes={manifest.case_id: manifest.source_video_hash or ""},
+        workspace_identity_hashes=review_workspace.workspace_identity_hashes(package_root),
     )
     return review_sessions.session_directory(package_root, session.session_id)
 
@@ -865,6 +1005,69 @@ def write_base_region(package: Path, case_id: str) -> None:
         package / "regions" / f"{case_id}_current_regions.jsonl",
         [record],
     )
+
+
+def write_mixed_base_regions(package: Path, case_id: str) -> list[PrivacyRegionRecord]:
+    records = [
+        PrivacyRegionRecord(
+            approval_state=APPROVAL_ACCEPTED,
+            bbox_xyxy=(20, 20, 54, 34),
+            category=CATEGORY_FACE,
+            object_id="face_track_1",
+            provenance="face_detector_observation",
+            render_eligible=True,
+            source_frame=0,
+            source_record={"region_id": "face_region_1", "track_uid": "face_track_1"},
+        ),
+        PrivacyRegionRecord(
+            approval_state=APPROVAL_ACCEPTED,
+            bbox_xyxy=(20, 20, 54, 34),
+            category=CATEGORY_PLATE,
+            object_id="plate_track_1",
+            provenance="plate_detector_observation",
+            render_eligible=True,
+            source_frame=0,
+            source_record={"region_id": "plate_region_1", "track_uid": "plate_track_1"},
+        ),
+    ]
+    review_finalization.write_privacy_region_records(
+        package / "regions" / f"{case_id}_current_regions.jsonl",
+        records,
+    )
+    return records
+
+
+def write_mixed_entity_registry(
+    package: Path,
+    case_id: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    face = {
+        "automatic_source_track_ids": ["face_track_1"],
+        "case_id": case_id,
+        "category": CATEGORY_FACE,
+        "current_policy": privacy_entities.POLICY_REDACT,
+        "default_privacy_policy": privacy_entities.POLICY_REDACT,
+        "entity_id": "entity_face_1",
+        "label": "Person 01",
+        "member_detector_tracker_ids": ["face_track_1"],
+        "privacy_action": privacy_entities.POLICY_REDACT,
+    }
+    plate = {
+        "automatic_source_track_ids": ["plate_track_1"],
+        "case_id": case_id,
+        "category": CATEGORY_PLATE,
+        "current_policy": privacy_entities.POLICY_REDACT,
+        "default_privacy_policy": privacy_entities.POLICY_REDACT,
+        "entity_id": "entity_plate_1",
+        "label": "Plate 01",
+        "member_detector_tracker_ids": ["plate_track_1"],
+        "privacy_action": privacy_entities.POLICY_REDACT,
+    }
+    write_json(
+        package / "review_entities.json",
+        {"cases": {case_id: [face, plate]}, "schema_version": "review_entities.v2"},
+    )
+    return face, plate
 
 
 def write_policy_entity_package(
@@ -3022,6 +3225,1242 @@ def test_deferred_canonical_workspace_persists_correction_without_latest_reviewe
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_supported_canonical_compiler_applies_keep_visible_and_replacement(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_mixed_base_regions(package, manifest.case_id)
+    face, plate = write_mixed_entity_registry(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_FACE, CATEGORY_PLATE),
+    )
+    session_dir = create_session(package, manifest)
+    review_sessions.append_event(
+        session_dir,
+        event_type="entity_policy_changed",
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state=plate,
+        after_state=plate
+        | {
+            "current_policy": privacy_entities.POLICY_KEEP_VISIBLE,
+            "privacy_action": privacy_entities.POLICY_KEEP_VISIBLE,
+            "reviewer_override": True,
+        },
+        note="keep visible",
+        application_hashes={},
+    )
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_FACE,
+        configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
+        entity_id=str(face["entity_id"]),
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (10, 10, 70, 50)),),
+        operation=review_corrections.OP_REPLACE,
+        reason="replace face geometry",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=0,
+        source_frame_start=0,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id="task_replace",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+
+    compiled, provenance = reviewed_regions.compile_reviewed_regions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+
+    assert [record.category for record in compiled] == [CATEGORY_FACE]
+    assert compiled[0].provenance == "reviewed_correction"
+    assert compiled[0].bbox_xyxy == (10, 10, 70, 50)
+    assert compiled[0].source_record["baseline_replaced_region_ids"] == ["face_region_1"]
+    assert provenance["privacy_region_changes_by_cause"]["suppression_removed"] == 1
+    assert provenance["privacy_region_changes_by_cause"]["manual_correction_replaced"] == 1
+    identity = provenance["reviewed_region_identity"]
+    assert identity["selected_categories"] == [CATEGORY_FACE, CATEGORY_PLATE]
+    assert identity["reviewed_region_set_sha256"] == provenance["reviewed_region_set_sha256"]
+    assert identity["active_corrections_hash"]
+    assert identity["object_policy_hash"]
+
+
+def test_supported_canonical_unresolved_blocking_task_prevents_publication(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "correction_required": False,
+                    "review_task_id": "plate_task_1",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+
+    with pytest.raises(reviewed_regions.ReviewedRegionCompilationError, match="required task"):
+        review_working_state.materialize_latest_reviewed(
+            package,
+            session_dir,
+            case_id=manifest.case_id,
+            accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+                "active_projection_hash"
+            ],
+        )
+
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id="plate_task_1",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="resolved",
+    )
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+
+    assert materialization["latest_reviewed"]["revision_id"].startswith("latest_reviewed_")
+    assert materialization["media_validation"]["passed"] is True
+
+
+def test_supported_canonical_reviewed_region_hash_uses_semantic_decisions(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "blocking": False,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "correction_required": False,
+                    "review_task_id": "plate_task_1",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id="plate_task_1",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="same decision",
+    )
+    first = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id="plate_task_1",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="same decision",
+    )
+    second = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id="plate_task_1",
+        action=review_sessions.ACTION_NOT_SENSITIVE,
+        note="changed decision",
+    )
+    third = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+
+    assert first["effective_regions_hash"] == second["effective_regions_hash"]
+    assert third["effective_regions_hash"] != second["effective_regions_hash"]
+
+
+def test_supported_canonical_correction_semantic_hash_excludes_audit_metadata(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_a = create_session(package, manifest)
+    session_b = create_session(package, manifest)
+    base_payload = {
+        "case_id": manifest.case_id,
+        "category": CATEGORY_PLATE,
+        "configuration_freeze_hash": json.loads(
+            (package / "workspace_manifest.json").read_text()
+        )["configuration_freeze_hash"],
+        "entity_id": "plate_entity_1",
+        "interpolation_method": review_corrections.INTERPOLATION_NONE,
+        "keyframes": (review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),),
+        "operation": review_corrections.OP_ADD,
+        "reason": "reviewed",
+        "reviewer_identity": {"reviewer_id": "analyst"},
+        "source_frame_end": 0,
+        "source_frame_start": 0,
+        "source_video_hash": manifest.source_video_hash or "",
+        "task_id": "task_add",
+    }
+    first = review_corrections.ReviewCorrection(
+        **base_payload,
+        correction_id="corr_a",
+        created_at_utc="2026-01-01T00:00:00Z",
+        revision_id="corr_rev_a",
+    )
+    second = review_corrections.ReviewCorrection(
+        **base_payload,
+        correction_id="corr_b",
+        created_at_utc="2026-01-02T00:00:00Z",
+        revision_id="corr_rev_b",
+    )
+
+    assert first.correction_hash() != second.correction_hash()
+    assert reviewed_regions.correction_semantic_sha256(first) == (
+        reviewed_regions.correction_semantic_sha256(second)
+    )
+
+    review_sessions.append_correction_event(
+        session_a,
+        actor={"reviewer_id": "analyst"},
+        correction=first,
+    )
+    review_sessions.append_correction_event(
+        session_b,
+        actor={"reviewer_id": "analyst"},
+        correction=second,
+    )
+    digest_a = reviewed_regions.reviewed_region_digest(
+        package,
+        session_a,
+        case_id=manifest.case_id,
+    )
+    digest_b = reviewed_regions.reviewed_region_digest(
+        package,
+        session_b,
+        case_id=manifest.case_id,
+    )
+    changed_keyframes = (review_corrections.CorrectionKeyframe(0, (22, 20, 56, 34)),)
+    changed = review_corrections.ReviewCorrection(
+        **(base_payload | {"keyframes": changed_keyframes}),
+        correction_id="corr_c",
+        created_at_utc="2026-01-03T00:00:00Z",
+        revision_id="corr_rev_c",
+    )
+    changed_span = review_corrections.ReviewCorrection(
+        **(base_payload | {"source_frame_end": 1}),
+        correction_id="corr_span",
+        created_at_utc="2026-01-04T00:00:00Z",
+        revision_id="corr_rev_span",
+    )
+    fixed_multi_frame = review_corrections.ReviewCorrection(
+        **(
+            base_payload
+            | {
+                "keyframes": (
+                    review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),
+                    review_corrections.CorrectionKeyframe(2, (30, 22, 70, 44)),
+                ),
+                "source_frame_end": 2,
+            }
+        ),
+        correction_id="corr_fixed",
+        created_at_utc="2026-01-05T00:00:00Z",
+        revision_id="corr_rev_fixed",
+    )
+    linear_multi_frame = review_corrections.ReviewCorrection(
+        **(
+            base_payload
+            | {
+                "interpolation_method": review_corrections.INTERPOLATION_LINEAR,
+                "keyframes": (
+                    review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),
+                    review_corrections.CorrectionKeyframe(2, (30, 22, 70, 44)),
+                ),
+                "source_frame_end": 2,
+            }
+        ),
+        correction_id="corr_linear",
+        created_at_utc="2026-01-06T00:00:00Z",
+        revision_id="corr_rev_linear",
+    )
+    changed_source = review_corrections.ReviewCorrection(
+        **(base_payload | {"source_video_hash": "other-source-sha256"}),
+        correction_id="corr_source",
+        created_at_utc="2026-01-07T00:00:00Z",
+        revision_id="corr_rev_source",
+    )
+
+    assert digest_a["effective_regions_hash"] == digest_b["effective_regions_hash"]
+    assert reviewed_regions.correction_semantic_sha256(changed) != (
+        reviewed_regions.correction_semantic_sha256(first)
+    )
+    assert reviewed_regions.correction_semantic_sha256(changed_span) != (
+        reviewed_regions.correction_semantic_sha256(first)
+    )
+    assert reviewed_regions.correction_semantic_sha256(linear_multi_frame) != (
+        reviewed_regions.correction_semantic_sha256(fixed_multi_frame)
+    )
+    assert reviewed_regions.correction_semantic_sha256(changed_source) != (
+        reviewed_regions.correction_semantic_sha256(first)
+    )
+
+
+def test_supported_canonical_repeated_compilation_is_deterministic_with_reordered_inputs(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_mixed_base_regions(package, manifest.case_id)
+    write_mixed_entity_registry(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_FACE, CATEGORY_PLATE),
+    )
+    session_dir = create_session(package, manifest)
+
+    first = reviewed_regions.reviewed_region_digest(package, session_dir, case_id=manifest.case_id)
+    baseline_path = package / "regions" / f"{manifest.case_id}_current_regions.jsonl"
+    rows = baseline_path.read_text(encoding="utf-8").splitlines()
+    baseline_path.write_text("\n".join(reversed(rows)) + "\n", encoding="utf-8")
+    workspace = json.loads((package / "workspace_manifest.json").read_text())
+    workspace["content_identities"]["automatic_baseline_regions"]["sha256"] = media_sha(
+        baseline_path
+    )
+    write_json(package / "workspace_manifest.json", workspace)
+    session_dir = create_session(package, manifest)
+    second = reviewed_regions.reviewed_region_digest(package, session_dir, case_id=manifest.case_id)
+
+    assert first["effective_regions_hash"] == second["effective_regions_hash"]
+
+
+def test_supported_canonical_region_hash_tracks_policy_merge_baseline_and_renderer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_mixed_base_regions(package, manifest.case_id)
+    face, plate = write_mixed_entity_registry(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_FACE, CATEGORY_PLATE),
+    )
+    session_dir = create_session(package, manifest)
+    base = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+
+    review_sessions.append_event(
+        session_dir,
+        event_type="entity_policy_changed",
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state=plate,
+        after_state=plate
+        | {
+            "current_policy": privacy_entities.POLICY_KEEP_VISIBLE,
+            "privacy_action": privacy_entities.POLICY_KEEP_VISIBLE,
+            "reviewer_override": True,
+        },
+        note="keep plate visible",
+        application_hashes={},
+    )
+    policy_changed = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    review_sessions.append_event(
+        session_dir,
+        event_type="entities_merged",
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state=None,
+        after_state={
+            "primary": face
+            | {
+                "entity_id": "merged_face_plate",
+                "label": "Merged Face Plate",
+                "member_entity_ids": [face["entity_id"], plate["entity_id"]],
+                "merge_split_lineage": {"source_entity_ids": [face["entity_id"]]},
+            },
+            "retired_entity_ids": [face["entity_id"]],
+        },
+        note="merge entities",
+        application_hashes={},
+    )
+    merged = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+
+    baseline_path = package / "regions" / f"{manifest.case_id}_current_regions.jsonl"
+    baseline_records = review_finalization.load_privacy_region_records(baseline_path)
+    baseline_records[0] = replace(baseline_records[0], bbox_xyxy=(24, 20, 58, 34))
+    review_finalization.write_privacy_region_records(baseline_path, baseline_records)
+    workspace = json.loads((package / "workspace_manifest.json").read_text())
+    workspace["content_identities"]["automatic_baseline_regions"]["sha256"] = media_sha(
+        baseline_path
+    )
+    write_json(package / "workspace_manifest.json", workspace)
+    baseline_changed = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+
+    original_render_settings = review_working_state.render_settings
+
+    def larger_pixel_settings() -> Any:
+        return replace(original_render_settings(), pixel_size=32)
+
+    monkeypatch.setattr(review_working_state, "render_settings", larger_pixel_settings)
+    renderer_changed = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+
+    assert policy_changed["effective_regions_hash"] != base["effective_regions_hash"]
+    assert merged["effective_regions_hash"] != policy_changed["effective_regions_hash"]
+    assert baseline_changed["effective_regions_hash"] != merged["effective_regions_hash"]
+    assert renderer_changed["effective_regions_hash"] != baseline_changed[
+        "effective_regions_hash"
+    ]
+
+
+def test_supported_canonical_category_run_tampering_fails_closed(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    workspace_path = package / "workspace_manifest.json"
+    workspace = json.loads(workspace_path.read_text())
+    workspace["category_run_manifest_identities"][CATEGORY_PLATE]["configuration_hash"] = (
+        "changed"
+    )
+    workspace["category_run_manifest_identity_hash"] = stable_hash(
+        workspace["category_run_manifest_identities"]
+    )
+    write_json(workspace_path, workspace)
+
+    with pytest.raises(
+        reviewed_regions.ReviewedRegionCompilationError,
+        match="configuration mismatch",
+    ):
+        reviewed_regions.reviewed_region_digest(package, session_dir, case_id=manifest.case_id)
+
+
+@pytest.mark.parametrize(
+    ("name", "mutate", "message"),
+    [
+        (
+            "category_identity_source",
+            lambda package, workspace, _manifest: workspace[
+                "category_run_manifest_identities"
+            ][CATEGORY_PLATE].__setitem__("source_sha256", "changed-source"),
+            "category identity source hash mismatch",
+        ),
+        (
+            "category_run_content",
+            lambda package, workspace, _manifest: workspace[
+                "category_run_manifest_identities"
+            ][CATEGORY_PLATE].__setitem__("category_run_content_sha256", "changed-content"),
+            "category run content hash mismatch",
+        ),
+        (
+            "category_set",
+            lambda _package, workspace, _manifest: workspace.__setitem__(
+                "selected_categories",
+                [CATEGORY_FACE, CATEGORY_PLATE],
+            ),
+            "category run identities must match selected categories",
+        ),
+        (
+            "category_run_artifact",
+            lambda _package, workspace, _manifest: workspace[
+                "category_run_manifest_identities"
+            ][CATEGORY_PLATE].__setitem__("sha256", "changed-artifact"),
+            "category run artifact hash mismatch",
+        ),
+        (
+            "baseline_artifact",
+            lambda package, _workspace, manifest: (
+                package / "regions" / f"{manifest.case_id}_current_regions.jsonl"
+            ).write_text(
+                (
+                    package / "regions" / f"{manifest.case_id}_current_regions.jsonl"
+                ).read_text(encoding="utf-8")
+                * 2,
+                encoding="utf-8",
+            ),
+            "baseline region hash identity mismatch",
+        ),
+    ],
+)
+def test_supported_canonical_baseline_binding_tampering_fails_closed(
+    tmp_path: Path,
+    name: str,
+    mutate: Any,
+    message: str,
+) -> None:
+    del name
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    workspace_path = package / "workspace_manifest.json"
+    workspace = json.loads(workspace_path.read_text(encoding="utf-8"))
+    mutate(package, workspace, manifest)
+    if "category_run_manifest_identities" in workspace:
+        workspace["category_run_manifest_identity_hash"] = stable_hash(
+            workspace["category_run_manifest_identities"]
+        )
+    write_json(workspace_path, workspace)
+    session_dir = create_session(package, manifest)
+
+    with pytest.raises(reviewed_regions.ReviewedRegionCompilationError, match=message):
+        reviewed_regions.reviewed_region_digest(package, session_dir, case_id=manifest.case_id)
+
+
+@pytest.mark.parametrize(
+    "failure_stage",
+    [
+        "after_reviewed_regions_write",
+        "after_video_render",
+        "after_media_validation",
+        "after_region_validation",
+        "after_revision_manifest_write",
+        "after_immutable_revision_move",
+        "before_current_pointer_update",
+        "during_current_pointer_update",
+    ],
+)
+def test_supported_canonical_publication_failure_never_writes_current_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    accepted = review_working_state.derive_working_state(package, session_dir)[
+        "active_projection_hash"
+    ]
+    monkeypatch.setenv("REDACTOR_REVIEWED_REGIONS_FAIL_AT", failure_stage)
+
+    with pytest.raises(reviewed_regions.ReviewedRegionPublicationStaleError):
+        review_working_state.materialize_latest_reviewed(
+            package,
+            session_dir,
+            case_id=manifest.case_id,
+            accepted_revision=accepted,
+        )
+
+    assert not (package / "latest_reviewed" / "current.json").exists()
+    monkeypatch.delenv("REDACTOR_REVIEWED_REGIONS_FAIL_AT")
+    retry = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=accepted,
+    )
+
+    assert retry["latest_reviewed"]["revision_id"].startswith("latest_reviewed_")
+    assert json.loads((package / "latest_reviewed" / "current.json").read_text())[
+        "status"
+    ] == "ready"
+
+
+def test_generated_browser_code_keeps_correction_preview_distinct() -> None:
+    script = review_workspace.workspace_js()
+    legacy_mapping = (
+        "roleKey = latestReviewedPublicationDeferred() ? "
+        "'correction_preview' : 'latest_reviewed'"
+    )
+
+    assert legacy_mapping not in script
+    assert "role: 'correction_preview'" in script
+    assert "state.workingState?.materialized_latest_reviewed" in script
+
+
+def test_supported_canonical_public_preview_api_returns_correction_preview_role(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_PLATE,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [20, 20, 54, 34], "source_frame": 0}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "preview",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 0,
+            "source_frame_start": 0,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_1",
+        }
+
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "preview",
+                "session_id": session["session_id"],
+            },
+        )
+
+        assert preview_response["preview"]["role"] == "correction_preview"
+        assert preview_response["preview"]["latest_reviewed"] is None
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_supported_canonical_public_workflow_publishes_authoritative_latest_only(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        before_versions = json.loads(
+            urllib.request.urlopen(
+                (
+                    f"{base_url}/api/v1/cases/{manifest.case_id}/versions"
+                    f"?session_id={session['session_id']}"
+                ),
+                timeout=5,
+            )
+            .read()
+            .decode("utf-8")
+        )["versions"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_PLATE,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [22, 22, 58, 38], "source_frame": 1}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "preview",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 1,
+            "source_frame_start": 1,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_1",
+        }
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "preview",
+                "session_id": session["session_id"],
+            },
+        )
+        correction_response = post_json(
+            f"{base_url}/api/corrections",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "preview_token": preview_response["preview"]["preview_token"],
+                "reason": "save",
+                "session_id": session["session_id"],
+            },
+        )
+        job = wait_for_materialization_job(
+            server,
+            str(correction_response["materialization_job"]["job_id"]),
+        )
+        after_versions = json.loads(
+            urllib.request.urlopen(
+                (
+                    f"{base_url}/api/v1/cases/{manifest.case_id}/versions"
+                    f"?session_id={session['session_id']}"
+                ),
+                timeout=5,
+            )
+            .read()
+            .decode("utf-8")
+        )["versions"]
+        reloaded = json.loads(
+            urllib.request.urlopen(
+                f"{base_url}/api/session-state?session_id={session['session_id']}",
+                timeout=5,
+            )
+            .read()
+            .decode("utf-8")
+        )
+        pointer = json.loads((package / "latest_reviewed" / "current.json").read_text())
+        latest = next(role for role in after_versions if role["role"] == "latest_reviewed")
+        finalization = json.loads((package / "workspace_manifest.json").read_text())[
+            "lifecycle"
+        ]["finalization"]
+
+        assert [role["role"] for role in before_versions] == ["original", "automatic"]
+        assert preview_response["preview"]["role"] == "correction_preview"
+        assert preview_response["preview"]["latest_reviewed"] is None
+        assert job["status"] == "completed"
+        assert "correction_preview" not in {role["role"] for role in after_versions}
+        assert [role["role"] for role in after_versions] == [
+            "original",
+            "automatic",
+            "latest_reviewed",
+        ]
+        assert pointer["status"] == "ready"
+        assert latest["revision_id"] == pointer["revision_id"]
+        assert manifest.case_id in reloaded["working_state"]["materialized_latest_reviewed"]
+        assert finalization["status"] == "not_run"
+        assert not list(package.glob("**/final_reviewed*.mp4"))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_supported_canonical_public_required_task_blocks_then_allows_publication(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "correction_required": False,
+                    "review_task_id": "plate_task_1",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_PLATE,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [22, 22, 58, 38], "source_frame": 1}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "preview",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 1,
+            "source_frame_start": 1,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "task_1",
+        }
+        preview_response = post_json(
+            f"{base_url}/api/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "preview",
+                "session_id": session["session_id"],
+            },
+        )
+        save_payload = {
+            "actor": {"reviewer_id": "analyst@example.test"},
+            "correction": correction,
+            "preview_token": preview_response["preview"]["preview_token"],
+            "reason": "save",
+            "session_id": session["session_id"],
+        }
+        blocked_response = post_json(f"{base_url}/api/corrections", save_payload)
+        blocked_job = wait_for_materialization_job(
+            server,
+            str(blocked_response["materialization_job"]["job_id"]),
+        )
+        blocked_versions = json.loads(
+            urllib.request.urlopen(
+                (
+                    f"{base_url}/api/v1/cases/{manifest.case_id}/versions"
+                    f"?session_id={session['session_id']}"
+                ),
+                timeout=5,
+            )
+            .read()
+            .decode("utf-8")
+        )["versions"]
+        blocked_lifecycle = json.loads((package / "workspace_manifest.json").read_text())[
+            "lifecycle"
+        ]
+
+        decision_response = post_json(
+            f"{base_url}/api/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "note": "Resolved",
+                "session_id": session["session_id"],
+                "task_id": "plate_task_1",
+            },
+        )
+        retry_response = post_json(f"{base_url}/api/corrections", save_payload)
+        retry_job = wait_for_materialization_job(
+            server,
+            str(retry_response["materialization_job"]["job_id"]),
+        )
+        after_versions = json.loads(
+            urllib.request.urlopen(
+                (
+                    f"{base_url}/api/v1/cases/{manifest.case_id}/versions"
+                    f"?session_id={session['session_id']}"
+                ),
+                timeout=5,
+            )
+            .read()
+            .decode("utf-8")
+        )["versions"]
+        pointer = json.loads((package / "latest_reviewed" / "current.json").read_text())
+        latest = next(role for role in after_versions if role["role"] == "latest_reviewed")
+        lifecycle = json.loads((package / "workspace_manifest.json").read_text())[
+            "lifecycle"
+        ]
+
+        assert blocked_job["status"] == "failed"
+        assert "required task has no decision" in str(blocked_job["error"])
+        assert "latest_reviewed" not in {role["role"] for role in blocked_versions}
+        assert blocked_lifecycle["latest_reviewed"]["status"] == "not_run"
+        assert decision_response["ok"] is True
+        assert retry_response["idempotent_retry"] is True
+        assert retry_job["status"] == "completed"
+        assert pointer["status"] == "ready"
+        assert latest["revision_id"] == pointer["revision_id"]
+        assert lifecycle["finalization"]["status"] == "not_run"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_supported_canonical_materializes_revision_versions_and_reset(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    before_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        actor={"reviewer_id": "analyst"},
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+    latest_path = package / materialization["latest_reviewed"]["path"]
+    after_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+    workspace_manifest = json.loads((package / "workspace_manifest.json").read_text())
+    case_manifest = case_manifests.load_case_manifest(
+        package / "cases" / f"{manifest.case_id}.json"
+    )
+    current_pointer = json.loads((package / "latest_reviewed" / "current.json").read_text())
+
+    assert "latest_reviewed" not in {role["role"] for role in before_versions}
+    assert "latest_reviewed" in {role["role"] for role in after_versions}
+    assert latest_path.exists()
+    assert media_sha(latest_path) != media_sha(package / manifest.video_roles[1].path)
+    assert video_frame_count(latest_path) == manifest.frame_count
+    assert workspace_manifest["latest_reviewed_publication"]["status"] == "supported"
+    assert "latest_reviewed_current" not in workspace_manifest
+    assert current_pointer["status"] == "ready"
+    assert current_pointer["revision_id"] == materialization["revision_id"]
+    assert current_pointer["reviewed_region_set_sha256"] == materialization[
+        "reviewed_region_set_sha256"
+    ]
+    assert not any(role.role == "latest_reviewed" for role in case_manifest.video_roles)
+    assert (package / materialization["revision_manifest"]).exists()
+    assert materialization["media_validation"]["expected_frame_count"] == manifest.frame_count
+
+    _event, reset_state = review_working_state.reset_to_automatic_baseline(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+    )
+    reset_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+    reset_manifest = json.loads((package / "workspace_manifest.json").read_text())
+    reset_pointer = json.loads((package / "latest_reviewed" / "current.json").read_text())
+
+    assert reset_state["materialized_latest_reviewed"] == {}
+    assert "latest_reviewed" not in {role["role"] for role in reset_versions}
+    assert reset_manifest["latest_reviewed_publication"]["status"] == "supported"
+    assert "latest_reviewed_current" not in reset_manifest
+    assert reset_pointer["status"] == "not_current"
+    assert latest_path.exists()
+
+
+def test_supported_canonical_new_event_invalidates_current_latest_until_republish(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_mixed_base_regions(package, manifest.case_id)
+    _face, plate = write_mixed_entity_registry(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_FACE, CATEGORY_PLATE),
+    )
+    session_dir = create_session(package, manifest)
+    original_revision = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+    original_path = package / original_revision["latest_reviewed"]["path"]
+
+    current_state = review_working_state.derive_working_state(package, session_dir)
+    current_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+
+    review_sessions.append_event(
+        session_dir,
+        event_type="entity_policy_changed",
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state=plate,
+        after_state=plate
+        | {
+            "current_policy": privacy_entities.POLICY_KEEP_VISIBLE,
+            "privacy_action": privacy_entities.POLICY_KEEP_VISIBLE,
+            "reviewer_override": True,
+        },
+        note="keep plate visible",
+        application_hashes={},
+    )
+    stale_state = review_working_state.derive_working_state(package, session_dir)
+    stale_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+    stale_blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+    pointer_after_change = json.loads(
+        (package / "latest_reviewed" / "current.json").read_text()
+    )
+
+    republished = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=stale_state["active_projection_hash"],
+    )
+    republished_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+
+    assert manifest.case_id in current_state["materialized_latest_reviewed"]
+    assert "latest_reviewed" in {role["role"] for role in current_versions}
+    assert stale_state["active_projection_hash"] != current_state["active_projection_hash"]
+    assert manifest.case_id not in stale_state["materialized_latest_reviewed"]
+    assert "latest_reviewed" not in {role["role"] for role in stale_versions}
+    assert any(
+        "Latest reviewed has not been published" in item
+        for item in stale_blockers["blockers"]
+    )
+    assert pointer_after_change["revision_id"] == original_revision["revision_id"]
+    assert original_path.exists()
+    assert republished["revision_id"] != original_revision["revision_id"]
+    assert "latest_reviewed" in {role["role"] for role in republished_versions}
+
+
+def test_supported_canonical_session_binding_survives_publication_and_reset(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+    binding_after_publish = review_workspace.validate_session_workspace_binding(
+        package,
+        session_dir,
+    )
+    _event, _reset_state = review_working_state.reset_to_automatic_baseline(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+    )
+    binding_after_reset = review_workspace.validate_session_workspace_binding(
+        package,
+        session_dir,
+    )
+
+    assert materialization["latest_reviewed"]["revision_id"].startswith("latest_reviewed_")
+    assert binding_after_publish["ok"] is True
+    assert binding_after_reset["ok"] is True
+
+
+def test_supported_canonical_publication_guard_rejects_workspace_manifest_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    original_verify = privacy_rendering.verify_rendered_regions
+
+    def mutate_workspace_manifest_after_validation(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_verify(*args, **kwargs)
+        workspace_manifest_path = package / "workspace_manifest.json"
+        workspace_manifest = json.loads(workspace_manifest_path.read_text(encoding="utf-8"))
+        workspace_manifest["guard_mutation"] = "changed-after-render"
+        write_json(workspace_manifest_path, workspace_manifest)
+        return result
+
+    monkeypatch.setattr(
+        privacy_rendering,
+        "verify_rendered_regions",
+        mutate_workspace_manifest_after_validation,
+    )
+
+    with pytest.raises(
+        reviewed_regions.ReviewedRegionPublicationStaleError,
+        match="publication guard is stale",
+    ):
+        review_working_state.materialize_latest_reviewed(
+            package,
+            session_dir,
+            case_id=manifest.case_id,
+            accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+                "active_projection_hash"
+            ],
+        )
+
+    workspace_manifest = json.loads((package / "workspace_manifest.json").read_text())
+    case_manifest = case_manifests.load_case_manifest(
+        package / "cases" / f"{manifest.case_id}.json"
+    )
+
+    assert "latest_reviewed_current" not in workspace_manifest
+    assert workspace_manifest["latest_reviewed_publication"]["status"] == "supported"
+    assert not any(role.role == "latest_reviewed" for role in case_manifest.video_roles)
+    assert not (package / "latest_reviewed" / "current.json").exists()
 
 
 @pytest.mark.parametrize("route", ["/api/entity-events", "/api/finalize"])

@@ -20,9 +20,6 @@ ENTITY_REGISTRY_SCHEMA_VERSION = "review_entity_registry.v2"
 SESSION_STATE_SCHEMA_VERSION = "mixed_review_session_state.v1"
 CATEGORY_RUN_IDENTITY_SCHEMA_VERSION = "category_run_manifest_identity.v1"
 LATEST_REVIEWED_PUBLICATION_SCHEMA_VERSION = "latest_reviewed_publication_capability.v1"
-LATEST_REVIEWED_PUBLICATION_DEFERRED_REASON = (
-    "mixed_reviewed_region_compilation_not_implemented"
-)
 
 CATEGORY_ORDER = {CATEGORY_FACE: 0, CATEGORY_PLATE: 1}
 CATEGORY_LABEL_PREFIX = {CATEGORY_FACE: "Person", CATEGORY_PLATE: "Plate"}
@@ -48,6 +45,17 @@ ACTION_ALIASES = {
     "Privacy leak": review_sessions.ACTION_PRIVACY_LEAK,
     "Uncertain / Escalate": review_sessions.ACTION_ESCALATE,
     "Wrong target": review_sessions.ACTION_WRONG_TARGET,
+    "cosmetic_only": review_sessions.ACTION_COSMETIC_ONLY,
+    "escalate": review_sessions.ACTION_ESCALATE,
+    "false_redaction": review_sessions.ACTION_FALSE_REDACTION,
+    "looks_correct": review_sessions.ACTION_LOOKS_CORRECT,
+    "needs_correction": review_sessions.ACTION_PRIVACY_LEAK,
+    "needs_review": review_sessions.ACTION_PRIVACY_LEAK,
+    "no_issue_found": review_sessions.ACTION_LOOKS_CORRECT,
+    "not_sensitive": review_sessions.ACTION_NOT_SENSITIVE,
+    "partial_coverage": review_sessions.ACTION_PARTIAL_COVERAGE,
+    "privacy_leak": review_sessions.ACTION_PRIVACY_LEAK,
+    "wrong_target": review_sessions.ACTION_WRONG_TARGET,
 }
 
 
@@ -172,6 +180,8 @@ def build_case_review_workspace(
 
     effective_regions_path = case_root / render_plan["effective_regions_artifact"]["path"]
     effective_regions = review_finalization.load_privacy_region_records(effective_regions_path)
+    workspace_regions_path = workspace_dir / "regions" / f"{case_id}_current_regions.jsonl"
+    install_media(effective_regions_path, workspace_regions_path, overwrite=True)
     category_tasks = load_category_review_tasks(case_root, selected_categories)
     entity_sources = build_entity_sources(
         case_root=case_root,
@@ -239,6 +249,11 @@ def build_case_review_workspace(
             "category_review_task_sources": {
                 category: payload["source_path"]
                 for category, payload in sorted(category_tasks.items())
+            },
+            "automatic_baseline_regions": {
+                "path": relative_to_workspace(workspace_regions_path, workspace_dir),
+                "region_count": len(effective_regions),
+                "sha256": media.sha256_file(workspace_regions_path),
             },
             "mixed_review_workspace_non_final": True,
             "render_plan_hash": render_plan.get("render_plan_hash"),
@@ -319,7 +334,7 @@ def build_case_review_workspace(
         "event_count": 0,
         "history_namespace": "sessions/",
         "latest_reviewed": {
-            "reason": "latest reviewed publication is deferred for this checkpoint",
+            "reason": "Latest reviewed publication starts after a review session changes state",
             "status": "not_run",
         },
         "review_session": {
@@ -390,6 +405,11 @@ def build_case_review_workspace(
             workspace_dir / "workspace_summary.json",
             "mixed_review_workspace_summary",
         ),
+        "automatic_baseline_regions": artifact_reference(
+            case_root,
+            workspace_regions_path,
+            "mixed_review_automatic_baseline_regions",
+        ),
     }
     workspace_manifest = {
         "automatic_preview": automatic_preview_identity(
@@ -426,7 +446,7 @@ def build_case_review_workspace(
                 "status": "not_run",
             },
             "latest_reviewed": {
-                "reason": "mixed latest-reviewed publication is deferred",
+                "reason": "Latest reviewed publication requires reviewed-region compilation",
                 "status": "not_run",
             },
             "review_session": {
@@ -437,10 +457,14 @@ def build_case_review_workspace(
         },
         "media_inventory": "media_inventory.json",
         "latest_reviewed_publication": {
-            "error_code": "latest_reviewed_publication_deferred",
-            "reason": LATEST_REVIEWED_PUBLICATION_DEFERRED_REASON,
+            "automatic_baseline_regions": relative_to_workspace(
+                workspace_regions_path,
+                workspace_dir,
+            ),
+            "publication_mode": "reviewed_region_compiler.v1",
+            "render_source": "original",
             "schema_version": LATEST_REVIEWED_PUBLICATION_SCHEMA_VERSION,
-            "status": "deferred",
+            "status": "supported",
         },
         "non_final": True,
         "open_blockers": list(case_blockers),
@@ -487,6 +511,7 @@ def build_case_review_workspace(
         support_artifacts["entity_registry"],
         support_artifacts["review_tasks"],
         support_artifacts["media_inventory"],
+        support_artifacts["automatic_baseline_regions"],
         support_artifacts["workspace_summary"],
         support_artifacts["session_state"],
         support_artifacts["validation"],
@@ -509,7 +534,7 @@ def prepare_workspace_dir(workspace_dir: Path, *, overwrite: bool) -> None:
                 f"{workspace_dir} already exists; pass --overwrite to replace it"
             )
         shutil.rmtree(workspace_dir)
-    for relative in ("cases", "entities", "media", "sessions"):
+    for relative in ("cases", "entities", "media", "regions", "sessions"):
         (workspace_dir / relative).mkdir(parents=True, exist_ok=True)
 
 
@@ -900,18 +925,22 @@ def build_entity_sources(
         for task in task_payload["tasks"]:
             start, end = task_frame_span(task, source_frame_end=source_frame_end)
             keys = task_entity_keys(category, task)
-            if not keys:
+            missing_keys = [key for key in keys if (category, key) not in sources]
+            if (not keys or missing_keys) and task_allows_interval_fallback(category, task):
+                keys = fallback_interval_task_entity_keys(
+                    sources,
+                    category=category,
+                    frame_start=start,
+                    frame_end=end,
+                )
+                missing_keys = [key for key in keys if (category, key) not in sources]
+            if not keys or missing_keys:
                 raise ValueError(
                     f"unbound_review_task: {category}:{source_task_id(category, task)} "
                     "has no source-backed target identity"
                 )
             for key in keys:
-                source = sources.get((category, key))
-                if source is None:
-                    raise ValueError(
-                        f"unbound_review_task: {category}:{source_task_id(category, task)} "
-                        f"references missing target {key}"
-                    )
+                source = sources[(category, key)]
                 source.task_ids.add(source_task_id(category, task))
                 source.observe_frame(start)
                 source.observe_frame(end)
@@ -1346,7 +1375,14 @@ def build_tasks(
             start, end = task_frame_span(source_task, source_frame_end=source_frame_end)
             validate_task_timestamps(source_task, start=start, end=end, fps=fps)
             keys = task_entity_keys(category, source_task)
-            if not keys:
+            missing_keys = [key for key in keys if (category, key) not in entities_by_key]
+            if (not keys or missing_keys) and task_allows_interval_fallback(
+                category,
+                source_task,
+            ):
+                keys = fallback_task_entity_keys(entities_by_key, category=category)
+                missing_keys = [key for key in keys if (category, key) not in entities_by_key]
+            if not keys or missing_keys:
                 raise ValueError(
                     f"unbound_review_task: {category}:{source_task_id(category, source_task)} "
                     "has no source-backed target identity"
@@ -1826,9 +1862,6 @@ def validate_category_run_manifest_payload(
     expected_configuration = dict(result.configuration_identity or {})
     if configuration_identity != expected_configuration:
         raise ValueError(f"{category}: category run configuration identity mismatch")
-    blockers = [str(item) for item in list(run_manifest.get("blockers") or [])]
-    if blockers:
-        raise ValueError(f"{category}: category run blockers prevent workspace readiness")
     failed_stages = [
         dict(stage).get("stage") or dict(stage).get("category") or "stage"
         for stage in list(run_manifest.get("stage_outcomes") or [])
@@ -1922,6 +1955,7 @@ def validate_authoritative_workspace_manifest(payload: dict[str, Any]) -> None:
             raise ValueError(f"{key} lifecycle must be not_run")
     identities = dict(payload.get("content_identities") or {})
     required = {
+        "automatic_baseline_regions",
         "entity_registry",
         "media_inventory",
         "review_tasks",
@@ -1968,8 +2002,10 @@ def validate_authoritative_workspace_manifest(payload: dict[str, Any]) -> None:
     if payload.get("category_run_manifest_identity_hash") != expected_hash:
         raise ValueError("workspace manifest category run identity hash mismatch")
     publication = dict(payload.get("latest_reviewed_publication") or {})
-    if publication.get("status") != "deferred":
-        raise ValueError("workspace manifest must defer latest reviewed publication")
+    if publication.get("status") != "supported":
+        raise ValueError("workspace manifest must support latest reviewed publication")
+    if publication.get("publication_mode") != "reviewed_region_compiler.v1":
+        raise ValueError("workspace manifest latest reviewed compiler mode is required")
 
 
 def artifact_reference(case_root: Path, path: Path, role: str) -> case_manifests.ArtifactReference:
@@ -2022,6 +2058,50 @@ def task_entity_keys(category: str, task: dict[str, Any]) -> tuple[str, ...]:
     if isinstance(track_uids, (str, int)):
         track_uids = [track_uids]
     return tuple(str(item) for item in track_uids if str(item))
+
+
+def task_allows_interval_fallback(category: str, task: dict[str, Any]) -> bool:
+    if task.get("media_roles") or task.get("corrected_context"):
+        return True
+    task_id = source_task_id(category, task)
+    issue_type = str(task.get("issue_type") or task.get("task_type") or "").lower()
+    raw_reasons = task.get("reasons") or []
+    if isinstance(raw_reasons, (str, int)):
+        raw_reasons = [raw_reasons]
+    reasons = " ".join(str(item).lower() for item in list(raw_reasons))
+    title = str(task.get("title") or "").lower()
+    return any(
+        "spot_check" in value or "spot check" in value
+        for value in (task_id.lower(), issue_type, reasons, title)
+    )
+
+
+def fallback_interval_task_entity_keys(
+    sources: dict[tuple[str, str], ReviewEntitySource],
+    *,
+    category: str,
+    frame_start: int,
+    frame_end: int,
+) -> tuple[str, ...]:
+    keys: list[str] = []
+    for (source_category, key), source in sorted(sources.items()):
+        if source_category != category:
+            continue
+        first = source.first_frame
+        last = source.last_frame
+        if first is None or last is None or first <= frame_end and last >= frame_start:
+            keys.append(key)
+    return tuple(keys)
+
+
+def fallback_task_entity_keys(
+    entities_by_key: dict[tuple[str, str], dict[str, Any]],
+    *,
+    category: str,
+) -> tuple[str, ...]:
+    return tuple(
+        key for source_category, key in sorted(entities_by_key) if source_category == category
+    )
 
 
 def entity_key_for_record(record: PrivacyRegionRecord) -> str:

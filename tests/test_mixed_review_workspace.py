@@ -606,11 +606,18 @@ def test_authoritative_workspace_manifest_is_sole_runtime_authority(
     assert manifest["lifecycle"]["latest_reviewed"]["status"] == "not_run"
     assert manifest["lifecycle"]["finalization"]["status"] == "not_run"
     assert manifest["lifecycle"]["evaluation"]["status"] == "not_run"
-    assert manifest["latest_reviewed_publication"]["status"] == "deferred"
+    baseline_regions = workspace_root / "regions" / "case_current_regions.jsonl"
+    assert baseline_regions.exists()
+    assert manifest["content_identities"]["automatic_baseline_regions"]["sha256"]
+    assert (
+        manifest["latest_reviewed_publication"]["publication_mode"]
+        == "reviewed_region_compiler.v1"
+    )
+    assert manifest["latest_reviewed_publication"]["status"] == "supported"
 
 
 @pytest.mark.parametrize("category", [CATEGORY_FACE, CATEGORY_PLATE])
-def test_single_category_canonical_workspace_binds_one_run_identity_and_defers_latest(
+def test_single_category_canonical_workspace_binds_one_run_identity_and_supports_latest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     category: str,
@@ -631,8 +638,9 @@ def test_single_category_canonical_workspace_binds_one_run_identity_and_defers_l
     identities = manifest["category_run_manifest_identities"]
     assert set(identities) == {category}
     assert manifest["category_run_manifest_identity_hash"] == stable_hash(identities)
-    assert manifest["latest_reviewed_publication"]["status"] == "deferred"
+    assert manifest["latest_reviewed_publication"]["status"] == "supported"
     assert manifest["automatic_preview"]["region_count"] == 1
+    assert (workspace_root / "regions" / "case_current_regions.jsonl").exists()
 
 
 def test_category_run_manifest_identity_failures_block_workspace(
