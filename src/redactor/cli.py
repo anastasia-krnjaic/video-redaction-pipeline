@@ -1408,6 +1408,140 @@ def evaluate_plates(
     click.echo(f"Wrote evaluation capability report: {output_dir / 'report.md'}")
 
 
+@main.command("build-plate-annotation-package")
+@click.option(
+    "--day-video",
+    "day_video_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=Path("artifacts/eval_day_plate.mp4"),
+    show_default=True,
+    help="Frozen day plate MP4.",
+)
+@click.option(
+    "--night-video",
+    "night_video_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=Path("artifacts/eval_night_selective.mp4"),
+    show_default=True,
+    help="Frozen night plate MP4.",
+)
+@click.option(
+    "--output-dir",
+    "output_root",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("artifacts/plate_ground_truth_annotation_v1"),
+    show_default=True,
+    help="Ignored root where a fresh run directory is created.",
+)
+@click.option(
+    "--drafts/--no-drafts",
+    "include_drafts",
+    default=True,
+    show_default=True,
+    help="Seed hidden model-derived proposals when source identity matches.",
+)
+@click.option("--run-id", default=None, help="Optional deterministic run directory name.")
+@click.option("--overwrite", is_flag=True, help="Replace an existing run directory.")
+def build_plate_annotation_package(
+    day_video_path: Path,
+    night_video_path: Path,
+    output_root: Path,
+    include_drafts: bool,
+    run_id: str | None,
+    overwrite: bool,
+) -> None:
+    """Build the local plate annotation package for human review."""
+    from redactor import plate_annotation_package
+
+    try:
+        summary = plate_annotation_package.build_plate_annotation_package(
+            day_video_path=day_video_path,
+            night_video_path=night_video_path,
+            output_root=output_root,
+            overwrite=overwrite,
+            include_drafts=include_drafts,
+            run_id=run_id,
+        )
+    except (FileExistsError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    progress = summary["progress"]["total"]
+    click.echo(f"Wrote plate annotation package: {summary['package_root']}")
+    click.echo(
+        f"Reviewed boxes: {progress['reviewed_box']} / {progress['mandatory']}; "
+        f"draft target frames: {summary['draft_count']}."
+    )
+
+
+@main.command("validate-plate-annotation-package")
+@click.argument(
+    "package_root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
+def validate_plate_annotation_package(package_root: Path) -> None:
+    """Validate a local plate annotation package."""
+    from redactor import plate_annotation_package
+
+    result = plate_annotation_package.validate_plate_annotation_package(package_root)
+    click.echo(
+        f"Plate annotation package validation: "
+        f"{'passed' if result['passed'] else 'failed'}"
+    )
+    progress = result.get("progress") or {}
+    if progress:
+        total = progress["total"]
+        click.echo(f"Reviewed boxes: {total['reviewed_box']} / {total['mandatory']}")
+    for error in result["errors"]:
+        click.echo(f"- {error}")
+    if not result["passed"]:
+        raise click.ClickException("plate annotation package validation failed")
+
+
+@main.command("summarize-plate-annotation-package")
+@click.argument(
+    "package_root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
+def summarize_plate_annotation_package(package_root: Path) -> None:
+    """Summarize a local plate annotation package."""
+    from redactor import plate_annotation_package
+
+    summary = plate_annotation_package.summarize_plate_annotation_package(package_root)
+    total = summary["progress"]["total"]
+    click.echo(f"Package: {summary['package_id']}")
+    click.echo(f"Reviewed boxes: {total['reviewed_box']} / {total['mandatory']}")
+    click.echo(f"Needs recheck: {total['needs_recheck']}")
+    click.echo(f"Draft target frames: {summary['draft_count']}")
+    click.echo(f"Final export ready: {summary['progress']['final_export_ready']}")
+
+
+@main.command("serve-plate-annotation-package")
+@click.argument(
+    "package_root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
+@click.option("--host", default="127.0.0.1", show_default=True, help="Loopback host.")
+@click.option("--port", default=8765, show_default=True, type=click.IntRange(1, 65535))
+@click.option("--open-browser", is_flag=True, help="Open the local browser.")
+def serve_plate_annotation_package(
+    package_root: Path,
+    host: str,
+    port: int,
+    open_browser: bool,
+) -> None:
+    """Serve a local plate annotation package."""
+    from redactor import plate_annotation_package
+
+    try:
+        plate_annotation_package.serve_plate_annotation_package(
+            package_root,
+            host=host,
+            port=port,
+            open_browser=open_browser,
+        )
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+
 @main.command("build-review-bundle")
 @click.option(
     "--source-video",
