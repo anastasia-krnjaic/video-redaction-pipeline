@@ -2124,12 +2124,30 @@ def export_plate_annotation_review(
         export_kind = "progress_review"
         default_name = "plate_annotation_review.progress.json"
 
+    package_file_sha256 = {
+        name: media.sha256_file(package_root / name)
+        for name in (
+            "annotations.draft.json",
+            "change_log.jsonl",
+            "package_identity.json",
+            "package_manifest.json",
+            "progress.json",
+            "review_data.json",
+        )
+    }
+    assisted_migration = manifest.get("assisted_migration") or {}
+    source_package_lineage = {
+        "source_package_hashes": assisted_migration.get("source_package_hashes", {}),
+        "source_package_id": assisted_migration.get("source_package_id"),
+    }
+
     records = [
         {
             "annotation_provenance": {
                 "accepted_without_geometry_change": state["frames"][frame["frame_id"]].get(
                     "accepted_without_geometry_change", False
                 ),
+                "annotation_status": state["frames"][frame["frame_id"]]["annotation_status"],
                 "draft_available": state["frames"][frame["frame_id"]]["draft_available"],
                 "draft_model": state["frames"][frame["frame_id"]]["draft_model"],
                 "draft_shown": state["frames"][frame["frame_id"]]["draft_shown"],
@@ -2138,6 +2156,9 @@ def export_plate_annotation_review(
                     "human_adjusted_geometry", False
                 ),
                 "human_reviewed": state["frames"][frame["frame_id"]]["human_reviewed"],
+                "migration_source_package_id": state["frames"][frame["frame_id"]].get(
+                    "migration_source_package_id"
+                ),
                 "proposal_available": state["frames"][frame["frame_id"]].get(
                     "proposal_available", state["frames"][frame["frame_id"]]["draft_available"]
                 ),
@@ -2148,13 +2169,18 @@ def export_plate_annotation_review(
                     "proposal_shown", state["frames"][frame["frame_id"]]["draft_shown"]
                 ),
                 "proposal_source": state["frames"][frame["frame_id"]].get("proposal_source"),
+                "review_completion_bucket": review_completion_bucket(
+                    state["frames"][frame["frame_id"]]
+                ),
                 "reviewed_at": state["frames"][frame["frame_id"]]["reviewed_at"],
             },
+            "action": frame["action"],
             "benchmark_id": frame["benchmark_id"],
             "conflicts": state["frames"][frame["frame_id"]]["conflicts"],
             "dense_frame": frame["dense_frame"],
             "frame_id": frame["frame_id"],
             "human_bbox": state["frames"][frame["frame_id"]]["human_bbox"],
+            "object_type": frame["object_type"],
             "parent_frame": frame["parent_frame"],
             "review_note": state["frames"][frame["frame_id"]]["review_note"],
             "secondary_instances": state["frames"][frame["frame_id"]]["secondary_instances"],
@@ -2165,10 +2191,13 @@ def export_plate_annotation_review(
     payload = {
         "evaluation_sources": {
             benchmark_id: {
+                "action": target["action"],
                 "evaluation_video": target["evaluation_video"],
                 "frozen_parent_frame_interval": target["frozen_parent_frame_interval"],
+                "object_type": target["object_type"],
                 "source_interval": target["source_interval"],
                 "source_video_label": target["source_video_label"],
+                "target_id": target["target_id"],
             }
             for benchmark_id, target in sorted(manifest["targets"].items())
         },
@@ -2184,16 +2213,36 @@ def export_plate_annotation_review(
             for frame in review_data["frames"]
         ],
         "mandatory_frames": records,
+        "annotation_package_schema_version": manifest["schema_version"],
         "package_id": manifest["package_id"],
+        "package_file_sha256": package_file_sha256,
         "package_manifest_sha256": media.sha256_file(package_root / "package_manifest.json"),
+        "progress": progress,
         "reviewer_completion_state": progress["reviewer_completion_state"],
         "schema_version": EXPORT_SCHEMA_VERSION,
+        "source_package_lineage": source_package_lineage,
+        "state_revision": state["state_revision"],
     }
     payload["semantic_content_hash"] = semantic_content_hash(payload)
     payload["exported_at_utc"] = now_utc or media.utc_timestamp()
     output_path = output_path or (package_root / default_name)
     atomic_write_json(output_path, payload)
     return payload
+
+
+def review_completion_bucket(record: dict[str, Any]) -> str:
+    proposal_available = bool(
+        record.get("proposal_available", record.get("draft_available", False))
+    )
+    if record.get("migration_source_package_id") and not proposal_available:
+        return "migrated_manual_review"
+    if proposal_available and record.get("accepted_without_geometry_change"):
+        return "proposal_accepted_unchanged"
+    if proposal_available and record.get("human_adjusted_geometry"):
+        return "proposal_human_adjusted"
+    if not proposal_available:
+        return "manual_no_proposal"
+    return "unknown_review_completion_bucket"
 
 
 def compute_progress(review_data: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:

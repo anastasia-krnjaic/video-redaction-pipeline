@@ -1568,6 +1568,168 @@ def summarize_plate_annotation_package(package_root: Path) -> None:
     click.echo(f"Final export ready: {summary['progress']['final_export_ready']}")
 
 
+@main.command("export-plate-annotation-review")
+@click.argument(
+    "package_root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+)
+@click.option(
+    "--output",
+    "output_path",
+    required=True,
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Output JSON path for the review export.",
+)
+@click.option("--final", "final", is_flag=True, help="Require completed final-export readiness.")
+@click.option(
+    "--exported-at-utc",
+    "exported_at_utc",
+    default=None,
+    help="Optional deterministic export timestamp.",
+)
+def export_plate_annotation_review(
+    package_root: Path,
+    output_path: Path,
+    final: bool,
+    exported_at_utc: str | None,
+) -> None:
+    """Export plate annotation review state without modifying the package."""
+    from redactor import plate_annotation_package
+
+    try:
+        payload = plate_annotation_package.export_plate_annotation_review(
+            package_root,
+            final=final,
+            output_path=output_path,
+            now_utc=exported_at_utc,
+        )
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"Wrote plate annotation review export: {output_path}")
+    click.echo(f"Export kind: {payload['export_kind']}")
+    click.echo(f"Records: {len(payload['mandatory_frames'])}")
+    click.echo(f"Semantic content hash: {payload['semantic_content_hash']}")
+
+
+@main.command("build-plate-ground-truth")
+@click.option(
+    "--annotation-export",
+    "annotation_export_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Completed plate annotation review export JSON.",
+)
+@click.option(
+    "--output",
+    "output_path",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=Path("data/ground_truth/plate_ground_truth_v1.0.json"),
+    show_default=True,
+    help="Versioned plate Ground Truth output path.",
+)
+@click.option(
+    "--schema",
+    "schema_path",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    default=Path("data/ground_truth/plate_ground_truth_schema_v1.0.json"),
+    show_default=True,
+    help="Versioned plate Ground Truth schema path recorded in the output.",
+)
+@click.option("--overwrite", is_flag=True, help="Replace an existing output file.")
+def build_plate_ground_truth(
+    annotation_export_path: Path,
+    output_path: Path,
+    schema_path: Path,
+    overwrite: bool,
+) -> None:
+    """Build machine-readable plate Ground Truth from a completed review export."""
+    from redactor import plate_ground_truth
+
+    if output_path.exists() and not overwrite:
+        raise click.ClickException(f"{output_path} already exists; pass --overwrite to replace it")
+    try:
+        payload = plate_ground_truth.build_plate_ground_truth_from_export(
+            annotation_export_path,
+            output_path=output_path,
+            schema_path=schema_path,
+        )
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    counts = plate_ground_truth.record_counts(payload)
+    click.echo(f"Wrote plate Ground Truth: {output_path}")
+    click.echo(
+        f"Records: day={counts.get('day_plate', 0)}; "
+        f"night={counts.get('night_selective', 0)}; total={counts.get('total', 0)}"
+    )
+    click.echo(f"content_sha256={payload['content_sha256']}")
+
+
+@main.command("validate-plate-ground-truth")
+@click.option(
+    "--ground-truth",
+    "ground_truth_path",
+    required=True,
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    help="Versioned plate Ground Truth JSON.",
+)
+@click.option(
+    "--schema",
+    "schema_path",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    default=Path("data/ground_truth/plate_ground_truth_schema_v1.0.json"),
+    show_default=True,
+    help="Versioned plate Ground Truth schema JSON.",
+)
+@click.option(
+    "--annotation-export",
+    "annotation_export_path",
+    type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Optional completed annotation review export override.",
+)
+@click.option(
+    "--no-local-media",
+    "no_local_media",
+    is_flag=True,
+    help="Skip local source/evaluation media hash checks.",
+)
+def validate_plate_ground_truth(
+    ground_truth_path: Path,
+    schema_path: Path,
+    annotation_export_path: Path | None,
+    no_local_media: bool,
+) -> None:
+    """Validate versioned machine-readable plate Ground Truth."""
+    from redactor import plate_ground_truth
+
+    try:
+        result = plate_ground_truth.validate_plate_ground_truth_file(
+            ground_truth_path,
+            schema_path=schema_path,
+            annotation_export_path=annotation_export_path,
+            require_local_media=not no_local_media,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    counts = result["record_counts"]
+    click.echo(
+        f"Plate Ground Truth {result['ground_truth_id']} schema "
+        f"{result['schema_version']}: {result['status']} ({result['error_count']} errors)"
+    )
+    click.echo(
+        f"Records: day={counts.get('day_plate', 0)}; "
+        f"night={counts.get('night_selective', 0)}; total={counts.get('total', 0)}"
+    )
+    click.echo(
+        f"Annotation export bbox matches: {result['annotation_export_match_count']} / 600"
+    )
+    click.echo(f"content_sha256={result['content_sha256']}")
+    for error in result["errors"]:
+        click.echo(f"- {error}")
+    if result["status"] != "valid":
+        raise click.ClickException("plate Ground Truth validation failed")
+
+
 @main.command("serve-plate-annotation-package")
 @click.argument(
     "package_root",

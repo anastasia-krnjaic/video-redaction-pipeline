@@ -102,6 +102,29 @@ writing: package schema, certified target IDs, benchmark IDs, object type, actio
 mapping, expected counts, manifest identity hash, and actual evaluation video SHA-256 values must all
 match the certified Phase A configuration.
 
+## Machine-Readable Plate Ground Truth v1.0
+
+`data/ground_truth/plate_ground_truth_v1.0.json` publishes the completed annotation review as
+machine-readable license-plate spatial Ground Truth for the certified Phase A plate windows. Its
+schema is `data/ground_truth/plate_ground_truth_schema_v1.0.json`.
+
+The published dataset contains 600 final human-reviewed plate-panel boxes:
+
+- `day_plate`: 240 records, parent frames `240-479`, dense frames `0-239`,
+  target `plate_day_01`, evaluation video `artifacts/eval_day_plate.mp4`.
+- `night_selective`: 360 records, parent frames `420-779`, dense frames `0-359`,
+  target `plate_night_01`, evaluation video `artifacts/eval_night_selective.mp4`.
+
+The dataset preserves explicit lineage to the completed review export, the frozen annotation
+package, the two evaluation videos, and GroundTruth v1.1 temporal policy. The provenance truthfully
+describes the boxes as proposal-assisted human-reviewed annotations and separates migrated manual
+review, proposal accepted unchanged, proposal human-adjusted, and manual/no-proposal records.
+
+`artifacts/eval_day_plate_close.mp4` remains excluded from certified plate Ground Truth. The
+publication adds spatial Ground Truth only; it does not calculate detector recall, automatic
+privacy coverage, or reviewed-final metrics. `evaluate-plates` remains capability-only until a
+separate evaluator phase implements and audits plate scoring.
+
 ## Local Save Contract
 
 The annotation server is a local loopback, single-reviewer workspace. One active human reviewer is
@@ -126,4 +149,22 @@ redactor build-assisted-plate-annotation-package \
   --source-package artifacts/plate_ground_truth_annotation_v1/run_20260811T001554Z
 redactor validate-plate-annotation-package artifacts/plate_ground_truth_annotation_v2_assisted/<run_id>
 redactor serve-plate-annotation-package artifacts/plate_ground_truth_annotation_v2_assisted/<run_id>
+```
+
+To reproduce the completed review export and validate the published plate Ground Truth:
+
+```bash
+redactor export-plate-annotation-review \
+  artifacts/plate_ground_truth_annotation_v2_assisted/run_20260811T185326Z \
+  --final \
+  --output artifacts/plate_ground_truth_publication_v1/run_20260811T200000Z/plate_annotation_review.export.json \
+  --exported-at-utc 2026-08-11T20:00:00Z
+redactor build-plate-ground-truth \
+  --annotation-export artifacts/plate_ground_truth_publication_v1/run_20260811T200000Z/plate_annotation_review.export.json \
+  --output data/ground_truth/plate_ground_truth_v1.0.json \
+  --schema data/ground_truth/plate_ground_truth_schema_v1.0.json \
+  --overwrite
+redactor validate-plate-ground-truth \
+  --ground-truth data/ground_truth/plate_ground_truth_v1.0.json \
+  --schema data/ground_truth/plate_ground_truth_schema_v1.0.json
 ```

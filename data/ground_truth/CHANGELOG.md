@@ -1,5 +1,21 @@
 # Ground-Truth Changelog
 
+## plate_ground_truth_v1.0 - 2026-08-11
+
+Created the versioned machine-readable license-plate spatial Ground Truth.
+
+- Derived from the completed audited annotation package
+  `artifacts/plate_ground_truth_annotation_v2_assisted/run_20260811T185326Z`.
+- Added `plate_ground_truth_schema_v1.0.json` and `plate_ground_truth_v1.0.json`.
+- Published 600 human-reviewed plate-panel boxes: 240 for `day_plate` and 360 for
+  `night_selective`.
+- Preserved proposal-assisted review provenance with separate counts for migrated manual review,
+  proposal accepted unchanged, proposal human-adjusted, and manual/no-proposal frames.
+- Preserved GroundTruth v1.1 temporal policy for the certified plate windows.
+- Excluded `artifacts/eval_day_plate_close.mp4` from certified plate Ground Truth.
+- Did not calculate or publish plate detector recall, automatic coverage, or reviewed-final
+  metrics.
+
 ## redaction_ground_truth_v1.0 - 2026-08-02
 
 Created the selected machine-readable redaction-ground-truth schema and Face Pipeline v1 JSON file.

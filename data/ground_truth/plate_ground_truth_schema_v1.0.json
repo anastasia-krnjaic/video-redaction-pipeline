@@ -1,0 +1,110 @@
+{
+  "schema_id": "plate_ground_truth_schema_v1.0",
+  "schema_version": "1.0",
+  "description": "Machine-readable license-plate spatial Ground Truth schema for certified plate windows with explicit per-frame human-reviewed boxes.",
+  "required_top_level_fields": [
+    "schema_version",
+    "ground_truth_id",
+    "ground_truth_version",
+    "status",
+    "certification_scope",
+    "created_from",
+    "coordinate_system",
+    "benchmarks",
+    "annotation_provenance",
+    "matching_policy",
+    "review_status",
+    "content_sha256"
+  ],
+  "coordinate_system": {
+    "bbox_format": "xyxy",
+    "height": 1080,
+    "origin": "top_left",
+    "units": "pixels",
+    "width": 1920
+  },
+  "benchmark_fields": {
+    "required": [
+      "benchmark_id",
+      "source_video",
+      "evaluation_video",
+      "frame_mapping",
+      "target",
+      "temporal_policy",
+      "record_count",
+      "spatial_records"
+    ],
+    "certified_benchmark_ids": [
+      "day_plate",
+      "night_selective"
+    ]
+  },
+  "spatial_record_fields": {
+    "required": [
+      "benchmark_id",
+      "target_id",
+      "object_type",
+      "action",
+      "frame_id",
+      "dense_frame",
+      "parent_evaluation_frame",
+      "bbox_xyxy",
+      "visibility",
+      "detector_scored",
+      "detector_ignore",
+      "final_redaction_required",
+      "geometry_provenance",
+      "annotation_review_provenance"
+    ],
+    "action_values": [
+      "redact"
+    ],
+    "object_type_values": [
+      "license_plate"
+    ],
+    "visibility_values": [
+      "visible_localizable"
+    ]
+  },
+  "review_completion_bucket_values": [
+    "migrated_manual_review",
+    "proposal_accepted_unchanged",
+    "proposal_human_adjusted",
+    "manual_no_proposal"
+  ],
+  "matching_policy": {
+    "status_values": [
+      "proposed_not_scored"
+    ],
+    "detector_matching": [
+      "direct plate detections only",
+      "one prediction matched to one Ground Truth instance",
+      "tracker and interpolation boxes cannot receive detector credit",
+      "candidate measures include IoU, Ground Truth coverage, prediction center, and prediction-to-Ground-Truth size ratio"
+    ],
+    "automatic_coverage": [
+      "automatic privacy regions may include tracker and interpolation provenance",
+      "manual corrections receive no automatic credit"
+    ],
+    "reviewed_final": [
+      "automated geometry overlap is a pre-check",
+      "human visual zero-leak review remains distinct"
+    ]
+  },
+  "validation_rules": [
+    "schema_version must be plate_ground_truth.v1.0",
+    "top-level unknown fields fail except documented audit_metadata",
+    "exactly day_plate and night_selective benchmarks are allowed",
+    "day_plate must contain dense frames 0-239 mapped to parent evaluation frames 240-479",
+    "night_selective must contain dense frames 0-359 mapped to parent evaluation frames 420-779",
+    "every certified frame must have one explicit bbox_xyxy in original 1920x1080 evaluation-frame coordinates",
+    "bbox coordinates must be integer xyxy with positive area and inside the frame",
+    "source and evaluation video SHA-256 identities must match the certified values",
+    "eval_day_plate_close.mp4 must not appear as a certified benchmark",
+    "content_sha256 must match the canonical semantic payload",
+    "the completed annotation review export SHA-256 must match created_from.annotation_review_export.sha256",
+    "every Ground Truth bbox must exactly match the completed annotation review export",
+    "proposal-assisted provenance must remain distinguishable from migrated and manual/no-proposal review",
+    "matching policy metadata is proposed_not_scored and does not enable plate metrics"
+  ]
+}
