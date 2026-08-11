@@ -1472,6 +1472,57 @@ def build_plate_annotation_package(
     )
 
 
+@main.command("build-assisted-plate-annotation-package")
+@click.option(
+    "--source-package",
+    "source_package_root",
+    type=click.Path(exists=True, file_okay=False, dir_okay=True, path_type=Path),
+    default=Path("artifacts/plate_ground_truth_annotation_v1/run_20260811T001554Z"),
+    show_default=True,
+    help="Read-only v1 annotation package to migrate.",
+)
+@click.option(
+    "--output-dir",
+    "output_root",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("artifacts/plate_ground_truth_annotation_v2_assisted"),
+    show_default=True,
+    help="Ignored root where a fresh assisted run directory is created.",
+)
+@click.option("--run-id", default=None, help="Optional deterministic run directory name.")
+@click.option("--overwrite", is_flag=True, help="Replace an existing run directory.")
+def build_assisted_plate_annotation_package(
+    source_package_root: Path,
+    output_root: Path,
+    run_id: str | None,
+    overwrite: bool,
+) -> None:
+    """Build an assisted plate annotation package from reviewed v1 state."""
+    from redactor import plate_annotation_package
+
+    try:
+        summary = plate_annotation_package.build_assisted_plate_annotation_package(
+            source_package_root=source_package_root,
+            output_root=output_root,
+            overwrite=overwrite,
+            run_id=run_id,
+        )
+    except (FileExistsError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    progress = summary["progress"]["total"]
+    migration = summary["assisted_migration"]
+    proposals = migration["proposal_generation"]
+    click.echo(f"Wrote assisted plate annotation package: {summary['package_root']}")
+    click.echo(
+        f"Migrated reviewed boxes: {migration['migrated_record_count']}; "
+        f"reviewed boxes: {progress['reviewed_box']} / {progress['mandatory']}."
+    )
+    click.echo(
+        f"Proposal frames: {proposals['proposal_available_total']}; "
+        f"without proposal: {proposals['no_proposal_remaining']}."
+    )
+
+
 @main.command("validate-plate-annotation-package")
 @click.argument(
     "package_root",
@@ -1511,6 +1562,9 @@ def summarize_plate_annotation_package(package_root: Path) -> None:
     click.echo(f"Reviewed boxes: {total['reviewed_box']} / {total['mandatory']}")
     click.echo(f"Needs recheck: {total['needs_recheck']}")
     click.echo(f"Draft target frames: {summary['draft_count']}")
+    click.echo(f"Proposal target frames: {total.get('proposal_available_total', 0)}")
+    click.echo(f"Proposal accepts: {total.get('proposal_accepted_unchanged', 0)}")
+    click.echo(f"Proposal adjustments: {total.get('proposal_human_adjusted', 0)}")
     click.echo(f"Final export ready: {summary['progress']['final_export_ready']}")
 
 

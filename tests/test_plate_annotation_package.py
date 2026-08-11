@@ -34,6 +34,64 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_track_evidence(
+    tmp_path: Path,
+    night_video: Path,
+    records: list[dict[str, Any]],
+    *,
+    name: str = "track_evidence",
+) -> Path:
+    evidence_root = tmp_path / name
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    tracks_path = evidence_root / "tracks.jsonl"
+    by_frame: dict[int, list[dict[str, Any]]] = {}
+    for record in records:
+        frame_index = int(record["frame_index"])
+        by_frame.setdefault(frame_index, []).append(
+            {
+                "bbox_xyxy": record["bbox_xyxy"],
+                "category": "license_plate",
+                "frame_index": frame_index,
+                "provenance": record.get("provenance", "plate_detector_observation"),
+                "score": record.get("score", 0.75),
+                "source_candidate_ids": record.get(
+                    "source_candidate_ids", [f"synthetic:f{frame_index:04d}:d00"]
+                ),
+                "status": record.get("status", "needs_review"),
+                "track_id": record.get("track_id", 1),
+                "track_uid": record.get("track_uid", "plate_track_0001"),
+            }
+        )
+    with tracks_path.open("w", encoding="utf-8") as file:
+        for frame_index in sorted(by_frame):
+            file.write(
+                json.dumps({"frame_index": frame_index, "tracks": by_frame[frame_index]}) + "\n"
+            )
+    write_json(
+        evidence_root / "tracking_manifest.json",
+        {
+            "detector_id": "synthetic_plate_detector",
+            "input_height": 64,
+            "input_width": 96,
+            "nominal_fps": 10.0,
+            "schema_version": "plate_tracking.v1",
+            "source_sha256": media.sha256_file(night_video),
+            "source_video": night_video.as_posix(),
+            "tracking_configuration": {
+                "max_accepted_center_jump_norm": 4.0,
+                "max_area_fraction": 0.08,
+                "max_aspect_ratio": 8.0,
+                "max_safe_interpolation_gap_seconds": 0.3,
+                "min_area_fraction": 4e-05,
+                "min_aspect_ratio": 0.7,
+            },
+            "tracking_configuration_hash": "synthetic_tracking_hash",
+            "tracking_summary": {"max_safe_interpolation_gap_frames": 3},
+        },
+    )
+    return tracks_path
+
+
 def post_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
     request = urllib.request.Request(
         url,
@@ -153,6 +211,25 @@ def synthetic_package(tmp_path: Path) -> tuple[Path, tuple[package.PlateTargetCo
     return Path(summary["package_root"]), targets
 
 
+def build_assisted_from_source(
+    tmp_path: Path,
+    source_package_root: Path,
+    targets: tuple[package.PlateTargetConfig, ...],
+    *,
+    proposal_evidence_paths: tuple[Path, ...] | None = None,
+    run_id: str = "run_assisted",
+) -> tuple[Path, dict[str, Any]]:
+    summary = package.build_assisted_plate_annotation_package(
+        output_root=tmp_path / "assisted",
+        run_id=run_id,
+        source_package_root=source_package_root,
+        targets=targets,
+        proposal_evidence_paths=proposal_evidence_paths,
+        verify_git_ignore=False,
+    )
+    return Path(summary["package_root"]), summary
+
+
 def test_default_targets_are_frozen_phase_a_ranges() -> None:
     day, night = package.default_plate_targets()
     assert day.video_path == Path("artifacts/eval_day_plate.mp4")
@@ -199,6 +276,19 @@ def test_package_construction_counts_mapping_assets(
         assert (package_root / frame["crop"]["path"]).exists()
         assert frame["crop"]["roi_provenance"] == "qa_search_only"
         assert frame["crop"]["origin_xy"] in ([10, 10], [8, 12])
+    assert package.validate_plate_annotation_package(package_root)["passed"] is True
+
+
+def test_validation_accepts_legacy_progress_missing_assisted_counters(
+    synthetic_package: tuple[Path, tuple[package.PlateTargetConfig, ...]],
+) -> None:
+    package_root, _targets = synthetic_package
+    progress_path = package_root / "progress.json"
+    progress = package.read_json(progress_path)
+    for row in [progress["total"], *progress["by_benchmark"].values()]:
+        for key in package.OPTIONAL_PROGRESS_ROW_KEYS:
+            row.pop(key, None)
+    write_json(progress_path, progress)
     assert package.validate_plate_annotation_package(package_root)["passed"] is True
 
 
@@ -407,6 +497,7 @@ def test_draft_seed_hidden_by_default_and_excludes_unmatched(tmp_path: Path) -> 
     assert draft_audit["excluded_by_reason"]["source_hash_not_in_phase_a_targets"] == 1
     result = mark_draft_shown(package_root, "day_plate_000001")
     assert result["frame"]["draft_shown"] is True
+    assert result["frame"]["proposal_shown"] is True
 
 
 def test_draft_visibility_does_not_resolve_temporal_conflict(tmp_path: Path) -> None:
@@ -456,6 +547,7 @@ def test_draft_visibility_does_not_resolve_temporal_conflict(tmp_path: Path) -> 
     )
     result = mark_draft_shown(package_root, frame_id)
     assert result["frame"]["draft_shown"] is True
+    assert result["frame"]["proposal_shown"] is True
     assert result["frame"]["annotation_status"] == "temporal_gt_conflict"
     assert result["progress"]["total"]["reviewed_box"] == 0
     assert result["progress"]["total"]["temporal_gt_conflict"] == 1
@@ -801,9 +893,428 @@ def test_server_rejects_stale_save_and_preserves_revision_across_restart(
         restarted_thread.join(timeout=5)
 
 
+def test_assisted_package_migrates_reviewed_records_and_generates_proposals(
+    tmp_path: Path,
+    synthetic_package: tuple[Path, tuple[package.PlateTargetConfig, ...]],
+) -> None:
+    source_package_root, targets = synthetic_package
+    night_video = targets[1].video_path
+    save_annotation(
+        source_package_root,
+        "day_plate_000001",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": [16, 18, 30, 28],
+            "review_note": "day reviewed",
+        },
+        now_utc="2026-08-10T00:00:00Z",
+    )
+    save_annotation(
+        source_package_root,
+        "night_selective_000003",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": [20, 22, 38, 31],
+            "review_note": "night reviewed",
+        },
+        now_utc="2026-08-10T00:01:00Z",
+    )
+    evidence_path = write_track_evidence(
+        tmp_path,
+        night_video,
+        [
+            {"bbox_xyxy": [20, 22, 38, 31], "frame_index": 3},
+            {"bbox_xyxy": [22, 23, 40, 32], "frame_index": 4},
+            {"bbox_xyxy": [24, 24, 42, 33], "frame_index": 5},
+        ],
+    )
+    source_hashes = package.package_core_hashes(source_package_root)
+    assisted_root, summary = build_assisted_from_source(
+        tmp_path,
+        source_package_root,
+        targets,
+        proposal_evidence_paths=(evidence_path,),
+    )
+
+    assert package.package_core_hashes(source_package_root) == source_hashes
+    assert package.validate_plate_annotation_package(assisted_root)["passed"] is True
+    manifest = package.read_json(assisted_root / "package_manifest.json")
+    identity = package.read_json(assisted_root / "package_identity.json")
+    progress = package.read_json(assisted_root / "progress.json")
+    state = package.read_json(assisted_root / "annotations.draft.json")
+    review = package.read_json(assisted_root / "review_data.json")
+    source_state = package.read_json(source_package_root / "annotations.draft.json")
+    source_review = package.read_json(source_package_root / "review_data.json")
+
+    assert manifest["annotation_mode"] == package.ANNOTATION_MODE_ASSISTED
+    assert identity["package_manifest_sha256"] == media.sha256_file(
+        assisted_root / "package_manifest.json"
+    )
+    migration = summary["assisted_migration"]
+    assert migration["bbox_mismatch_count"] == 0
+    assert migration["changed_record_count"] == 0
+    assert migration["missing_record_count"] == 0
+    assert migration["migrated_record_count"] == 2
+    assert progress["total"]["reviewed_box"] == 2
+    assert progress["total"]["unreviewed"] == 3
+    assert progress["total"]["proposal_available_total"] == 2
+    assert progress["total"]["no_proposal_remaining"] == 1
+    assert progress["total"]["proposal_source_breakdown"] == {
+        package.PROPOSAL_DIRECT_DETECTOR: 2
+    }
+
+    source_frames = {frame["frame_id"]: frame for frame in source_review["frames"]}
+    assisted_frames = {frame["frame_id"]: frame for frame in review["frames"]}
+    for frame_id in ("day_plate_000001", "night_selective_000003"):
+        assert package.migration_compare_record(
+            assisted_frames[frame_id], state["frames"][frame_id]
+        ) == package.migration_compare_record(
+            source_frames[frame_id], source_state["frames"][frame_id]
+        )
+        assert state["frames"][frame_id]["proposal_available"] is False
+        assert state["frames"][frame_id]["legacy_draft_available"] is False
+
+    day_record = state["frames"]["day_plate_000002"]
+    assert day_record["annotation_status"] == "unreviewed"
+    assert day_record["proposal_available"] is False
+    assert day_record["proposal_bbox"] is None
+
+    for frame_id in ("night_selective_000004", "night_selective_000005"):
+        record = state["frames"][frame_id]
+        assert record["annotation_status"] == "unreviewed"
+        assert record["proposal_available"] is True
+        assert record["proposal_source"] == package.PROPOSAL_DIRECT_DETECTOR
+        assert record["proposal_quality"] == package.PROPOSAL_QUALITY_SAFE_TO_REVIEW
+        assert record["draft_bbox"] == record["proposal_bbox"]
+        assert record["proposal_bbox"] != [20, 22, 38, 31]
+        assert record["human_bbox"] is None
+
+    proposal_audit = package.read_json(assisted_root / "proposal_generation_audit.json")
+    assert proposal_audit["total_unreviewed"] == 3
+    assert proposal_audit["proposal_source_counts"][package.PROPOSAL_DIRECT_DETECTOR] == 2
+    assert proposal_audit["proposal_source_counts"][package.PROPOSAL_HUMAN_MOTION] == 0
+    assert package.PROPOSAL_HUMAN_SEEDED not in progress["total"]["proposal_source_breakdown"]
+    association = proposal_audit["target_association"][str(evidence_path)]
+    assert association["night_selective"]["selected_track_uids"] == ["plate_track_0001"]
+
+    for frame in review["frames"]:
+        assert frame["full_frame"]["width"] == frame["frame_width"]
+        assert frame["full_frame"]["height"] == frame["frame_height"]
+        assert (assisted_root / frame["full_frame"]["path"]).exists()
+
+
+def test_accept_draft_and_edit_records_assisted_provenance(
+    tmp_path: Path,
+    synthetic_package: tuple[Path, tuple[package.PlateTargetConfig, ...]],
+) -> None:
+    source_package_root, targets = synthetic_package
+    night_video = targets[1].video_path
+    save_annotation(
+        source_package_root,
+        "night_selective_000003",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": [20, 22, 38, 31],
+            "review_note": "night anchor",
+        },
+    )
+    evidence_path = write_track_evidence(
+        tmp_path,
+        night_video,
+        [
+            {"bbox_xyxy": [20, 22, 38, 31], "frame_index": 3},
+            {"bbox_xyxy": [22, 23, 40, 32], "frame_index": 4},
+            {"bbox_xyxy": [24, 24, 42, 33], "frame_index": 5},
+        ],
+    )
+    assisted_root, _summary = build_assisted_from_source(
+        tmp_path,
+        source_package_root,
+        targets,
+        proposal_evidence_paths=(evidence_path,),
+    )
+    state = package.read_json(assisted_root / "annotations.draft.json")
+    proposal = state["frames"]["night_selective_000004"]["proposal_bbox"]
+    accepted = package.accept_draft_annotation(
+        assisted_root,
+        "night_selective_000004",
+        expected_state_revision=state_revision(assisted_root),
+        now_utc="2026-08-10T00:02:00Z",
+    )
+
+    assert accepted["frame"]["human_bbox"] == proposal
+    assert accepted["frame"]["accepted_without_geometry_change"] is True
+    assert accepted["frame"]["human_adjusted_geometry"] is False
+    assert accepted["progress"]["total"]["proposal_accepted_unchanged"] == 1
+    with pytest.raises(package.StaleStateRevisionError):
+        package.accept_draft_annotation(
+            assisted_root,
+            "night_selective_000005",
+            expected_state_revision=0,
+        )
+
+    edited_bbox = [22, 23, 41, 33]
+    edited = save_annotation(
+        assisted_root,
+        "night_selective_000005",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": edited_bbox,
+            "proposal_shown": True,
+            "review_note": "adjusted",
+        },
+    )
+    assert edited["frame"]["human_bbox"] == edited_bbox
+    assert edited["frame"]["accepted_without_geometry_change"] is False
+    assert edited["frame"]["human_adjusted_geometry"] is True
+    assert edited["progress"]["total"]["proposal_human_adjusted"] == 1
+    events = [
+        json.loads(line)
+        for line in (assisted_root / "change_log.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [event["event"] for event in events] == ["accept_draft", "save_annotation"]
+    assert events[0]["accepted_without_geometry_change"] is True
+    assert events[1]["human_adjusted_geometry"] is True
+
+
+def test_assisted_bounded_interpolation_requires_detector_anchors(
+    tmp_path: Path,
+    synthetic_package: tuple[Path, tuple[package.PlateTargetConfig, ...]],
+) -> None:
+    source_package_root, targets = synthetic_package
+    night_video = targets[1].video_path
+    save_annotation(
+        source_package_root,
+        "night_selective_000003",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": [20, 22, 38, 31],
+            "review_note": "night anchor",
+        },
+    )
+    evidence_path = write_track_evidence(
+        tmp_path,
+        night_video,
+        [
+            {"bbox_xyxy": [20, 22, 38, 31], "frame_index": 3},
+            {
+                "bbox_xyxy": [22, 23, 40, 32],
+                "frame_index": 4,
+                "provenance": "plate_track_interpolation",
+            },
+            {"bbox_xyxy": [24, 24, 42, 33], "frame_index": 5},
+        ],
+        name="bounded_interpolation",
+    )
+    assisted_root, _summary = build_assisted_from_source(
+        tmp_path,
+        source_package_root,
+        targets,
+        proposal_evidence_paths=(evidence_path,),
+    )
+    state = package.read_json(assisted_root / "annotations.draft.json")
+    interpolated = state["frames"]["night_selective_000004"]
+    assert interpolated["proposal_source"] == package.PROPOSAL_BOUNDED_INTERPOLATION
+    assert interpolated["proposal_quality"] == package.PROPOSAL_QUALITY_NEEDS_ADJUSTMENT
+    assert (
+        state["frames"]["night_selective_000005"]["proposal_source"]
+        == package.PROPOSAL_DIRECT_DETECTOR
+    )
+    audit = package.read_json(assisted_root / "proposal_generation_audit.json")
+    frame4 = next(
+        frame for frame in audit["frames"] if frame["frame_id"] == "night_selective_000004"
+    )
+    assert frame4["left_anchor"]["parent_frame"] == 3
+    assert frame4["right_anchor"]["parent_frame"] == 5
+
+
+def test_assisted_no_unbounded_extrapolation_or_static_human_carry_forward(
+    tmp_path: Path,
+    synthetic_package: tuple[Path, tuple[package.PlateTargetConfig, ...]],
+) -> None:
+    source_package_root, targets = synthetic_package
+    save_annotation(
+        source_package_root,
+        "night_selective_000003",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": [20, 22, 38, 31],
+            "review_note": "night anchor",
+        },
+    )
+    assisted_root, _summary = build_assisted_from_source(
+        tmp_path,
+        source_package_root,
+        targets,
+        proposal_evidence_paths=(),
+    )
+    state = package.read_json(assisted_root / "annotations.draft.json")
+    for frame_id in ("night_selective_000004", "night_selective_000005"):
+        record = state["frames"][frame_id]
+        assert record["proposal_available"] is False
+        assert record["proposal_bbox"] is None
+        assert record["proposal_source"] is None
+        assert record["human_bbox"] is None
+    assert package.PROPOSAL_HUMAN_SEEDED not in package.read_json(
+        assisted_root / "progress.json"
+    )["total"]["proposal_source_breakdown"]
+    with pytest.raises(ValueError, match="no proposal is available"):
+        package.accept_draft_annotation(
+            assisted_root,
+            "night_selective_000004",
+            expected_state_revision=state_revision(assisted_root),
+        )
+
+
+def test_assisted_rejects_candidate_qa_failures(
+    tmp_path: Path,
+    synthetic_package: tuple[Path, tuple[package.PlateTargetConfig, ...]],
+) -> None:
+    source_package_root, targets = synthetic_package
+    night_video = targets[1].video_path
+    save_annotation(
+        source_package_root,
+        "night_selective_000003",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": [20, 22, 38, 31],
+            "review_note": "night anchor",
+        },
+    )
+    evidence_path = write_track_evidence(
+        tmp_path,
+        night_video,
+        [
+            {"bbox_xyxy": [20, 22, 38, 31], "frame_index": 3},
+            {"bbox_xyxy": [22, 10, 24, 54], "frame_index": 4},
+        ],
+        name="qa_reject",
+    )
+    assisted_root, _summary = build_assisted_from_source(
+        tmp_path,
+        source_package_root,
+        targets,
+        proposal_evidence_paths=(evidence_path,),
+    )
+    state = package.read_json(assisted_root / "annotations.draft.json")
+    assert state["frames"]["night_selective_000004"]["proposal_available"] is False
+    audit = package.read_json(assisted_root / "proposal_generation_audit.json")
+    frame4 = next(
+        frame for frame in audit["frames"] if frame["frame_id"] == "night_selective_000004"
+    )
+    assert frame4["rejection_reason"] == "candidate_rejected_by_qa"
+    assert (
+        frame4["discarded_candidates"][0]["rejection_reason"]
+        == "aspect_ratio_outside_source_bounds"
+    )
+
+
+def test_assisted_accepted_tracker_takes_precedence_over_direct_detector(
+    tmp_path: Path,
+    synthetic_package: tuple[Path, tuple[package.PlateTargetConfig, ...]],
+) -> None:
+    source_package_root, targets = synthetic_package
+    night_video = targets[1].video_path
+    save_annotation(
+        source_package_root,
+        "night_selective_000003",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": [20, 22, 38, 31],
+            "review_note": "night anchor",
+        },
+    )
+    accepted_path = write_track_evidence(
+        tmp_path,
+        night_video,
+        [
+            {"bbox_xyxy": [20, 22, 38, 31], "frame_index": 3, "status": "accepted_plate_track"},
+            {"bbox_xyxy": [21, 23, 39, 32], "frame_index": 4, "status": "accepted_plate_track"},
+        ],
+        name="accepted_tracker",
+    )
+    direct_path = write_track_evidence(
+        tmp_path,
+        night_video,
+        [
+            {"bbox_xyxy": [20, 22, 38, 31], "frame_index": 3},
+            {"bbox_xyxy": [25, 24, 43, 33], "frame_index": 4},
+        ],
+        name="direct_detector",
+    )
+    assisted_root, _summary = build_assisted_from_source(
+        tmp_path,
+        source_package_root,
+        targets,
+        proposal_evidence_paths=(accepted_path, direct_path),
+    )
+    record = package.read_json(assisted_root / "annotations.draft.json")["frames"][
+        "night_selective_000004"
+    ]
+    assert record["proposal_source"] == package.PROPOSAL_AUTOMATIC_TRACKER
+    assert record["proposal_bbox"] == [21, 23, 39, 32]
+
+
+def test_full_frame_geometry_allows_boxes_outside_static_crop(
+    tmp_path: Path,
+    synthetic_package: tuple[Path, tuple[package.PlateTargetConfig, ...]],
+) -> None:
+    source_package_root, targets = synthetic_package
+    save_annotation(
+        source_package_root,
+        "day_plate_000001",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": [16, 18, 30, 28],
+            "review_note": "anchor",
+        },
+    )
+    assisted_root, _summary = build_assisted_from_source(tmp_path, source_package_root, targets)
+    outside_crop_bbox = [70, 48, 88, 60]
+    result = save_annotation(
+        assisted_root,
+        "day_plate_000002",
+        {
+            "annotation_status": "reviewed_box",
+            "human_bbox": outside_crop_bbox,
+            "proposal_shown": True,
+            "review_note": "outside old crop but visible in full frame",
+        },
+    )
+    review = package.read_json(assisted_root / "review_data.json")
+    frame = next(item for item in review["frames"] if item["frame_id"] == "day_plate_000002")
+    assert result["frame"]["human_bbox"] == outside_crop_bbox
+    assert outside_crop_bbox[0] > frame["crop"]["origin_xy"][0] + frame["crop"]["width"]
+    assert frame["full_frame"]["width"] == 96
+    assert frame["full_frame"]["height"] == 64
+    assert package.validate_plate_annotation_package(assisted_root)["passed"] is True
+
+
+def test_assisted_ui_exposes_full_frame_and_keyboard_controls() -> None:
+    html = package.index_html()
+    js = package.app_js()
+    assert "Accept Draft + Next" in html
+    assert "Fit Frame" in html
+    assert "QA ROI" in html
+    assert "A/Enter accept" in html
+    assert "S save+next" in html
+    assert "proposalBanner" in html
+    assert "acceptDraft" in js
+    assert "/api/annotations/accept-draft" in js
+    assert "frame.full_frame" in js
+    assert "fitFrame" in js
+    assert "fitTarget" in js
+    assert "isTypingTarget" in js
+    assert "PROPOSAL - NOT YET REVIEWED" in js
+    assert "PROPOSAL NEEDS ADJUSTMENT" in js
+    assert "save(true)" in js
+
+
 def test_cli_help_for_plate_annotation_commands() -> None:
     runner = CliRunner()
     for command in (
+        "build-assisted-plate-annotation-package",
         "build-plate-annotation-package",
         "validate-plate-annotation-package",
         "summarize-plate-annotation-package",

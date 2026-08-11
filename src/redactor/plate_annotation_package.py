@@ -11,6 +11,7 @@ import subprocess
 import threading
 import webbrowser
 from collections import Counter
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -37,6 +38,10 @@ ALLOWED_CERTIFIED_CONFIG_VERSIONS = {
 }
 
 DEFAULT_OUTPUT_ROOT = Path("artifacts/plate_ground_truth_annotation_v1")
+DEFAULT_ASSISTED_OUTPUT_ROOT = Path("artifacts/plate_ground_truth_annotation_v2_assisted")
+DEFAULT_ASSISTED_SOURCE_PACKAGE = (
+    DEFAULT_OUTPUT_ROOT / "run_20260811T001554Z"
+)
 DEFAULT_DAY_VIDEO = Path("artifacts/eval_day_plate.mp4")
 DEFAULT_NIGHT_VIDEO = Path("artifacts/eval_night_selective.mp4")
 DEFAULT_DRAFT_PATH = Path(
@@ -45,6 +50,11 @@ DEFAULT_DRAFT_PATH = Path(
 )
 DEFAULT_DRAFT_MAPPING_AUDIT = Path(
     "artifacts/license_plate_detector_finalists_v2_1/clip_mapping_audit.json"
+)
+DEFAULT_ASSISTED_TRACK_EVIDENCE_PATHS = (
+    Path("artifacts/shared_temporal_evidence_v1/night/tracking/tracks.jsonl"),
+    Path("artifacts/oim_plate_full_video_v1/night/tracking/tracks.jsonl"),
+    Path("artifacts/oim_plate_tracking_v1/night/tracks.jsonl"),
 )
 EXCLUDED_CLOSE_VIDEO = Path("artifacts/eval_day_plate_close.mp4")
 
@@ -69,6 +79,32 @@ ALLOWED_SECONDARY_KINDS = {SECONDARY_ADDITIONAL, SECONDARY_IGNORE_SMALL, SECONDA
 
 FRAME_ASSET_NAME_TEMPLATE = "{benchmark}_{parent_frame:06d}_{kind}.{extension}"
 MAX_SAVE_PAYLOAD_BYTES = 1024 * 1024
+ANNOTATION_MODE_MANUAL = "manual_human_review"
+ANNOTATION_MODE_ASSISTED = "proposal_assisted_human_review"
+PROPOSAL_HISTORICAL_DETECTOR = "historical_detector_draft"
+PROPOSAL_AUTOMATIC_TRACKER = "automatic_tracker_draft"
+PROPOSAL_DIRECT_DETECTOR = "direct_detector_draft"
+PROPOSAL_BOUNDED_INTERPOLATION = "bounded_interpolation_draft"
+PROPOSAL_HUMAN_MOTION = "human_seeded_motion_draft"
+PROPOSAL_PRIVACY_ENVELOPE = "privacy_envelope_draft"
+PROPOSAL_HUMAN_SEEDED = "human_seeded_propagation_draft"
+PROPOSAL_INTERPOLATED = "interpolated_draft"
+PROPOSAL_QUALITY_SAFE_TO_REVIEW = "safe_to_review"
+PROPOSAL_QUALITY_NEEDS_ADJUSTMENT = "needs_human_adjustment"
+PROPOSAL_QUALITY_NEEDS_MANUAL_START = "needs_manual_start"
+TRACK_PROVENANCE_DETECTOR = "plate_detector_observation"
+TRACK_PROVENANCE_INTERPOLATION = "plate_track_interpolation"
+TRACK_STATUS_ACCEPTED = "accepted_plate_track"
+MAX_STATIC_HUMAN_COPY_DIAGNOSTIC_WINDOW_FRAMES = 1
+OPTIONAL_PROGRESS_ROW_KEYS = (
+    "human_reviewed_total",
+    "no_proposal_remaining",
+    "proposal_accepted_unchanged",
+    "proposal_available_total",
+    "proposal_human_adjusted",
+    "proposal_source_breakdown",
+    "temporal_gt_conflicts",
+)
 
 
 class StaleStateRevisionError(ValueError):
@@ -225,6 +261,1116 @@ def build_plate_annotation_package(
         "package_root": package_root.as_posix(),
         "validation": validation,
     }
+
+
+def build_assisted_plate_annotation_package(
+    *,
+    source_package_root: Path = DEFAULT_ASSISTED_SOURCE_PACKAGE,
+    output_root: Path = DEFAULT_ASSISTED_OUTPUT_ROOT,
+    overwrite: bool = False,
+    run_id: str | None = None,
+    verify_git_ignore: bool = True,
+    repo_root: Path | None = None,
+    proposal_evidence_paths: tuple[Path, ...] | None = None,
+    targets: tuple[PlateTargetConfig, ...] | None = None,
+) -> dict[str, Any]:
+    repo_root = (repo_root or Path.cwd()).resolve()
+    output_root = output_root.resolve()
+    source_package_root = source_package_root.resolve()
+    if verify_git_ignore:
+        assert_annotation_root_is_ignored(output_root, repo_root)
+    source_validation = validate_plate_annotation_package(source_package_root)
+    if not source_validation["passed"]:
+        raise ValueError(f"source package validation failed: {'; '.join(source_validation['errors'])}")
+
+    source_manifest = read_json(source_package_root / "package_manifest.json")
+    target_configs = targets or target_configs_from_manifest(source_package_root, source_manifest)
+    certified_config_version = str(
+        source_manifest.get("certified_config_version") or CUSTOM_CERTIFIED_CONFIG_VERSION
+    )
+    run_name = run_id or unique_run_id(output_root)
+    package_root = output_root / run_name
+    temp_root = output_root / f".{run_name}.{uuid4().hex}.tmp"
+    if package_root.exists() and any(package_root.iterdir()) and not overwrite:
+        raise FileExistsError(f"{package_root} already exists; pass --overwrite to replace it")
+    if temp_root.exists():
+        shutil.rmtree(temp_root)
+
+    output_root.mkdir(parents=True, exist_ok=True)
+    try:
+        _build_into_temp_root(
+            package_root=temp_root,
+            final_package_root=package_root,
+            targets=target_configs,
+            certified_config_version=certified_config_version,
+            annotation_mode=ANNOTATION_MODE_ASSISTED,
+            include_drafts=True,
+            draft_path=DEFAULT_DRAFT_PATH,
+            draft_mapping_audit_path=DEFAULT_DRAFT_MAPPING_AUDIT,
+            repo_root=repo_root,
+        )
+        migration_audit = apply_assisted_migration(
+            source_package_root=source_package_root,
+            package_root=temp_root,
+            final_package_root=package_root,
+            repo_root=repo_root,
+            proposal_evidence_paths=proposal_evidence_paths,
+        )
+        if package_root.exists() and overwrite:
+            shutil.rmtree(package_root)
+        os.replace(temp_root, package_root)
+    except Exception:
+        if temp_root.exists():
+            shutil.rmtree(temp_root)
+        raise
+
+    validation = validate_plate_annotation_package(package_root)
+    if not validation["passed"]:
+        raise ValueError("; ".join(validation["errors"]))
+    summary = summarize_plate_annotation_package(package_root)
+    return summary | {
+        "assisted_migration": migration_audit,
+        "package_root": package_root.as_posix(),
+        "validation": validation,
+    }
+
+
+def target_configs_from_manifest(
+    package_root: Path,
+    manifest: dict[str, Any],
+) -> tuple[PlateTargetConfig, ...]:
+    configs = []
+    for benchmark_id, target in sorted(manifest.get("targets", {}).items()):
+        parent_start, parent_end = target["frozen_parent_frame_interval"]
+        offset = int(target["parent_to_dense_mapping"]["offset"])
+        video = target["evaluation_video"]
+        configs.append(
+            PlateTargetConfig(
+                action=str(target["action"]),
+                benchmark_id=str(benchmark_id),
+                broad_roi_xyxy=tuple(int(value) for value in target["broad_search_roi_xyxy"]),
+                dense_frame_offset=offset,
+                expected_fps=video.get("fps"),
+                expected_height=int(video["height"]),
+                expected_sha256=video.get("sha256"),
+                expected_width=int(video["width"]),
+                object_type=str(target["object_type"]),
+                parent_frame_end=int(parent_end),
+                parent_frame_start=int(parent_start),
+                source_interval=str(target["source_interval"]),
+                source_video_label=str(target["source_video_label"]),
+                target_id=str(target["target_id"]),
+                total_video_frames=int(video["frame_count"]),
+                video_path=resolve_evaluation_video_path(package_root, str(video["path"])),
+            )
+        )
+    return tuple(configs)
+
+
+def package_core_hashes(package_root: Path) -> dict[str, str]:
+    return {
+        name: media.sha256_file(package_root / name)
+        for name in (
+            "annotations.draft.json",
+            "change_log.jsonl",
+            "package_identity.json",
+            "package_manifest.json",
+            "progress.json",
+            "review_data.json",
+        )
+    }
+
+
+def refresh_package_identity_hashes(package_root: Path) -> None:
+    identity = read_json(package_root / "package_identity.json")
+    identity["package_manifest_sha256"] = media.sha256_file(package_root / "package_manifest.json")
+    identity["review_data_sha256"] = media.sha256_file(package_root / "review_data.json")
+    write_json(package_root / "package_identity.json", identity)
+
+
+def reviewed_annotation_semantic_hash(
+    review_data: dict[str, Any],
+    state: dict[str, Any],
+) -> str:
+    frames = []
+    for frame in review_data.get("frames", []):
+        record = state.get("frames", {}).get(frame["frame_id"], {})
+        if record.get("annotation_status") != STATUS_REVIEWED_BOX:
+            continue
+        frames.append(migration_compare_record(frame, record))
+    return stable_json_sha256(frames)
+
+
+def migration_compare_record(frame: dict[str, Any], record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "annotation_status": record.get("annotation_status"),
+        "benchmark_id": frame.get("benchmark_id"),
+        "conflicts": record.get("conflicts", []),
+        "dense_frame": frame.get("dense_frame"),
+        "draft_shown": record.get("draft_shown", False),
+        "frame_id": frame.get("frame_id"),
+        "human_bbox": record.get("human_bbox"),
+        "human_reviewed": record.get("human_reviewed"),
+        "parent_frame": frame.get("parent_frame"),
+        "review_note": record.get("review_note", ""),
+        "reviewed_at": record.get("reviewed_at"),
+        "secondary_instances": record.get("secondary_instances", []),
+        "target_id": frame.get("target_id"),
+    }
+
+
+def apply_assisted_migration(
+    *,
+    source_package_root: Path,
+    package_root: Path,
+    final_package_root: Path,
+    repo_root: Path | None = None,
+    proposal_evidence_paths: tuple[Path, ...] | None = None,
+) -> dict[str, Any]:
+    source_manifest = read_json(source_package_root / "package_manifest.json")
+    source_review = read_json(source_package_root / "review_data.json")
+    source_state = read_json(source_package_root / "annotations.draft.json")
+    review_data = read_json(package_root / "review_data.json")
+    state = read_json(package_root / "annotations.draft.json")
+    manifest = read_json(package_root / "package_manifest.json")
+    manifest["annotation_mode"] = ANNOTATION_MODE_ASSISTED
+    manifest["assisted_migration"] = {
+        "source_package_hashes": package_core_hashes(source_package_root),
+        "source_package_id": source_manifest.get("package_id"),
+        "source_package_root": source_package_root.as_posix(),
+    }
+    source_frames = {frame["frame_id"]: frame for frame in source_review["frames"]}
+    source_records = source_state["frames"]
+    proposals, proposal_audit = assisted_proposals_for_frames(
+        source_review,
+        source_state,
+        review_data,
+        manifest=manifest,
+        repo_root=repo_root or Path.cwd(),
+        evidence_paths=proposal_evidence_paths,
+    )
+
+    migrated_count = 0
+    bbox_mismatch_count = 0
+    missing_record_count = 0
+    changed_record_count = 0
+    migrated_frames = []
+    for frame in review_data["frames"]:
+        frame_id = frame["frame_id"]
+        record = dict(state["frames"][frame_id])
+        source_frame = source_frames.get(frame_id)
+        source_record = source_records.get(frame_id)
+        if source_frame is None or not isinstance(source_record, dict):
+            missing_record_count += 1
+            continue
+        if source_record.get("annotation_status") == STATUS_REVIEWED_BOX:
+            migrated_count += 1
+            old_bbox = source_record.get("human_bbox")
+            record.update(
+                {
+                    "accepted_without_geometry_change": False,
+                    "annotation_status": STATUS_REVIEWED_BOX,
+                    "conflicts": source_record.get("conflicts", []),
+                    "draft_available": False,
+                    "draft_bbox": None,
+                    "draft_candidates": [],
+                    "draft_model": None,
+                    "draft_shown": bool(source_record.get("draft_shown", False)),
+                    "draft_source": None,
+                    "human_adjusted_geometry": False,
+                    "human_bbox": old_bbox,
+                    "human_reviewed": True,
+                    "legacy_draft_available": bool(source_record.get("draft_available", False)),
+                    "legacy_draft_bbox": source_record.get("draft_bbox"),
+                    "migration_source_package_id": source_manifest.get("package_id"),
+                    "proposal_available": False,
+                    "proposal_bbox": None,
+                    "proposal_candidates": [],
+                    "proposal_quality": None,
+                    "proposal_model": None,
+                    "proposal_shown": False,
+                    "proposal_source": None,
+                    "review_note": source_record.get("review_note", ""),
+                    "reviewed_at": source_record.get("reviewed_at"),
+                    "secondary_instances": source_record.get("secondary_instances", []),
+                }
+            )
+            state["frames"][frame_id] = record
+            if record["human_bbox"] != old_bbox:
+                bbox_mismatch_count += 1
+            if migration_compare_record(frame, record) != migration_compare_record(
+                source_frame, source_record
+            ):
+                changed_record_count += 1
+            migrated_frames.append(frame_id)
+            continue
+
+        proposal = proposals.get(frame_id)
+        record.update(
+            {
+                "accepted_without_geometry_change": False,
+                "annotation_status": STATUS_UNREVIEWED,
+                "conflicts": source_record.get("conflicts", []),
+                "draft_available": proposal is not None,
+                "draft_bbox": proposal.get("bbox_xyxy") if proposal else None,
+                "draft_candidates": proposal.get("candidates", []) if proposal else [],
+                "draft_model": proposal.get("model") if proposal else None,
+                "draft_shown": False,
+                "draft_source": proposal.get("source") if proposal else None,
+                "human_adjusted_geometry": False,
+                "human_bbox": None,
+                "human_reviewed": False,
+                "proposal_available": proposal is not None,
+                "proposal_bbox": proposal.get("bbox_xyxy") if proposal else None,
+                "proposal_candidates": proposal.get("candidates", []) if proposal else [],
+                "proposal_quality": proposal.get("proposal_quality") if proposal else None,
+                "proposal_model": proposal.get("model") if proposal else None,
+                "proposal_shown": False,
+                "proposal_source": proposal.get("source") if proposal else None,
+                "review_note": "",
+                "reviewed_at": None,
+                "secondary_instances": source_record.get("secondary_instances", []),
+            }
+        )
+        state["frames"][frame_id] = record
+
+    state["package_id"] = final_package_root.name
+    progress = compute_progress(review_data, state)
+    proposal_breakdown = dict(progress["total"]["proposal_source_breakdown"])
+    no_proposal_frames = [
+        frame_id
+        for frame_id, record in state["frames"].items()
+        if record.get("annotation_status") != STATUS_REVIEWED_BOX and not record.get("proposal_available")
+    ]
+    migration_audit = {
+        "bbox_mismatch_count": bbox_mismatch_count,
+        "changed_record_count": changed_record_count,
+        "migrated_record_count": migrated_count,
+        "migrated_reviewed_frame_ids": migrated_frames,
+        "missing_record_count": missing_record_count,
+        "new_package_id": final_package_root.name,
+        "old_annotation_semantic_hash": reviewed_annotation_semantic_hash(
+            source_review, source_state
+        ),
+        "old_package_hash": stable_json_sha256(package_core_hashes(source_package_root)),
+        "old_package_hashes": package_core_hashes(source_package_root),
+        "schema_version": "plate_annotation_assisted_migration_audit.v1",
+        "source_package_id": source_manifest.get("package_id"),
+        "source_package_root": source_package_root.as_posix(),
+    }
+    proposal_audit |= {
+        "annotation_mode": ANNOTATION_MODE_ASSISTED,
+        "no_proposal_frame_ids": no_proposal_frames,
+        "no_proposal_remaining": len(no_proposal_frames),
+        "proposal_available_total": progress["total"]["proposal_available_total"],
+        "proposal_source_breakdown": proposal_breakdown,
+        "remaining_unreviewed": progress["total"]["mandatory"] - progress["total"]["reviewed_box"],
+    }
+    write_json(package_root / "package_manifest.json", manifest)
+    write_json(package_root / "annotations.draft.json", state)
+    write_json(package_root / "progress.json", progress)
+    write_json(package_root / "migration_audit.json", migration_audit)
+    write_json(package_root / "proposal_generation_audit.json", proposal_audit)
+    refresh_package_identity_hashes(package_root)
+    shutil.copyfile(source_package_root / "change_log.jsonl", package_root / "migration_source_change_log.jsonl")
+    write_text(package_root / "instructions.md", instructions_markdown(target_configs_from_manifest(package_root, manifest)))
+    write_text(
+        package_root / "report.md",
+        report_markdown(manifest, progress, read_json(package_root / "draft_import_audit.json")),
+    )
+    return migration_audit | {"proposal_generation": proposal_audit}
+
+
+def assisted_proposals_for_frames(
+    source_review: dict[str, Any],
+    source_state: dict[str, Any],
+    review_data: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+    repo_root: Path,
+    evidence_paths: tuple[Path, ...] | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
+    source_records = source_state["frames"]
+    human_anchors: dict[str, list[tuple[int, list[int], str]]] = {}
+    for frame in source_review["frames"]:
+        record = source_records[frame["frame_id"]]
+        if record.get("annotation_status") == STATUS_REVIEWED_BOX and record.get("human_bbox"):
+            human_anchors.setdefault(frame["benchmark_id"], []).append(
+                (int(frame["parent_frame"]), list(record["human_bbox"]), frame["frame_id"])
+            )
+    for anchors in human_anchors.values():
+        anchors.sort(key=lambda item: item[0])
+
+    evidence = load_assisted_track_evidence(
+        manifest=manifest,
+        human_anchors=human_anchors,
+        repo_root=repo_root,
+        evidence_paths=evidence_paths,
+    )
+
+    proposals: dict[str, dict[str, Any]] = {}
+    frame_audits: list[dict[str, Any]] = []
+    rejected_candidate_count = 0
+    for frame in review_data["frames"]:
+        frame_id = frame["frame_id"]
+        source_record = source_records.get(frame_id)
+        if not isinstance(source_record, dict):
+            continue
+        if source_record.get("annotation_status") == STATUS_REVIEWED_BOX:
+            continue
+        candidates, discarded = assisted_track_candidates_for_frame(frame, evidence)
+        rejected_candidate_count += len(discarded)
+        primary = (
+            sorted(
+                candidates,
+                key=lambda item: (
+                    proposal_priority(str(item["source"])),
+                    int(item.get("evidence_source_index", 999)),
+                    -float(item.get("score") or 0.0),
+                    str(item.get("source_track_uid") or ""),
+                ),
+            )[0]
+            if candidates
+            else None
+        )
+        nearest_human = nearest_anchor(human_anchors.get(frame["benchmark_id"], []), int(frame["parent_frame"]))
+        temporal_distance = (
+            abs(int(frame["parent_frame"]) - nearest_human[0]) if nearest_human is not None else None
+        )
+        frame_audit = {
+            "benchmark_id": frame["benchmark_id"],
+            "dense_frame": frame["dense_frame"],
+            "discarded_candidates": discarded,
+            "frame_id": frame_id,
+            "no_proposal_reason": None,
+            "parent_frame": frame["parent_frame"],
+            "proposal_available": primary is not None,
+            "proposal_qa_result": primary.get("proposal_qa_result") if primary else {"status": "no_candidate"},
+            "rejection_reason": None,
+            "selected_proposal_bbox": primary.get("bbox_xyxy") if primary else None,
+            "selected_proposal_provenance": primary.get("source") if primary else None,
+            "source_detection_ids": primary.get("source_detection_ids") if primary else [],
+            "source_track_id": primary.get("source_track_id") if primary else None,
+            "source_track_uid": primary.get("source_track_uid") if primary else None,
+            "evidence_source_path": primary.get("evidence_source_path") if primary else None,
+            "evidence_source_sha256": primary.get("evidence_source_sha256") if primary else None,
+            "left_anchor": primary.get("left_anchor") if primary else None,
+            "right_anchor": primary.get("right_anchor") if primary else None,
+            "temporal_distance_from_nearest_human": temporal_distance,
+        }
+        if primary is None:
+            frame_audit["no_proposal_reason"] = (
+                "candidate_rejected_by_qa" if discarded else "no_target_associated_evidence_on_frame"
+            )
+            frame_audit["rejection_reason"] = frame_audit["no_proposal_reason"]
+        else:
+            proposals[frame_id] = primary | {"candidates": candidates}
+        frame_audits.append(frame_audit)
+
+    source_counts = Counter(str(proposal["source"]) for proposal in proposals.values())
+    proposal_sources = (
+        PROPOSAL_AUTOMATIC_TRACKER,
+        PROPOSAL_DIRECT_DETECTOR,
+        PROPOSAL_BOUNDED_INTERPOLATION,
+        PROPOSAL_HUMAN_MOTION,
+        PROPOSAL_PRIVACY_ENVELOPE,
+    )
+    proposal_audit = {
+        "evidence_sources": [public_evidence_source_audit(source) for source in evidence["sources"]],
+        "frames": frame_audits,
+        "human_anchor_counts": {
+            benchmark: len(anchors) for benchmark, anchors in sorted(human_anchors.items())
+        },
+        "proposal_policy": {
+            "forbidden_static_source": PROPOSAL_HUMAN_SEEDED,
+            "max_static_human_copy_diagnostic_window_frames": MAX_STATIC_HUMAN_COPY_DIAGNOSTIC_WINDOW_FRAMES,
+            "priority_order": list(proposal_sources),
+            "qa_only_not_metrics": True,
+            "unbounded_extrapolation_allowed": False,
+        },
+        "proposal_source_counts": {source: source_counts.get(source, 0) for source in proposal_sources},
+        "rejected_candidate_count": rejected_candidate_count,
+        "schema_version": "plate_annotation_assisted_proposal_audit.v2",
+        "target_association": evidence["target_association"],
+        "total_unreviewed": len(frame_audits),
+    }
+    return proposals, proposal_audit
+
+
+def load_assisted_track_evidence(
+    *,
+    manifest: dict[str, Any],
+    human_anchors: dict[str, list[tuple[int, list[int], str]]],
+    repo_root: Path,
+    evidence_paths: tuple[Path, ...] | None,
+) -> dict[str, Any]:
+    paths = DEFAULT_ASSISTED_TRACK_EVIDENCE_PATHS if evidence_paths is None else evidence_paths
+    targets_by_hash = {
+        str(target.get("evaluation_video", {}).get("sha256")): benchmark_id
+        for benchmark_id, target in sorted(manifest.get("targets", {}).items())
+        if isinstance(target, dict) and target.get("evaluation_video", {}).get("sha256")
+    }
+    sources = []
+    target_association: dict[str, Any] = {}
+    for source_index, evidence_path in enumerate(paths):
+        resolved_path = resolve_repo_relative_path(evidence_path, repo_root)
+        source = {
+            "exists": resolved_path.exists(),
+            "index": source_index,
+            "manifest": {},
+            "manifest_path": None,
+            "path": display_repo_path(resolved_path, repo_root),
+            "reason": None,
+            "sha256": media.sha256_file(resolved_path) if resolved_path.exists() else None,
+            "target_benchmark": None,
+            "tracks_by_benchmark": {},
+            "selected_tracks_by_benchmark": {},
+            "usable": False,
+        }
+        if not resolved_path.exists():
+            source["reason"] = "evidence_path_missing"
+            sources.append(source)
+            continue
+        manifest_path = tracking_manifest_for_tracks_path(resolved_path)
+        source["manifest_path"] = display_repo_path(manifest_path, repo_root) if manifest_path else None
+        source["manifest_sha256"] = media.sha256_file(manifest_path) if manifest_path else None
+        evidence_manifest = read_json(manifest_path) if manifest_path else {}
+        source["manifest"] = evidence_manifest
+        source_sha256 = str(evidence_manifest.get("source_sha256") or "")
+        benchmark_id = targets_by_hash.get(source_sha256)
+        if benchmark_id is None:
+            source["reason"] = "source_sha256_does_not_match_package_targets"
+            sources.append(source)
+            continue
+        target = manifest["targets"][benchmark_id]
+        if (
+            evidence_manifest.get("input_width") != target.get("evaluation_video", {}).get("width")
+            or evidence_manifest.get("input_height") != target.get("evaluation_video", {}).get("height")
+        ):
+            source["reason"] = "source_dimensions_do_not_match_package_target"
+            sources.append(source)
+            continue
+        tracks_by_uid: dict[str, dict[int, dict[str, Any]]] = {}
+        for frame_index, track_record in iter_track_evidence_records(resolved_path):
+            track_uid = str(
+                track_record.get("track_uid")
+                or track_record.get("track_id")
+                or f"track_{len(tracks_by_uid):04d}"
+            )
+            tracks_by_uid.setdefault(track_uid, {})[frame_index] = normalized_track_record(
+                track_record,
+                frame_index=frame_index,
+            )
+        source["target_benchmark"] = benchmark_id
+        source["tracks_by_benchmark"] = {benchmark_id: tracks_by_uid}
+        source["usable"] = True
+        source["max_safe_interpolation_gap_frames"] = max_safe_interpolation_gap_frames(evidence_manifest)
+        source["max_one_frame_center_jump_norm"] = float(
+            (evidence_manifest.get("tracking_configuration") or {}).get("max_accepted_center_jump_norm", 4.0)
+        )
+        source["qa_bounds"] = {
+            "max_area_fraction": float(
+                (evidence_manifest.get("tracking_configuration") or {}).get("max_area_fraction", 0.08)
+            ),
+            "max_aspect_ratio": float(
+                (evidence_manifest.get("tracking_configuration") or {}).get("max_aspect_ratio", 8.0)
+            ),
+            "min_area_fraction": float(
+                (evidence_manifest.get("tracking_configuration") or {}).get("min_area_fraction", 4e-05)
+            ),
+            "min_aspect_ratio": float(
+                (evidence_manifest.get("tracking_configuration") or {}).get("min_aspect_ratio", 0.7)
+            ),
+        }
+        associate_source_target_tracks(source, manifest, human_anchors)
+        target_association[source["path"]] = source.get("target_association", {})
+        sources.append(source)
+    return {"sources": sources, "target_association": target_association}
+
+
+def resolve_repo_relative_path(path: Path, repo_root: Path) -> Path:
+    if path.is_absolute():
+        return path.resolve()
+    return (repo_root / path).resolve()
+
+
+def display_repo_path(path: Path, repo_root: Path) -> str:
+    try:
+        return path.resolve().relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def tracking_manifest_for_tracks_path(tracks_path: Path) -> Path | None:
+    for candidate in (tracks_path.with_name("tracking_manifest.json"), tracks_path.with_name("summary.json")):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def iter_track_evidence_records(tracks_path: Path) -> Iterable[tuple[int, dict[str, Any]]]:
+    with tracks_path.open(encoding="utf-8") as file:
+        for line in file:
+            if not line.strip():
+                continue
+            payload = json.loads(line)
+            if isinstance(payload.get("tracks"), list):
+                frame_index = int(payload["frame_index"])
+                for track in payload["tracks"]:
+                    if isinstance(track, dict):
+                        yield frame_index, track
+                continue
+            if isinstance(payload.get("observations"), list):
+                track_uid = payload.get("track_uid") or payload.get("track_id")
+                for observation in payload["observations"]:
+                    if not isinstance(observation, dict) or "frame_index" not in observation:
+                        continue
+                    frame_index = int(observation["frame_index"])
+                    yield frame_index, observation | {
+                        "status": payload.get("status"),
+                        "track_uid": track_uid,
+                    }
+                continue
+            if "frame_index" in payload and "bbox_xyxy" in payload:
+                yield int(payload["frame_index"]), payload
+
+
+def normalized_track_record(track_record: dict[str, Any], *, frame_index: int) -> dict[str, Any]:
+    return {
+        "anchor_frames": track_record.get("anchor_frames", []),
+        "bbox_xyxy": list(track_record.get("bbox_xyxy") or []),
+        "category": track_record.get("category"),
+        "frame_index": frame_index,
+        "provenance": track_record.get("provenance"),
+        "score": track_record.get("score"),
+        "source_candidate_ids": list(track_record.get("source_candidate_ids") or []),
+        "status": track_record.get("status"),
+        "track_id": track_record.get("track_id"),
+        "track_uid": track_record.get("track_uid") or track_record.get("track_id"),
+    }
+
+
+def max_safe_interpolation_gap_frames(evidence_manifest: dict[str, Any]) -> int:
+    summary = evidence_manifest.get("tracking_summary") or {}
+    if isinstance(summary.get("max_safe_interpolation_gap_frames"), int):
+        return int(summary["max_safe_interpolation_gap_frames"])
+    configuration = evidence_manifest.get("tracking_configuration") or {}
+    seconds = configuration.get("max_safe_interpolation_gap_seconds")
+    fps = evidence_manifest.get("nominal_fps") or 30.0
+    if isinstance(seconds, int | float) and isinstance(fps, int | float):
+        return max(1, int(math.floor(float(seconds) * float(fps))))
+    return 9
+
+
+def associate_source_target_tracks(
+    source: dict[str, Any],
+    manifest: dict[str, Any],
+    human_anchors: dict[str, list[tuple[int, list[int], str]]],
+) -> None:
+    source["target_association"] = {}
+    source["selected_tracks_by_benchmark"] = {}
+    benchmark_id = source.get("target_benchmark")
+    if not benchmark_id:
+        return
+    target = manifest["targets"][benchmark_id]
+    start, end = target["frozen_parent_frame_interval"]
+    anchors = human_anchors.get(str(benchmark_id), [])
+    tracks_by_uid = source.get("tracks_by_benchmark", {}).get(benchmark_id, {})
+    required_overlap = max(1, min(5, len(anchors)))
+    selected: set[str] = set()
+    track_audits = []
+    for track_uid, by_frame in sorted(tracks_by_uid.items()):
+        interval_frames = sorted(frame for frame in by_frame if int(start) <= frame <= int(end))
+        overlap_values = []
+        overlap_frames = []
+        for parent_frame, human_bbox, frame_id in anchors:
+            record = by_frame.get(parent_frame)
+            if record is None:
+                continue
+            candidate_bbox = record.get("bbox_xyxy")
+            if not isinstance(candidate_bbox, list) or len(candidate_bbox) != 4:
+                continue
+            value = bbox_iou(human_bbox, candidate_bbox)
+            overlap_values.append(value)
+            overlap_frames.append(
+                {
+                    "frame_id": frame_id,
+                    "human_bbox": human_bbox,
+                    "iou": round(value, 6),
+                    "parent_frame": parent_frame,
+                    "track_bbox": candidate_bbox,
+                }
+            )
+        if not interval_frames and not overlap_values:
+            continue
+        mean_iou = sum(overlap_values) / len(overlap_values) if overlap_values else 0.0
+        max_iou = max(overlap_values) if overlap_values else 0.0
+        min_iou = min(overlap_values) if overlap_values else 0.0
+        selected_reason = None
+        rejected_reason = None
+        if len(overlap_values) >= required_overlap and (mean_iou >= 0.15 or max_iou >= 0.45):
+            selected.add(str(track_uid))
+            selected_reason = "selected_by_human_anchor_overlap"
+        elif len(overlap_values) < required_overlap:
+            rejected_reason = "insufficient_human_anchor_overlap"
+        else:
+            rejected_reason = "insufficient_human_anchor_agreement"
+        statuses = Counter(str(record.get("status")) for record in by_frame.values())
+        provenances = Counter(str(record.get("provenance")) for record in by_frame.values())
+        track_audits.append(
+            {
+                "first_target_frame": interval_frames[0] if interval_frames else None,
+                "frame_count_in_target_interval": len(interval_frames),
+                "last_target_frame": interval_frames[-1] if interval_frames else None,
+                "max_iou_with_human_anchors": round(max_iou, 6),
+                "mean_iou_with_human_anchors": round(mean_iou, 6),
+                "min_iou_with_human_anchors": round(min_iou, 6),
+                "overlap_frame_count": len(overlap_values),
+                "overlap_frames": overlap_frames,
+                "provenance_counts": dict(sorted(provenances.items())),
+                "rejected_reason": rejected_reason,
+                "selected": str(track_uid) in selected,
+                "selected_reason": selected_reason,
+                "status_counts": dict(sorted(statuses.items())),
+                "track_uid": str(track_uid),
+            }
+        )
+    source["selected_tracks_by_benchmark"][benchmark_id] = selected
+    source["target_association"][benchmark_id] = {
+        "human_anchor_count": len(anchors),
+        "required_overlap": required_overlap,
+        "selected_track_uids": sorted(selected),
+        "track_audits": track_audits,
+    }
+
+
+def bbox_iou(a: list[int] | tuple[int, int, int, int], b: list[int] | tuple[int, int, int, int]) -> float:
+    ax1, ay1, ax2, ay2 = [int(value) for value in a]
+    bx1, by1, bx2, by2 = [int(value) for value in b]
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+    intersection = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+    if intersection == 0:
+        return 0.0
+    union = box_area([ax1, ay1, ax2, ay2]) + box_area([bx1, by1, bx2, by2]) - intersection
+    return intersection / union if union > 0 else 0.0
+
+
+def assisted_track_candidates_for_frame(
+    frame: dict[str, Any],
+    evidence: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    benchmark_id = str(frame["benchmark_id"])
+    parent_frame = int(frame["parent_frame"])
+    candidates = []
+    discarded = []
+    for source in evidence["sources"]:
+        if not source.get("usable"):
+            continue
+        selected_tracks = source.get("selected_tracks_by_benchmark", {}).get(benchmark_id, set())
+        tracks_by_uid = source.get("tracks_by_benchmark", {}).get(benchmark_id, {})
+        for track_uid in sorted(selected_tracks):
+            by_frame = tracks_by_uid.get(track_uid, {})
+            record = by_frame.get(parent_frame)
+            if record is None:
+                continue
+            candidate, rejection = assisted_candidate_from_track_record(
+                frame=frame,
+                source=source,
+                track_uid=track_uid,
+                by_frame=by_frame,
+                record=record,
+            )
+            if candidate is not None:
+                candidates.append(candidate)
+            elif rejection is not None:
+                discarded.append(rejection)
+    return candidates, discarded
+
+
+def assisted_candidate_from_track_record(
+    *,
+    frame: dict[str, Any],
+    source: dict[str, Any],
+    track_uid: str,
+    by_frame: dict[int, dict[str, Any]],
+    record: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    parent_frame = int(frame["parent_frame"])
+    provenance = str(record.get("provenance") or "")
+    status = str(record.get("status") or "")
+    bbox_value = list(record.get("bbox_xyxy") or [])
+    left_anchor = None
+    right_anchor = None
+    if status == TRACK_STATUS_ACCEPTED:
+        source_name = PROPOSAL_AUTOMATIC_TRACKER
+        quality = (
+            PROPOSAL_QUALITY_NEEDS_ADJUSTMENT
+            if provenance == TRACK_PROVENANCE_INTERPOLATION
+            else PROPOSAL_QUALITY_SAFE_TO_REVIEW
+        )
+        if provenance == TRACK_PROVENANCE_INTERPOLATION:
+            left_anchor, right_anchor = bounded_interpolation_anchors(
+                parent_frame,
+                by_frame=by_frame,
+                max_gap_frames=int(source.get("max_safe_interpolation_gap_frames", 9)),
+            )
+    elif provenance == TRACK_PROVENANCE_DETECTOR:
+        source_name = PROPOSAL_DIRECT_DETECTOR
+        quality = PROPOSAL_QUALITY_SAFE_TO_REVIEW
+    elif provenance == TRACK_PROVENANCE_INTERPOLATION:
+        left_anchor, right_anchor = bounded_interpolation_anchors(
+            parent_frame,
+            by_frame=by_frame,
+            max_gap_frames=int(source.get("max_safe_interpolation_gap_frames", 9)),
+        )
+        if left_anchor is None or right_anchor is None:
+            return None, discarded_candidate_audit(
+                bbox_value,
+                source=source,
+                track_uid=track_uid,
+                record=record,
+                rejection_reason="interpolation_not_bounded_by_trusted_detector_anchors",
+            )
+        source_name = PROPOSAL_BOUNDED_INTERPOLATION
+        quality = PROPOSAL_QUALITY_NEEDS_ADJUSTMENT
+    else:
+        return None, discarded_candidate_audit(
+            bbox_value,
+            source=source,
+            track_uid=track_uid,
+            record=record,
+            rejection_reason="unsupported_track_record_provenance",
+        )
+
+    qa_result = proposal_candidate_qa(
+        bbox_value,
+        frame=frame,
+        source=source,
+        by_frame=by_frame,
+        parent_frame=parent_frame,
+    )
+    if qa_result["status"] != "passed":
+        return None, discarded_candidate_audit(
+            bbox_value,
+            source=source,
+            track_uid=track_uid,
+            record=record,
+            rejection_reason=str(qa_result.get("reason") or "candidate_failed_qa"),
+            qa_result=qa_result,
+        )
+    if qa_result.get("needs_adjustment"):
+        quality = PROPOSAL_QUALITY_NEEDS_ADJUSTMENT
+    candidate = {
+        "anchor_frame_id": None,
+        "anchor_parent_frame": None,
+        "bbox_xyxy": qa_result["bbox_xyxy"],
+        "evidence_source_index": source["index"],
+        "evidence_source_path": source["path"],
+        "evidence_source_sha256": source["sha256"],
+        "left_anchor": left_anchor,
+        "model": source.get("manifest", {}).get("detector_id")
+        or source.get("manifest", {}).get("tracking_configuration_hash"),
+        "proposal_quality": quality,
+        "proposal_qa_result": qa_result | {"quality": quality},
+        "right_anchor": right_anchor,
+        "score": record.get("score"),
+        "source": source_name,
+        "source_detection_ids": list(record.get("source_candidate_ids") or []),
+        "source_track_id": record.get("track_id"),
+        "source_track_provenance": provenance,
+        "source_track_status": status,
+        "source_track_uid": track_uid,
+    }
+    return candidate, None
+
+
+def bounded_interpolation_anchors(
+    parent_frame: int,
+    *,
+    by_frame: dict[int, dict[str, Any]],
+    max_gap_frames: int,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    trusted_detector_frames = sorted(
+        frame_index
+        for frame_index, record in by_frame.items()
+        if str(record.get("provenance") or "") == TRACK_PROVENANCE_DETECTOR
+    )
+    left_frames = [frame_index for frame_index in trusted_detector_frames if frame_index < parent_frame]
+    right_frames = [frame_index for frame_index in trusted_detector_frames if frame_index > parent_frame]
+    if not left_frames or not right_frames:
+        return None, None
+    left_frame = left_frames[-1]
+    right_frame = right_frames[0]
+    if right_frame - left_frame - 1 > max_gap_frames:
+        return None, None
+    return track_anchor_audit(left_frame, by_frame[left_frame]), track_anchor_audit(
+        right_frame,
+        by_frame[right_frame],
+    )
+
+
+def track_anchor_audit(parent_frame: int, record: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "bbox_xyxy": record.get("bbox_xyxy"),
+        "parent_frame": parent_frame,
+        "provenance": record.get("provenance"),
+        "score": record.get("score"),
+        "source_detection_ids": list(record.get("source_candidate_ids") or []),
+    }
+
+
+def proposal_candidate_qa(
+    bbox_value: list[Any],
+    *,
+    frame: dict[str, Any],
+    source: dict[str, Any],
+    by_frame: dict[int, dict[str, Any]],
+    parent_frame: int,
+) -> dict[str, Any]:
+    try:
+        bbox = validate_bbox_xyxy(
+            bbox_value,
+            width=int(frame["frame_width"]),
+            height=int(frame["frame_height"]),
+        )
+    except ValueError as exc:
+        return {"reason": str(exc), "status": "rejected"}
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    aspect_ratio = width / height
+    area_fraction = box_area(bbox) / (int(frame["frame_width"]) * int(frame["frame_height"]))
+    bounds = source.get("qa_bounds") or {}
+    min_aspect = float(bounds.get("min_aspect_ratio", 0.7))
+    max_aspect = float(bounds.get("max_aspect_ratio", 8.0))
+    min_area = float(bounds.get("min_area_fraction", 4e-05))
+    max_area = float(bounds.get("max_area_fraction", 0.08))
+    if aspect_ratio < min_aspect or aspect_ratio > max_aspect:
+        return {
+            "aspect_ratio": round(aspect_ratio, 6),
+            "bbox_xyxy": bbox,
+            "reason": "aspect_ratio_outside_source_bounds",
+            "status": "rejected",
+        }
+    if area_fraction < min_area or area_fraction > max_area:
+        return {
+            "area_fraction": round(area_fraction, 8),
+            "bbox_xyxy": bbox,
+            "reason": "area_fraction_outside_source_bounds",
+            "status": "rejected",
+        }
+    neighbor_check = nearest_neighbor_motion_check(
+        bbox,
+        parent_frame=parent_frame,
+        by_frame=by_frame,
+        max_center_jump_norm=float(source.get("max_one_frame_center_jump_norm", 4.0)),
+    )
+    if neighbor_check["status"] != "passed":
+        return {
+            "bbox_xyxy": bbox,
+            "reason": neighbor_check["reason"],
+            "status": "rejected",
+        } | neighbor_check
+    scale_check = track_scale_quality_check(bbox, by_frame=by_frame)
+    return {
+        "area_fraction": round(area_fraction, 8),
+        "aspect_ratio": round(aspect_ratio, 6),
+        "bbox_xyxy": bbox,
+        "needs_adjustment": scale_check["needs_adjustment"],
+        "scale_check": scale_check,
+        "motion_check": neighbor_check,
+        "status": "passed",
+    }
+
+
+def track_scale_quality_check(
+    bbox: list[int],
+    *,
+    by_frame: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    widths = []
+    heights = []
+    areas = []
+    for record in by_frame.values():
+        candidate = record.get("bbox_xyxy")
+        if not isinstance(candidate, list) or len(candidate) != 4:
+            continue
+        width = int(candidate[2]) - int(candidate[0])
+        height = int(candidate[3]) - int(candidate[1])
+        if width <= 0 or height <= 0:
+            continue
+        widths.append(width)
+        heights.append(height)
+        areas.append(width * height)
+    if len(widths) < 6:
+        return {"needs_adjustment": False, "scale_check_reason": "insufficient_track_history"}
+    median_width = median_number(widths)
+    median_height = median_number(heights)
+    median_area = median_number(areas)
+    width = bbox[2] - bbox[0]
+    height = bbox[3] - bbox[1]
+    area = box_area(bbox)
+    width_ratio = width / max(1.0, median_width)
+    height_ratio = height / max(1.0, median_height)
+    area_ratio = area / max(1.0, median_area)
+    needs_adjustment = width_ratio > 1.8 or height_ratio > 1.8 or area_ratio > 2.75
+    return {
+        "area_ratio_to_track_median": round(area_ratio, 6),
+        "height_ratio_to_track_median": round(height_ratio, 6),
+        "needs_adjustment": needs_adjustment,
+        "scale_check_reason": "track_scale_outlier" if needs_adjustment else "within_track_scale_history",
+        "track_median_area": round(median_area, 6),
+        "track_median_height": round(median_height, 6),
+        "track_median_width": round(median_width, 6),
+        "width_ratio_to_track_median": round(width_ratio, 6),
+    }
+
+
+def median_number(values: list[int]) -> float:
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return float(ordered[middle])
+    return (ordered[middle - 1] + ordered[middle]) / 2.0
+
+
+def nearest_neighbor_motion_check(
+    bbox: list[int],
+    *,
+    parent_frame: int,
+    by_frame: dict[int, dict[str, Any]],
+    max_center_jump_norm: float,
+) -> dict[str, Any]:
+    neighbor_frames = sorted(frame for frame in by_frame if frame != parent_frame)
+    if not neighbor_frames:
+        return {"status": "passed", "reason": "single_observation_track"}
+    nearest_frame = sorted(neighbor_frames, key=lambda frame: (abs(frame - parent_frame), frame))[0]
+    frame_gap = abs(nearest_frame - parent_frame)
+    if frame_gap != 1:
+        return {"nearest_frame_gap": frame_gap, "status": "passed", "reason": "nearest_neighbor_not_adjacent"}
+    neighbor_bbox = by_frame[nearest_frame].get("bbox_xyxy")
+    if not isinstance(neighbor_bbox, list) or len(neighbor_bbox) != 4:
+        return {"nearest_frame_gap": frame_gap, "status": "passed", "reason": "nearest_neighbor_missing_bbox"}
+    distance = math.sqrt(squared_distance(center_xy(bbox), center_xy(neighbor_bbox)))
+    normalizer = max(
+        1,
+        bbox[2] - bbox[0],
+        bbox[3] - bbox[1],
+        int(neighbor_bbox[2]) - int(neighbor_bbox[0]),
+        int(neighbor_bbox[3]) - int(neighbor_bbox[1]),
+    )
+    center_jump_norm = distance / normalizer
+    if center_jump_norm > max_center_jump_norm:
+        return {
+            "center_jump_norm": round(center_jump_norm, 6),
+            "nearest_frame": nearest_frame,
+            "nearest_frame_gap": frame_gap,
+            "reason": "adjacent_frame_center_jump_outside_source_bounds",
+            "status": "rejected",
+        }
+    return {
+        "center_jump_norm": round(center_jump_norm, 6),
+        "nearest_frame": nearest_frame,
+        "nearest_frame_gap": frame_gap,
+        "status": "passed",
+    }
+
+
+def discarded_candidate_audit(
+    bbox: list[Any],
+    *,
+    source: dict[str, Any],
+    track_uid: str,
+    record: dict[str, Any],
+    rejection_reason: str,
+    qa_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "bbox_xyxy": bbox if isinstance(bbox, list) else None,
+        "evidence_source_path": source.get("path"),
+        "proposal_qa_result": qa_result or {"status": "rejected", "reason": rejection_reason},
+        "rejection_reason": rejection_reason,
+        "source_detection_ids": list(record.get("source_candidate_ids") or []),
+        "source_track_provenance": record.get("provenance"),
+        "source_track_status": record.get("status"),
+        "source_track_uid": track_uid,
+    }
+
+
+def public_evidence_source_audit(source: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "exists": source.get("exists"),
+        "manifest_path": source.get("manifest_path"),
+        "manifest_sha256": source.get("manifest_sha256"),
+        "path": source.get("path"),
+        "reason": source.get("reason"),
+        "sha256": source.get("sha256"),
+        "source_sha256": source.get("manifest", {}).get("source_sha256"),
+        "source_video": source.get("manifest", {}).get("source_video"),
+        "target_benchmark": source.get("target_benchmark"),
+        "usable": source.get("usable"),
+    }
+
+
+def proposal_candidate(
+    *,
+    bbox: list[int],
+    source: str,
+    anchor_frame_id: str,
+    anchor_parent_frame: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "anchor_frame_id": anchor_frame_id,
+        "anchor_parent_frame": anchor_parent_frame,
+        "bbox_xyxy": bbox,
+        "model": None if source == PROPOSAL_HUMAN_SEEDED else source,
+        "source": source,
+    }
+
+
+def proposal_priority(source: str) -> int:
+    priorities = {
+        PROPOSAL_AUTOMATIC_TRACKER: 0,
+        PROPOSAL_DIRECT_DETECTOR: 1,
+        PROPOSAL_BOUNDED_INTERPOLATION: 2,
+        PROPOSAL_HUMAN_MOTION: 3,
+        PROPOSAL_PRIVACY_ENVELOPE: 4,
+        PROPOSAL_HISTORICAL_DETECTOR: 50,
+        PROPOSAL_INTERPOLATED: 51,
+        PROPOSAL_HUMAN_SEEDED: 99,
+    }
+    return priorities.get(source, 99)
+
+
+def nearest_anchor(
+    anchors: list[tuple[int, list[int], str]],
+    parent_frame: int,
+) -> tuple[int, list[int], str] | None:
+    if not anchors:
+        return None
+    return sorted(anchors, key=lambda item: (abs(item[0] - parent_frame), item[0]))[0]
+
+
+def interpolated_draft(
+    anchors: list[tuple[int, list[int], str]],
+    parent_frame: int,
+) -> tuple[list[int], str, str] | None:
+    before = [anchor for anchor in anchors if anchor[0] <= parent_frame]
+    after = [anchor for anchor in anchors if anchor[0] >= parent_frame]
+    if not before or not after:
+        return None
+    left = sorted(before, key=lambda item: item[0])[-1]
+    right = sorted(after, key=lambda item: item[0])[0]
+    if left[0] == right[0]:
+        return list(left[1]), left[2], right[2]
+    weight = (parent_frame - left[0]) / (right[0] - left[0])
+    bbox = [
+        int(round(left[1][index] + (right[1][index] - left[1][index]) * weight))
+        for index in range(4)
+    ]
+    return bbox, left[2], right[2]
 
 
 def validate_plate_annotation_package(
@@ -404,7 +1550,10 @@ def validate_plate_annotation_package(
         if key in seen_for_benchmark:
             errors.append(f"duplicate frame mapping for {benchmark_id}: {key}")
         seen_for_benchmark.add(key)
-        for asset_key in ("crop", "context"):
+        asset_keys = ["crop", "context"]
+        if "full_frame" in frame:
+            asset_keys.append("full_frame")
+        for asset_key in asset_keys:
             asset = frame.get(asset_key)
             if not isinstance(asset, dict):
                 errors.append(f"{frame_id} missing {asset_key} asset")
@@ -416,6 +1565,11 @@ def validate_plate_annotation_package(
             expected_sha = asset.get("sha256")
             if expected_sha and media.sha256_file(path) != expected_sha:
                 errors.append(f"{frame_id} {asset_key} asset hash mismatch")
+            if asset_key == "full_frame":
+                if asset.get("width") != frame.get("frame_width") or asset.get("height") != frame.get(
+                    "frame_height"
+                ):
+                    errors.append(f"{frame_id} full_frame dimensions mismatch")
         crop = frame.get("crop") if isinstance(frame.get("crop"), dict) else {}
         roi = required.get("broad_search_roi_xyxy") or []
         if not isinstance(roi, list) or len(roi) != 4:
@@ -465,7 +1619,7 @@ def validate_plate_annotation_package(
         errors.append(f"unexpected annotation state for {len(extra_state)} frames")
 
     computed_progress = compute_progress(review_data, state)
-    if progress != computed_progress:
+    if normalized_progress_for_compare(progress, computed_progress) != computed_progress:
         errors.append("progress.json does not match annotation state")
     completion_errors = completed_export_completion_errors(computed_progress)
     gate_errors = list(errors) + completion_errors
@@ -634,6 +1788,38 @@ def completed_export_completion_errors(progress: dict[str, Any]) -> list[str]:
     return errors
 
 
+def normalized_progress_for_compare(
+    progress: dict[str, Any],
+    computed_progress: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(progress)
+    normalized["total"] = normalized_progress_row_for_compare(
+        progress.get("total"),
+        computed_progress.get("total"),
+    )
+    progress_by_benchmark = progress.get("by_benchmark") or {}
+    computed_by_benchmark = computed_progress.get("by_benchmark") or {}
+    if isinstance(progress_by_benchmark, dict) and isinstance(computed_by_benchmark, dict):
+        normalized_by_benchmark = {}
+        for benchmark_id, row in progress_by_benchmark.items():
+            normalized_by_benchmark[benchmark_id] = normalized_progress_row_for_compare(
+                row,
+                computed_by_benchmark.get(benchmark_id),
+            )
+        normalized["by_benchmark"] = normalized_by_benchmark
+    return normalized
+
+
+def normalized_progress_row_for_compare(row: Any, computed_row: Any) -> Any:
+    if not isinstance(row, dict) or not isinstance(computed_row, dict):
+        return row
+    normalized = dict(row)
+    for key in OPTIONAL_PROGRESS_ROW_KEYS:
+        if key not in normalized and key in computed_row:
+            normalized[key] = computed_row[key]
+    return normalized
+
+
 def summarize_plate_annotation_package(package_root: Path) -> dict[str, Any]:
     package_root = package_root.resolve()
     manifest = read_json(package_root / "package_manifest.json")
@@ -707,15 +1893,30 @@ def save_frame_annotation(
     now_utc = now_utc or media.utc_timestamp()
     review_note = str(payload.get("review_note", "")).strip()
     conflicts = normalize_conflicts(existing.get("conflicts", []))
+    proposal_bbox = existing.get("proposal_bbox") or existing.get("draft_bbox")
+    proposal_available = bool(existing.get("proposal_available", existing.get("draft_available")))
+    proposal_shown = bool(
+        existing.get("proposal_shown")
+        or existing.get("draft_shown")
+        or payload.get("proposal_shown")
+        or payload.get("draft_shown")
+        or payload.get("accept_draft")
+    )
     unresolved_temporal = [
         conflict
         for conflict in conflicts
         if conflict["type"] == "temporal_gt_conflict" and not conflict["resolved"]
     ]
     temporal_transition = "none"
+    accepted_without_geometry_change = False
+    human_adjusted_geometry = False
     if status == STATUS_REVIEWED_BOX:
         human_bbox = validate_bbox_xyxy(payload.get("human_bbox"), width=width, height=height)
         human_reviewed = True
+        if proposal_available and proposal_bbox is not None:
+            proposal_shown = True
+            accepted_without_geometry_change = human_bbox == proposal_bbox
+            human_adjusted_geometry = human_bbox != proposal_bbox
         if unresolved_temporal:
             temporal_transition = "resolved"
             for conflict in unresolved_temporal:
@@ -769,11 +1970,14 @@ def save_frame_annotation(
     )
 
     updated = existing | {
+        "accepted_without_geometry_change": accepted_without_geometry_change,
         "annotation_status": status,
         "conflicts": conflicts,
-        "draft_shown": bool(payload.get("draft_shown", existing.get("draft_shown", False))),
+        "draft_shown": proposal_shown,
         "human_bbox": human_bbox,
+        "human_adjusted_geometry": human_adjusted_geometry,
         "human_reviewed": human_reviewed,
+        "proposal_shown": proposal_shown,
         "review_note": review_note,
         "reviewed_at": now_utc if human_reviewed else None,
         "secondary_instances": secondary_instances,
@@ -792,16 +1996,24 @@ def save_frame_annotation(
         {
             "action": frame.get("action"),
             "annotation_status": status,
+            "accepted_without_geometry_change": accepted_without_geometry_change,
             "benchmark_id": frame.get("benchmark_id"),
             "dense_frame": frame.get("dense_frame"),
-            "event": "save_annotation",
+            "event": "accept_draft" if payload.get("accept_draft") else "save_annotation",
             "frame_id": frame_id,
             "human_bbox": human_bbox,
+            "human_adjusted_geometry": human_adjusted_geometry,
             "new_state_revision": new_revision,
             "new_status": status,
             "parent_frame": frame.get("parent_frame"),
             "previous_state_revision": previous_revision,
             "previous_status": existing.get("annotation_status"),
+            "proposal_available": proposal_available,
+            "proposal_bbox": proposal_bbox,
+            "proposal_quality": existing.get("proposal_quality"),
+            "proposal_model": existing.get("proposal_model") or existing.get("draft_model"),
+            "proposal_shown": proposal_shown,
+            "proposal_source": existing.get("proposal_source") or existing.get("draft_source"),
             "recorded_at_utc": now_utc,
             "review_note": review_note,
             "schema_version": "plate_annotation_change.v1",
@@ -811,6 +2023,36 @@ def save_frame_annotation(
         },
     )
     return {"frame": updated, "progress": progress, "state_revision": new_revision}
+
+
+def accept_draft_annotation(
+    package_root: Path,
+    frame_id: str,
+    *,
+    expected_state_revision: int | None = None,
+    now_utc: str | None = None,
+) -> dict[str, Any]:
+    state = read_json(package_root / "annotations.draft.json")
+    record = state.get("frames", {}).get(frame_id)
+    if not isinstance(record, dict):
+        raise ValueError(f"unknown frame_id: {frame_id}")
+    proposal_bbox = record.get("proposal_bbox") or record.get("draft_bbox")
+    if not record.get("proposal_available", record.get("draft_available")) or proposal_bbox is None:
+        raise ValueError("no proposal is available to accept")
+    return save_frame_annotation(
+        package_root,
+        frame_id,
+        {
+            "accept_draft": True,
+            "annotation_status": STATUS_REVIEWED_BOX,
+            "draft_shown": True,
+            "human_bbox": proposal_bbox,
+            "proposal_shown": True,
+            "review_note": record.get("review_note", ""),
+        },
+        expected_state_revision=expected_state_revision,
+        now_utc=now_utc,
+    )
 
 
 def mark_draft_shown(
@@ -827,8 +2069,9 @@ def mark_draft_shown(
     if frame_id not in state["frames"]:
         raise ValueError(f"unknown frame_id: {frame_id}")
     record = dict(state["frames"][frame_id])
-    if record["draft_available"]:
+    if record.get("proposal_available", record.get("draft_available")):
         record["draft_shown"] = True
+        record["proposal_shown"] = True
         state["frames"][frame_id] = record
         new_revision = next_state_revision(state)
         progress = compute_progress(review_data, state)
@@ -884,11 +2127,27 @@ def export_plate_annotation_review(
     records = [
         {
             "annotation_provenance": {
+                "accepted_without_geometry_change": state["frames"][frame["frame_id"]].get(
+                    "accepted_without_geometry_change", False
+                ),
                 "draft_available": state["frames"][frame["frame_id"]]["draft_available"],
                 "draft_model": state["frames"][frame["frame_id"]]["draft_model"],
                 "draft_shown": state["frames"][frame["frame_id"]]["draft_shown"],
                 "draft_source": state["frames"][frame["frame_id"]]["draft_source"],
+                "human_adjusted_geometry": state["frames"][frame["frame_id"]].get(
+                    "human_adjusted_geometry", False
+                ),
                 "human_reviewed": state["frames"][frame["frame_id"]]["human_reviewed"],
+                "proposal_available": state["frames"][frame["frame_id"]].get(
+                    "proposal_available", state["frames"][frame["frame_id"]]["draft_available"]
+                ),
+                "proposal_bbox": state["frames"][frame["frame_id"]].get("proposal_bbox"),
+                "proposal_model": state["frames"][frame["frame_id"]].get("proposal_model"),
+                "proposal_quality": state["frames"][frame["frame_id"]].get("proposal_quality"),
+                "proposal_shown": state["frames"][frame["frame_id"]].get(
+                    "proposal_shown", state["frames"][frame["frame_id"]]["draft_shown"]
+                ),
+                "proposal_source": state["frames"][frame["frame_id"]].get("proposal_source"),
                 "reviewed_at": state["frames"][frame["frame_id"]]["reviewed_at"],
             },
             "benchmark_id": frame["benchmark_id"],
@@ -940,40 +2199,35 @@ def export_plate_annotation_review(
 def compute_progress(review_data: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
     frame_records = review_data.get("frames") or []
     state_frames = state.get("frames") or {}
-    by_benchmark: dict[str, dict[str, int]] = {}
-    total = {
-        "additional_localizable_plate": 0,
-        "ambiguous_review_required": 0,
-        "draft_shown": 0,
-        "human_reviewed": 0,
-        "ignore_small": 0,
-        "mandatory": len(frame_records),
-        "needs_recheck": 0,
-        "reviewed_box": 0,
-        "temporal_gt_conflict": 0,
-        "unreviewed": 0,
-        "unresolved_ambiguous_secondary": 0,
-        "unresolved_temporal_gt_conflict": 0,
-    }
+    by_benchmark: dict[str, dict[str, Any]] = {}
+
+    def progress_row(*, mandatory: int = 0) -> dict[str, Any]:
+        return {
+            "additional_localizable_plate": 0,
+            "ambiguous_review_required": 0,
+            "draft_shown": 0,
+            "human_reviewed": 0,
+            "human_reviewed_total": 0,
+            "ignore_small": 0,
+            "mandatory": mandatory,
+            "needs_recheck": 0,
+            "no_proposal_remaining": 0,
+            "proposal_accepted_unchanged": 0,
+            "proposal_available_total": 0,
+            "proposal_human_adjusted": 0,
+            "proposal_source_breakdown": {},
+            "reviewed_box": 0,
+            "temporal_gt_conflict": 0,
+            "temporal_gt_conflicts": 0,
+            "unreviewed": 0,
+            "unresolved_ambiguous_secondary": 0,
+            "unresolved_temporal_gt_conflict": 0,
+        }
+
+    total = progress_row(mandatory=len(frame_records))
     for frame in frame_records:
         benchmark = frame["benchmark_id"]
-        row = by_benchmark.setdefault(
-            benchmark,
-            {
-                "additional_localizable_plate": 0,
-                "ambiguous_review_required": 0,
-                "draft_shown": 0,
-                "human_reviewed": 0,
-                "ignore_small": 0,
-                "mandatory": 0,
-                "needs_recheck": 0,
-                "reviewed_box": 0,
-                "temporal_gt_conflict": 0,
-                "unreviewed": 0,
-                "unresolved_ambiguous_secondary": 0,
-                "unresolved_temporal_gt_conflict": 0,
-            },
-        )
+        row = by_benchmark.setdefault(benchmark, progress_row())
         row["mandatory"] += 1
         record = state_frames.get(frame["frame_id"], {})
         status = record.get("annotation_status", STATUS_UNREVIEWED)
@@ -985,15 +2239,41 @@ def compute_progress(review_data: dict[str, Any], state: dict[str, Any]) -> dict
             total["needs_recheck"] += 1
         elif status == STATUS_TEMPORAL_GT_CONFLICT:
             row["temporal_gt_conflict"] += 1
+            row["temporal_gt_conflicts"] += 1
             row["unresolved_temporal_gt_conflict"] += 1
             total["temporal_gt_conflict"] += 1
+            total["temporal_gt_conflicts"] += 1
             total["unresolved_temporal_gt_conflict"] += 1
         else:
             row["unreviewed"] += 1
             total["unreviewed"] += 1
+
         if record.get("human_reviewed"):
             row["human_reviewed"] += 1
+            row["human_reviewed_total"] += 1
             total["human_reviewed"] += 1
+            total["human_reviewed_total"] += 1
+
+        proposal_available = bool(record.get("proposal_available", record.get("draft_available")))
+        if proposal_available:
+            row["proposal_available_total"] += 1
+            total["proposal_available_total"] += 1
+            source = str(record.get("proposal_source") or record.get("draft_source") or "unknown")
+            row_sources = row["proposal_source_breakdown"]
+            total_sources = total["proposal_source_breakdown"]
+            row_sources[source] = row_sources.get(source, 0) + 1
+            total_sources[source] = total_sources.get(source, 0) + 1
+        elif status != STATUS_REVIEWED_BOX:
+            row["no_proposal_remaining"] += 1
+            total["no_proposal_remaining"] += 1
+
+        if record.get("accepted_without_geometry_change"):
+            row["proposal_accepted_unchanged"] += 1
+            total["proposal_accepted_unchanged"] += 1
+        if record.get("human_adjusted_geometry"):
+            row["proposal_human_adjusted"] += 1
+            total["proposal_human_adjusted"] += 1
+
         if record.get("draft_shown"):
             row["draft_shown"] += 1
             total["draft_shown"] += 1
@@ -1002,9 +2282,12 @@ def compute_progress(review_data: dict[str, Any], state: dict[str, Any]) -> dict
                 if conflict.get("type") != "temporal_gt_conflict" or conflict.get("resolved"):
                     continue
                 row["temporal_gt_conflict"] += 1
-                total["temporal_gt_conflict"] += 1
+                row["temporal_gt_conflicts"] += 1
                 row["unresolved_temporal_gt_conflict"] += 1
+                total["temporal_gt_conflict"] += 1
+                total["temporal_gt_conflicts"] += 1
                 total["unresolved_temporal_gt_conflict"] += 1
+
         for secondary in record.get("secondary_instances") or []:
             kind = secondary.get("kind")
             if kind in {SECONDARY_ADDITIONAL, SECONDARY_IGNORE_SMALL, SECONDARY_AMBIGUOUS}:
@@ -1293,6 +2576,7 @@ def _build_into_temp_root(
     final_package_root: Path,
     targets: tuple[PlateTargetConfig, ...],
     certified_config_version: str,
+    annotation_mode: str = ANNOTATION_MODE_MANUAL,
     include_drafts: bool,
     draft_path: Path,
     draft_mapping_audit_path: Path,
@@ -1328,6 +2612,7 @@ def _build_into_temp_root(
         git_commit=git_commit,
         repo_root=repo_root,
         certified_config_version=certified_config_version,
+        annotation_mode=annotation_mode,
     )
     review_data = {
         "frame_count": len(frame_records),
@@ -1489,14 +2774,27 @@ def write_frame_assets(
             parent_frame=parent_frame,
         )
     )
+    full_rel = (
+        Path("frames")
+        / target.benchmark_id
+        / FRAME_ASSET_NAME_TEMPLATE.format(
+            benchmark=target.benchmark_id,
+            extension="jpg",
+            kind="full",
+            parent_frame=parent_frame,
+        )
+    )
     crop_path = package_root / crop_rel
     context_path = package_root / context_rel
+    full_path = package_root / full_rel
     benchmark_dir.mkdir(parents=True, exist_ok=True)
     if not cv.imwrite(str(crop_path), crop, [cv.IMWRITE_PNG_COMPRESSION, 3]):
         raise ValueError(f"could not write crop frame: {crop_path}")
     context = context_image(frame)
     if not cv.imwrite(str(context_path), context, [cv.IMWRITE_JPEG_QUALITY, 88]):
         raise ValueError(f"could not write context frame: {context_path}")
+    if not cv.imwrite(str(full_path), frame, [cv.IMWRITE_JPEG_QUALITY, 92]):
+        raise ValueError(f"could not write full frame: {full_path}")
     dense_frame = parent_frame + target.dense_frame_offset
     fps_value = rational_to_float(str(media_record["fps"]))
     return {
@@ -1524,6 +2822,12 @@ def write_frame_assets(
         "frame_height": height,
         "frame_id": f"{target.benchmark_id}_{parent_frame:06d}",
         "frame_width": width,
+        "full_frame": {
+            "height": height,
+            "path": full_rel.as_posix(),
+            "sha256": media.sha256_file(full_path),
+            "width": width,
+        },
         "object_type": target.object_type,
         "parent_frame": parent_frame,
         "source_frame_sha256_bgr24": hashlib.sha256(frame.tobytes()).hexdigest(),
@@ -1561,8 +2865,10 @@ def build_manifest(
     git_commit: str | None,
     repo_root: Path,
     certified_config_version: str,
+    annotation_mode: str = ANNOTATION_MODE_MANUAL,
 ) -> dict[str, Any]:
     return {
+        "annotation_mode": annotation_mode,
         "certified_config_version": certified_config_version,
         "created_at_utc": media.utc_timestamp(),
         "excluded_inputs": [
@@ -1858,7 +3164,9 @@ def initial_state_for_frames(
     for frame in frame_records:
         draft_entry = frame_drafts.get(frame["frame_id"], {})
         main_candidate = draft_entry.get("main_candidate")
+        proposal_source = PROPOSAL_HISTORICAL_DETECTOR if main_candidate else None
         state_frames[frame["frame_id"]] = {
+            "accepted_without_geometry_change": False,
             "annotation_status": STATUS_UNREVIEWED,
             "benchmark_id": frame["benchmark_id"],
             "conflicts": [],
@@ -1873,8 +3181,18 @@ def initial_state_for_frames(
             "draft_source": draft_import.get("source", {}).get("path") if main_candidate else None,
             "frame_id": frame["frame_id"],
             "human_bbox": None,
+            "human_adjusted_geometry": False,
             "human_reviewed": False,
             "parent_frame": frame["parent_frame"],
+            "proposal_available": main_candidate is not None,
+            "proposal_bbox": main_candidate.get("bbox_xyxy") if main_candidate else None,
+            "proposal_candidates": draft_entry.get("candidates", []),
+            "proposal_model": ",".join(draft_import.get("source_finalists") or [])
+            if main_candidate
+            else None,
+            "proposal_quality": None,
+            "proposal_shown": False,
+            "proposal_source": proposal_source,
             "review_note": "",
             "reviewed_at": None,
             "secondary_instances": [],
@@ -1936,6 +3254,8 @@ def _validate_state_record(
             )
         if record.get("draft_bbox") is not None:
             validate_bbox_xyxy(record.get("draft_bbox"), width=width, height=height)
+        if record.get("proposal_bbox") is not None:
+            validate_bbox_xyxy(record.get("proposal_bbox"), width=width, height=height)
         normalize_secondary_instances(
             record.get("secondary_instances", []),
             frame_id=str(record.get("frame_id") or context),
@@ -2011,10 +3331,18 @@ note.
 
 The broad ROI is search-only metadata. It is never a target box.
 
+## Full-Frame Review
+
+Review from the full source frame. The crop and QA ROI overlay are search aids only; saved boxes are
+always original-frame coordinates. It is valid to draw outside the QA ROI when the physical plate
+panel is visible there.
+
 ## Draft Policy
 
-Imported proposals are hidden by default. Showing a proposal records `draft_shown=true`, and a
-saved human box remains separate from any proposal box. Proposals never increase reviewed counts.
+Imported proposals remain separate from human boxes. In assisted packages, a proposal may be shown
+automatically for unreviewed frames and accepted with no geometry change or adjusted before saving.
+Showing a proposal records `draft_shown=true`/`proposal_shown=true`; proposals never increase
+reviewed counts until the human saves or accepts a box.
 
 ## Secondary Instances
 
@@ -2055,6 +3383,8 @@ def report_markdown(
 
 Package ID: `{manifest['package_id']}`
 
+Annotation mode: `{manifest.get('annotation_mode', ANNOTATION_MODE_MANUAL)}`
+
 Status: `{progress['reviewer_completion_state']['state']}`
 
 ## Targets
@@ -2067,6 +3397,10 @@ Status: `{progress['reviewer_completion_state']['state']}`
 - Needs recheck: {progress['total']['needs_recheck']}
 - Temporal conflicts: {progress['total']['unresolved_temporal_gt_conflict']}
 - Ambiguous secondary records: {progress['total']['unresolved_ambiguous_secondary']}
+- Proposal frames: {progress['total'].get('proposal_available_total', 0)}
+- Accepted unchanged: {progress['total'].get('proposal_accepted_unchanged', 0)}
+- Human-adjusted proposals: {progress['total'].get('proposal_human_adjusted', 0)}
+- Frames without proposal: {progress['total'].get('no_proposal_remaining', 0)}
 
 ## Drafts
 
@@ -2099,25 +3433,31 @@ def index_html() -> str:
           <option value="needs_recheck">Needs Recheck</option>
           <option value="temporal_gt_conflict">Temporal GT Conflict</option>
         </select>
+        <button id="acceptDraft" title="Accept the visible proposal and advance">Accept Draft + Next</button>
         <button id="save" title="Save current frame">Save</button>
         <button id="saveNext" title="Save and advance">Save+Next</button>
         <button id="reset" title="Clear box">Reset</button>
-        <label>Draft <input id="showDraft" type="checkbox"></label>
-        <label>Zoom <input id="zoom" type="range" min="1" max="4" step="0.25" value="1"></label>
+        <button id="fitFrame" title="Fit the whole source frame">Fit Frame</button>
+        <button id="fitTarget" title="Fit the active box or proposal">Fit Draft</button>
+        <label>Proposal <input id="showDraft" type="checkbox"></label>
+        <label>QA ROI <input id="showRoi" type="checkbox" checked></label>
+        <label>Zoom <input id="zoom" type="range" min="0.2" max="8" step="0.05" value="1"></label>
       </section>
       <section class="meta">
         <div id="frameTitle"></div>
         <div id="progress"></div>
         <div id="saveState"></div>
+        <div id="proposalBanner" class="proposalBanner"></div>
+        <div class="shortcuts">A/Enter accept, S save+next, arrows move, F fit frame, D fit draft, R recheck</div>
       </section>
       <section class="workspace">
-        <figure>
-          <img id="context" alt="Full-frame context">
-          <figcaption>Context</figcaption>
-        </figure>
         <div class="canvasWrap">
           <canvas id="cropCanvas"></canvas>
         </div>
+        <aside class="contextPane">
+          <img id="context" alt="Frame context">
+          <pre id="boxReadout"></pre>
+        </aside>
       </section>
       <section class="details">
         <label>Notes <textarea id="note" rows="3"></textarea></label>
@@ -2146,7 +3486,7 @@ def style_css() -> str:
 }
 body {
   margin: 0;
-  background: #f5f7fb;
+  background: #eef1f5;
   color: #17202a;
 }
 .shell {
@@ -2162,6 +3502,9 @@ body {
   flex-wrap: wrap;
   gap: 8px;
 }
+.meta {
+  justify-content: space-between;
+}
 button,
 select,
 input,
@@ -2175,16 +3518,17 @@ button {
   background: #fff;
   cursor: pointer;
 }
+button:disabled {
+  color: #7c8797;
+  cursor: not-allowed;
+}
 button:hover {
   background: #eef4ff;
 }
 .workspace {
   display: grid;
   gap: 12px;
-  grid-template-columns: minmax(280px, 35vw) 1fr;
-}
-figure {
-  margin: 0;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 18vw);
 }
 #context {
   background: #202734;
@@ -2192,18 +3536,31 @@ figure {
   max-width: 100%;
 }
 .canvasWrap {
-  background: #202734;
-  overflow: auto;
-  padding: 8px;
+  background: #111820;
+  border: 1px solid #0e141b;
+  border-radius: 8px;
+  height: calc(100vh - 250px);
+  min-height: 440px;
+  overflow: hidden;
 }
 #cropCanvas {
+  display: block;
   image-rendering: auto;
+  touch-action: none;
 }
 #frameTitle {
   font-weight: 700;
 }
 #saveState {
   color: #42526e;
+}
+.shortcuts {
+  color: #556274;
+  font-size: 13px;
+}
+.proposalBanner {
+  color: #8a5200;
+  font-weight: 700;
 }
 textarea {
   min-width: min(680px, 100%);
@@ -2222,23 +3579,46 @@ pre {
   padding: 8px;
   width: 100%;
 }
+.contextPane {
+  display: grid;
+  gap: 8px;
+  grid-template-rows: auto 1fr;
+  min-width: 0;
+}
+#boxReadout {
+  min-height: 160px;
+}
 @media (max-width: 840px) {
   .workspace {
     grid-template-columns: 1fr;
+  }
+  .canvasWrap {
+    height: 54vh;
+    min-height: 320px;
+  }
+  .contextPane {
+    grid-template-columns: minmax(120px, 36vw) 1fr;
+    grid-template-rows: auto;
   }
 }
 """
 
 
 def app_js() -> str:
-    return """const state = {
+    return """const STATUS_REVIEWED = "reviewed_box";
+const STATUS_RECHECK = "needs_recheck";
+const STATUS_UNREVIEWED = "unreviewed";
+
+const state = {
   annotations: null,
+  box: null,
   drag: null,
   frames: [],
   image: new Image(),
   index: 0,
-  box: null,
   secondary: [],
+  showProposal: false,
+  viewport: { offsetX: 0, offsetY: 0, scale: 1 },
 };
 
 const el = (id) => document.getElementById(id);
@@ -2247,10 +3627,17 @@ const ctx = canvas.getContext("2d");
 
 async function jsonFetch(url, options = {}) {
   const response = await fetch(url, options);
+  const text = await response.text();
   if (!response.ok) {
-    throw new Error(await response.text());
+    let message = text;
+    try {
+      message = JSON.parse(text).error || text;
+    } catch {}
+    const error = new Error(message || response.statusText);
+    error.status = response.status;
+    throw error;
   }
-  return response.json();
+  return text ? JSON.parse(text) : {};
 }
 
 async function load() {
@@ -2270,51 +3657,40 @@ async function load() {
 function bind() {
   el("prev").onclick = () => renderFrame(Math.max(0, state.index - 1));
   el("next").onclick = () => renderFrame(Math.min(state.frames.length - 1, state.index + 1));
+  el("acceptDraft").onclick = () => acceptDraft(true);
   el("save").onclick = () => save(false);
   el("saveNext").onclick = () => save(true);
   el("reset").onclick = () => {
     state.box = null;
+    el("status").value = STATUS_UNREVIEWED;
     draw();
   };
+  el("fitFrame").onclick = fitFrame;
+  el("fitTarget").onclick = fitTarget;
+  el("showRoi").onchange = draw;
   el("jump").onchange = () => {
     const nextIndex = Math.max(0, Math.min(state.frames.length - 1, Number(el("jump").value) - 1));
     renderFrame(nextIndex);
   };
-  el("zoom").oninput = draw;
+  el("zoom").oninput = () => zoomTo(Number(el("zoom").value));
   el("showDraft").onchange = async () => {
-    const frame = currentFrame();
-    if (el("showDraft").checked && frameState().draft_available) {
-      try {
-        const result = await jsonFetch("/api/drafts/shown", {
-          body: JSON.stringify({
-            expected_state_revision: state.annotations.state_revision,
-            frame_id: frame.frame_id,
-          }),
-          headers: { "Content-Type": "application/json" },
-          method: "POST",
-        });
-        state.annotations.frames[frame.frame_id] = result.frame;
-        state.annotations.state_revision = result.state_revision;
-      } catch {}
-    }
+    state.showProposal = el("showDraft").checked;
+    if (state.showProposal) await markProposalShown();
+    updateButtons();
     draw();
   };
   el("addSecondary").onclick = addSecondary;
-  canvas.onmousedown = pointerDown;
-  canvas.onmousemove = pointerMove;
-  canvas.onmouseup = pointerUp;
-  window.onkeydown = (event) => {
-    if (event.key === "ArrowLeft") renderFrame(Math.max(0, state.index - 1));
-    if (event.key === "ArrowRight") renderFrame(Math.min(state.frames.length - 1, state.index + 1));
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
-      event.preventDefault();
-      save(false);
-    }
-    if (event.key === "Delete" || event.key === "Backspace") {
-      state.box = null;
-      draw();
-    }
-  };
+  canvas.addEventListener("mousedown", pointerDown);
+  canvas.addEventListener("mousemove", pointerMove);
+  canvas.addEventListener("mouseup", pointerUp);
+  canvas.addEventListener("mouseleave", pointerUp);
+  canvas.addEventListener("wheel", onWheel, { passive: false });
+  canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+  window.addEventListener("resize", () => {
+    resizeCanvas();
+    draw();
+  });
+  window.addEventListener("keydown", onKeyDown);
 }
 
 function currentFrame() {
@@ -2325,88 +3701,252 @@ function frameState() {
   return state.annotations.frames[currentFrame().frame_id];
 }
 
+function proposalBox() {
+  const annotation = frameState();
+  return annotation.proposal_bbox || annotation.draft_bbox || null;
+}
+
+function hasProposal() {
+  const annotation = frameState();
+  return Boolean(annotation.proposal_available ?? annotation.draft_available) && proposalBox();
+}
+
+function proposalNeedsAdjustment() {
+  const quality = frameState().proposal_quality || "";
+  return quality === "needs_human_adjustment" || quality === "needs_manual_start";
+}
+
 function renderFrame(index) {
   state.index = index;
   const frame = currentFrame();
   const annotation = frameState();
   state.box = annotation.human_bbox ? annotation.human_bbox.slice() : null;
   state.secondary = (annotation.secondary_instances || []).map((item) => ({ ...item }));
+  state.showProposal = hasProposal() && annotation.annotation_status !== STATUS_REVIEWED;
   el("context").src = frame.context.path;
   el("status").value = annotation.annotation_status;
   el("note").value = annotation.review_note || "";
-  el("showDraft").checked = false;
+  el("showDraft").checked = state.showProposal;
+  el("showDraft").disabled = !hasProposal();
   el("jump").value = index + 1;
   el("frameTitle").textContent = `${frame.benchmark_id} ${frame.target_id} parent ${frame.parent_frame} dense ${frame.dense_frame} time ${frame.timestamp_seconds}s`;
   el("secondaryList").textContent = JSON.stringify(state.secondary, null, 2);
-  state.image.onload = draw;
-  state.image.src = frame.crop.path;
+  const fullFrame = frame.full_frame || frame.context;
+  state.image.onload = () => {
+    resizeCanvas();
+    if (state.showProposal && proposalBox()) {
+      fitTarget();
+    } else {
+      fitFrame();
+    }
+  };
+  state.image.src = fullFrame.path;
   updateProgress();
+  updateButtons();
+  updateReadout();
 }
 
 function updateProgress() {
   const frames = Object.values(state.annotations.frames);
-  const reviewed = frames.filter((item) => item.annotation_status === "reviewed_box").length;
-  el("progress").textContent = `${reviewed} / ${frames.length} reviewed`;
+  const reviewed = frames.filter((item) => item.annotation_status === STATUS_REVIEWED).length;
+  const accepted = frames.filter((item) => item.accepted_without_geometry_change).length;
+  const adjusted = frames.filter((item) => item.human_adjusted_geometry).length;
+  el("progress").textContent = `${reviewed} / ${frames.length} reviewed; ${accepted} accepted; ${adjusted} adjusted`;
 }
 
-function cropScale() {
-  return Number(el("zoom").value);
+function updateButtons() {
+  const available = hasProposal();
+  el("acceptDraft").disabled = !available || frameState().annotation_status === STATUS_REVIEWED;
+  el("proposalBanner").textContent =
+    available && frameState().annotation_status !== STATUS_REVIEWED
+      ? (proposalNeedsAdjustment() ? "PROPOSAL NEEDS ADJUSTMENT" : "PROPOSAL - NOT YET REVIEWED")
+      : "";
+  el("fitTarget").textContent = state.box ? "Fit Box" : "Fit Draft";
+  el("fitTarget").disabled = !state.box && !available;
+}
+
+function resizeCanvas() {
+  const wrap = canvas.parentElement;
+  const rect = wrap.getBoundingClientRect();
+  canvas.width = Math.max(320, Math.floor(rect.width));
+  canvas.height = Math.max(240, Math.floor(rect.height));
+}
+
+function fitFrame() {
+  const frame = currentFrame();
+  const scale = Math.min(canvas.width / frame.frame_width, canvas.height / frame.frame_height);
+  state.viewport.scale = clamp(scale, 0.05, 16);
+  state.viewport.offsetX = (canvas.width - frame.frame_width * state.viewport.scale) / 2;
+  state.viewport.offsetY = (canvas.height - frame.frame_height * state.viewport.scale) / 2;
+  syncZoom();
+  draw();
+}
+
+function fitTarget() {
+  const box = state.box || proposalBox();
+  if (!box) {
+    fitFrame();
+    return;
+  }
+  const frame = currentFrame();
+  const boxWidth = Math.max(1, box[2] - box[0]);
+  const boxHeight = Math.max(1, box[3] - box[1]);
+  const pad = Math.max(36, boxWidth * 2.2, boxHeight * 2.2);
+  const x1 = clamp(box[0] - pad, 0, frame.frame_width);
+  const y1 = clamp(box[1] - pad, 0, frame.frame_height);
+  const x2 = clamp(box[2] + pad, 0, frame.frame_width);
+  const y2 = clamp(box[3] + pad, 0, frame.frame_height);
+  const scale = Math.min(canvas.width / Math.max(1, x2 - x1), canvas.height / Math.max(1, y2 - y1));
+  state.viewport.scale = clamp(scale, 0.05, 16);
+  state.viewport.offsetX = canvas.width / 2 - ((x1 + x2) / 2) * state.viewport.scale;
+  state.viewport.offsetY = canvas.height / 2 - ((y1 + y2) / 2) * state.viewport.scale;
+  syncZoom();
+  draw();
+}
+
+function zoomTo(nextScale) {
+  const center = { x: canvas.width / 2, y: canvas.height / 2 };
+  const original = screenToOriginalFloat(center.x, center.y);
+  state.viewport.scale = clamp(nextScale, 0.05, 16);
+  state.viewport.offsetX = center.x - original.x * state.viewport.scale;
+  state.viewport.offsetY = center.y - original.y * state.viewport.scale;
+  draw();
+}
+
+function syncZoom() {
+  el("zoom").value = String(clamp(state.viewport.scale, Number(el("zoom").min), Number(el("zoom").max)));
+}
+
+function onWheel(event) {
+  event.preventDefault();
+  const point = pointerScreen(event);
+  const original = screenToOriginalFloat(point.x, point.y);
+  const factor = event.deltaY < 0 ? 1.12 : 0.89;
+  state.viewport.scale = clamp(state.viewport.scale * factor, 0.05, 16);
+  state.viewport.offsetX = point.x - original.x * state.viewport.scale;
+  state.viewport.offsetY = point.y - original.y * state.viewport.scale;
+  syncZoom();
+  draw();
 }
 
 function draw() {
-  if (!state.image.complete) return;
-  const zoom = cropScale();
-  canvas.width = state.image.naturalWidth * zoom;
-  canvas.height = state.image.naturalHeight * zoom;
-  ctx.drawImage(state.image, 0, 0, canvas.width, canvas.height);
+  if (!state.image.complete || !state.image.naturalWidth) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#111820";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
   const frame = currentFrame();
-  if (el("showDraft").checked && frameState().draft_bbox) {
-    drawOriginalBox(frameState().draft_bbox, "rgba(255, 204, 0, 0.95)", [8, 6]);
-  }
+  ctx.drawImage(
+    state.image,
+    state.viewport.offsetX,
+    state.viewport.offsetY,
+    frame.frame_width * state.viewport.scale,
+    frame.frame_height * state.viewport.scale,
+  );
+  if (el("showRoi").checked) drawOriginalBox(frame.crop.origin_xy.concat([frame.crop.origin_xy[0] + frame.crop.width, frame.crop.origin_xy[1] + frame.crop.height]), "rgba(255, 255, 255, 0.6)", [5, 6], 1);
+  if (state.showProposal && proposalBox()) drawOriginalBox(proposalBox(), "rgba(255, 184, 64, 0.98)", [9, 6], 3);
   for (const item of state.secondary) {
-    if (item.bbox_xyxy) drawOriginalBox(item.bbox_xyxy, "rgba(0, 180, 130, 0.95)", []);
+    if (item.bbox_xyxy) drawOriginalBox(item.bbox_xyxy, "rgba(0, 190, 140, 0.98)", [2, 5], 2);
   }
-  if (state.box) drawOriginalBox(state.box, "rgba(35, 120, 255, 0.98)", []);
+  if (state.box) {
+    drawOriginalBox(state.box, "rgba(64, 145, 255, 1)", [], 3);
+    drawHandles(state.box);
+  }
+  updateReadout();
 }
 
-function drawOriginalBox(box, color, dash) {
-  const frame = currentFrame();
-  const ox = frame.crop.origin_xy[0];
-  const oy = frame.crop.origin_xy[1];
-  const zoom = cropScale();
+function drawOriginalBox(box, color, dash, lineWidth) {
+  const left = originalToScreen(box[0], box[1]);
+  const right = originalToScreen(box[2], box[3]);
   ctx.save();
   ctx.strokeStyle = color;
-  ctx.lineWidth = 2;
+  ctx.lineWidth = lineWidth;
   ctx.setLineDash(dash);
-  ctx.strokeRect((box[0] - ox) * zoom, (box[1] - oy) * zoom, (box[2] - box[0]) * zoom, (box[3] - box[1]) * zoom);
+  ctx.strokeRect(left.x, left.y, right.x - left.x, right.y - left.y);
   ctx.restore();
 }
 
-function pointerPosition(event) {
+function drawHandles(box) {
+  const points = [
+    originalToScreen(box[0], box[1]),
+    originalToScreen(box[2], box[1]),
+    originalToScreen(box[0], box[3]),
+    originalToScreen(box[2], box[3]),
+  ];
+  ctx.save();
+  ctx.fillStyle = "#ffffff";
+  ctx.strokeStyle = "#286edb";
+  for (const point of points) {
+    ctx.beginPath();
+    ctx.rect(point.x - 4, point.y - 4, 8, 8);
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+function pointerScreen(event) {
   const rect = canvas.getBoundingClientRect();
   return {
-    x: (event.clientX - rect.left) / cropScale(),
-    y: (event.clientY - rect.top) / cropScale(),
+    x: (event.clientX - rect.left) * (canvas.width / rect.width),
+    y: (event.clientY - rect.top) * (canvas.height / rect.height),
   };
 }
 
-function cropToOriginal(point) {
-  const crop = currentFrame().crop;
-  return [Math.round(point.x + crop.origin_xy[0]), Math.round(point.y + crop.origin_xy[1])];
+function screenToOriginalFloat(x, y) {
+  return {
+    x: (x - state.viewport.offsetX) / state.viewport.scale,
+    y: (y - state.viewport.offsetY) / state.viewport.scale,
+  };
+}
+
+function screenToOriginal(x, y) {
+  const frame = currentFrame();
+  const point = screenToOriginalFloat(x, y);
+  return [
+    Math.round(clamp(point.x, 0, frame.frame_width)),
+    Math.round(clamp(point.y, 0, frame.frame_height)),
+  ];
+}
+
+function originalToScreen(x, y) {
+  return {
+    x: x * state.viewport.scale + state.viewport.offsetX,
+    y: y * state.viewport.scale + state.viewport.offsetY,
+  };
 }
 
 function pointerDown(event) {
-  const [x, y] = cropToOriginal(pointerPosition(event));
+  const screen = pointerScreen(event);
+  if (event.button === 1 || event.button === 2 || event.shiftKey || event.altKey) {
+    state.drag = {
+      mode: "pan",
+      offset: { ...state.viewport },
+      screenStart: screen,
+    };
+    return;
+  }
+  const [x, y] = screenToOriginal(screen.x, screen.y);
+  if (!state.box && state.showProposal && proposalBox() && hitTestBox(proposalBox(), x, y)) {
+    state.box = proposalBox().slice();
+    el("status").value = STATUS_REVIEWED;
+  }
   state.drag = {
     mode: dragModeForPoint(x, y),
-    start: [x, y],
     original: state.box ? state.box.slice() : null,
+    start: [x, y],
   };
 }
 
 function pointerMove(event) {
   if (!state.drag) return;
-  const [x, y] = cropToOriginal(pointerPosition(event));
+  const screen = pointerScreen(event);
+  if (state.drag.mode === "pan") {
+    state.viewport.offsetX = state.drag.offset.offsetX + screen.x - state.drag.screenStart.x;
+    state.viewport.offsetY = state.drag.offset.offsetY + screen.y - state.drag.screenStart.y;
+    draw();
+    return;
+  }
+  const [x, y] = screenToOriginal(screen.x, screen.y);
   const start = state.drag.start;
   if (state.drag.mode === "move" && state.drag.original) {
     const dx = x - start[0];
@@ -2422,34 +3962,34 @@ function pointerMove(event) {
   } else {
     state.box = normalizeBox([start[0], start[1], x, y]);
   }
+  if (state.box) el("status").value = STATUS_REVIEWED;
+  updateButtons();
   draw();
 }
 
 function pointerUp() {
+  if (state.box && (state.box[2] - state.box[0] < 2 || state.box[3] - state.box[1] < 2)) {
+    state.box = null;
+  }
   state.drag = null;
+  draw();
 }
 
 function normalizeBox(box) {
   const frame = currentFrame();
-  const crop = frame.crop;
-  const x1 = Math.max(crop.origin_xy[0], Math.min(box[0], box[2]));
-  const y1 = Math.max(crop.origin_xy[1], Math.min(box[1], box[3]));
-  const x2 = Math.min(crop.origin_xy[0] + crop.width, Math.max(box[0], box[2]));
-  const y2 = Math.min(crop.origin_xy[1] + crop.height, Math.max(box[1], box[3]));
-  return [x1, y1, x2, y2];
+  const x1 = clamp(Math.min(box[0], box[2]), 0, frame.frame_width);
+  const y1 = clamp(Math.min(box[1], box[3]), 0, frame.frame_height);
+  const x2 = clamp(Math.max(box[0], box[2]), 0, frame.frame_width);
+  const y2 = clamp(Math.max(box[1], box[3]), 0, frame.frame_height);
+  return [Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2)];
 }
 
 function clampBox(box) {
   const frame = currentFrame();
-  const crop = frame.crop;
-  const width = box[2] - box[0];
-  const height = box[3] - box[1];
-  const minX = crop.origin_xy[0];
-  const minY = crop.origin_xy[1];
-  const maxX = crop.origin_xy[0] + crop.width;
-  const maxY = crop.origin_xy[1] + crop.height;
-  const x1 = Math.min(Math.max(box[0], minX), maxX - width);
-  const y1 = Math.min(Math.max(box[1], minY), maxY - height);
+  const width = Math.max(1, box[2] - box[0]);
+  const height = Math.max(1, box[3] - box[1]);
+  const x1 = clamp(box[0], 0, frame.frame_width - width);
+  const y1 = clamp(box[1], 0, frame.frame_height - height);
   return [Math.round(x1), Math.round(y1), Math.round(x1 + width), Math.round(y1 + height)];
 }
 
@@ -2464,7 +4004,7 @@ function resizeBox(original, mode, x, y) {
 
 function dragModeForPoint(x, y) {
   if (!state.box) return "draw";
-  const tolerance = 10;
+  const tolerance = Math.max(4, 9 / state.viewport.scale);
   const corners = [
     ["resize-nw", state.box[0], state.box[1]],
     ["resize-ne", state.box[2], state.box[1]],
@@ -2474,8 +4014,12 @@ function dragModeForPoint(x, y) {
   for (const [mode, cx, cy] of corners) {
     if (Math.abs(x - cx) <= tolerance && Math.abs(y - cy) <= tolerance) return mode;
   }
-  if (x >= state.box[0] && x <= state.box[2] && y >= state.box[1] && y <= state.box[3]) return "move";
+  if (hitTestBox(state.box, x, y)) return "move";
   return "draw";
+}
+
+function hitTestBox(box, x, y) {
+  return x >= box[0] && x <= box[2] && y >= box[1] && y <= box[3];
 }
 
 function addSecondary() {
@@ -2486,12 +4030,63 @@ function addSecondary() {
   el("secondaryList").textContent = JSON.stringify(state.secondary, null, 2);
 }
 
+async function acceptDraft(advance) {
+  const frame = currentFrame();
+  if (!hasProposal()) {
+    el("saveState").textContent = "No proposal available";
+    return;
+  }
+  try {
+    const result = await jsonFetch("/api/annotations/accept-draft", {
+      body: JSON.stringify({
+        expected_state_revision: state.annotations.state_revision,
+        frame_id: frame.frame_id,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    state.annotations.frames[frame.frame_id] = result.frame;
+    state.annotations.state_revision = result.state_revision;
+    el("saveState").textContent = "Accepted proposal";
+    updateProgress();
+    if (advance) {
+      renderFrame(Math.min(state.frames.length - 1, state.index + 1));
+    } else {
+      renderFrame(state.index);
+    }
+  } catch (error) {
+    showSaveError(error);
+  }
+}
+
+async function markProposalShown() {
+  const frame = currentFrame();
+  const annotation = frameState();
+  if (!hasProposal() || annotation.proposal_shown || annotation.draft_shown) return;
+  try {
+    const result = await jsonFetch("/api/drafts/shown", {
+      body: JSON.stringify({
+        expected_state_revision: state.annotations.state_revision,
+        frame_id: frame.frame_id,
+      }),
+      headers: { "Content-Type": "application/json" },
+      method: "POST",
+    });
+    state.annotations.frames[frame.frame_id] = result.frame;
+    state.annotations.state_revision = result.state_revision;
+  } catch {}
+}
+
 async function save(advance) {
   const frame = currentFrame();
+  let status = el("status").value;
+  if (status === STATUS_UNREVIEWED && state.box) status = STATUS_REVIEWED;
+  const proposalShown = frameState().proposal_shown || frameState().draft_shown || state.showProposal || Boolean(hasProposal() && state.box);
   const payload = {
-    annotation_status: el("status").value,
-    draft_shown: frameState().draft_shown || el("showDraft").checked,
+    annotation_status: status,
+    draft_shown: proposalShown,
     human_bbox: state.box,
+    proposal_shown: proposalShown,
     review_note: el("note").value,
     secondary_instances: state.secondary,
   };
@@ -2509,10 +4104,83 @@ async function save(advance) {
     state.annotations.state_revision = result.state_revision;
     el("saveState").textContent = "Saved";
     updateProgress();
-    if (advance) renderFrame(Math.min(state.frames.length - 1, state.index + 1));
+    if (advance) {
+      renderFrame(Math.min(state.frames.length - 1, state.index + 1));
+    } else {
+      renderFrame(state.index);
+    }
   } catch (error) {
-    el("saveState").textContent = `Save failed: ${error.message}`;
+    showSaveError(error);
   }
+}
+
+function showSaveError(error) {
+  const prefix = error.status === 409 ? "Stale save rejected" : "Save failed";
+  el("saveState").textContent = `${prefix}: ${error.message}`;
+}
+
+function onKeyDown(event) {
+  if (isTypingTarget(event.target)) return;
+  const key = event.key.toLowerCase();
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    renderFrame(Math.max(0, state.index - 1));
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    renderFrame(Math.min(state.frames.length - 1, state.index + 1));
+  } else if (key === "a" || event.key === "Enter") {
+    event.preventDefault();
+    acceptDraft(true);
+  } else if (key === "s") {
+    event.preventDefault();
+    save(true);
+  } else if (key === "f") {
+    event.preventDefault();
+    fitFrame();
+  } else if (key === "d") {
+    event.preventDefault();
+    if (!state.showProposal && hasProposal()) {
+      state.showProposal = true;
+      el("showDraft").checked = true;
+      markProposalShown();
+    }
+    fitTarget();
+  } else if (key === "r") {
+    event.preventDefault();
+    el("status").value = STATUS_RECHECK;
+    if (el("note").value.trim()) {
+      save(true);
+    } else {
+      el("saveState").textContent = "Needs Recheck requires a note";
+      el("note").focus();
+    }
+  } else if (event.key === "Delete" || event.key === "Backspace") {
+    event.preventDefault();
+    state.box = null;
+    draw();
+  }
+}
+
+function isTypingTarget(target) {
+  if (!target) return false;
+  const tag = target.tagName ? target.tagName.toLowerCase() : "";
+  return tag === "input" || tag === "textarea" || tag === "select" || target.isContentEditable;
+}
+
+function updateReadout() {
+  const annotation = frameState();
+  const payload = {
+    human_bbox: state.box,
+    proposal_bbox: proposalBox(),
+    proposal_quality: annotation.proposal_quality,
+    proposal_source: annotation.proposal_source || annotation.draft_source,
+    status: el("status").value,
+  };
+  el("boxReadout").textContent = JSON.stringify(payload, null, 2);
+}
+
+function clamp(value, low, high) {
+  return Math.min(high, Math.max(low, value));
 }
 
 load();
@@ -2557,6 +4225,16 @@ class PlateAnnotationRequestHandler(BaseHTTPRequestHandler):
                 frame_id = str(payload.get("frame_id") or "")
                 self._send_json(
                     mark_draft_shown(
+                        self.package_root,
+                        frame_id,
+                        expected_state_revision=payload.get("expected_state_revision"),
+                    )
+                )
+                return
+            if parsed.path == "/api/annotations/accept-draft":
+                frame_id = str(payload.get("frame_id") or "")
+                self._send_json(
+                    accept_draft_annotation(
                         self.package_root,
                         frame_id,
                         expected_state_revision=payload.get("expected_state_revision"),
