@@ -107,9 +107,9 @@ The generated case manifest starts Latest reviewed, finalization, and evaluation
 
 ## Evaluation
 
-`src/redactor/evaluation.py` now has category evaluation adapters. The face adapter delegates to the existing face evaluator, preserving detector/automatic/reviewed-final separation and the rule that interpolation or reviewed/manual corrections do not improve raw detector metrics.
+`src/redactor/evaluation.py` now has category evaluation adapters. The face adapter delegates to the existing face scoring path, preserving detector/automatic/reviewed-final separation and the rule that interpolation or reviewed/manual corrections do not improve raw detector metrics.
 
-License-plate evaluation currently writes a capability report rather than scores. The machine-readable ground truth file is face-only, and the human-readable plate notes do not provide tight per-frame plate boxes suitable for detector or privacy-coverage scoring. Plate metrics stay null until machine-readable plate objects and scoring boxes exist.
+License-plate evaluation has a capability-only default plus explicit detector, automatic, and reviewed-final modes. The plate scoring path is policy-bound and fail-closed; real certified plate metric execution remains a separate explicit phase from code/policy implementation.
 
 ## Compatibility
 
@@ -120,6 +120,6 @@ Existing face-only `redact-video` output still includes `audit_manifest.json`; i
 ## Deferred Work
 
 - Migrate reviewed/final face rendering after the automatic-preview migration remains stable.
-- Add machine-readable plate ground truth before publishing plate scores.
+- Run the frozen plate scoring path on audited real plate artifacts before publishing plate scores.
 - Clean up legacy reviewed/final renderer boundaries once canonical finalization remains stable.
 - Add performance instrumentation for multi-category runs after behavior parity remains stable.

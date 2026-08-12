@@ -1,0 +1,235 @@
+{
+  "aggregation": {
+    "compatible_report_requirements": [
+      "same ground_truth_content_sha256",
+      "same evaluation_policy_sha256",
+      "same mode",
+      "same required configuration identity for the mode",
+      "compatible certified scope"
+    ],
+    "macro_metric": "mean of target rates",
+    "micro_metric": "sum hits or covered frames divided by sum denominators",
+    "policy_version": "plate_aggregation_v1.0"
+  },
+  "automatic_coverage": {
+    "coverage_threshold": 0.95,
+    "geometry_source_preference": [
+      "authoritative effective automatic privacy-region artifact",
+      "reconstructed from tracks only when render manifest proves the same input hash and render configuration"
+    ],
+    "policy_version": "plate_automatic_coverage_v1.0",
+    "region_geometry": "effective rendered geometry after configured automatic margin and frame clipping",
+    "rectangle_area_semantics": "xyxy half-open",
+    "union": "deterministic rectangle union of GT-clipped eligible regions"
+  },
+  "automatic_metrics": [
+    "required_visible_frames",
+    "covered_frames",
+    "uncovered_frames",
+    "coverage_rate",
+    "per_frame_gt_coverage",
+    "uncovered_intervals",
+    "longest_uncovered_run",
+    "unresolved_prefix",
+    "flicker_events",
+    "provenance_breakdown"
+  ],
+  "automatic_provenance": {
+    "blacklist_markers": [
+      "manual",
+      "reviewed",
+      "preserved",
+      "correction"
+    ],
+    "eligible_provenances": [
+      "direct_detector",
+      "detector",
+      "ordinary_tracker",
+      "accepted_automatic_track",
+      "accepted_persistence",
+      "accepted_gap_recovery",
+      "plate_detector_observation",
+      "plate_track_interpolation"
+    ],
+    "eligible_statuses": [
+      "accepted_plate_track",
+      "covered"
+    ],
+    "ineligible_statuses": [
+      "needs_review",
+      "rejected_noise_track",
+      "unresolved"
+    ],
+    "manual_or_reviewed_contamination": "fail_closed"
+  },
+  "canonical_frame_namespace": {
+    "benchmarks": {
+      "day_plate": {
+        "canonical_parent_frame_interval": [
+          240,
+          479
+        ],
+        "dense_frame_interval": [
+          0,
+          239
+        ],
+        "parent_equals_dense_plus": 240
+      },
+      "night_selective": {
+        "canonical_parent_frame_interval": [
+          420,
+          779
+        ],
+        "dense_frame_interval": [
+          0,
+          359
+        ],
+        "parent_equals_dense_plus": 420
+      }
+    },
+    "canonical_identity": "evaluation_video_parent_frame",
+    "do_not_infer_from": [
+      "duration",
+      "approximate time",
+      "directory name"
+    ]
+  },
+  "category": "license_plate",
+  "compatible_ground_truth": {
+    "content_sha256": "5cf36ff48fa93743caf460ff6ee0470799e165dba2b9b42b9ad58168e5233314",
+    "ground_truth_id": "plate_ground_truth_v1.0",
+    "matching_policy_status": "proposed_not_scored",
+    "schema_version": "plate_ground_truth.v1.0"
+  },
+  "content_sha256": "34515ecb8d32bffea5bb69093ef0c653ee12228abb3864182943eb4e394645ac",
+  "detector_assignment": {
+    "one_gt_to_one_prediction": true,
+    "one_prediction_to_one_gt": true,
+    "pair_order": [
+      "highest_gt_coverage",
+      "highest_iou",
+      "highest_prediction_coverage",
+      "lowest_normalized_center_distance",
+      "lowest_scale_error",
+      "highest_detector_confidence",
+      "stable_source_order"
+    ],
+    "policy_version": "plate_detector_assignment_v1.0",
+    "scale_error": "abs(log(width_ratio)) + abs(log(height_ratio))"
+  },
+  "detector_configuration_binding": {
+    "configuration_hash": "7d914438255905e2a249e5bbd30fd6e70eace1e91b57e205bd572d004ffb5a55",
+    "detector_id": "oim_yolov9_s_608",
+    "input_size": 608,
+    "inference_mode": "uniform_small_object_tiles",
+    "nms_iou_threshold": 0.45,
+    "primary_threshold": 0.3,
+    "proposal_threshold": null,
+    "relative_path": "data/evaluations/license_plate_detector_oim_yolov9_s_608_v1/selected_configuration.json",
+    "tile_overlap": 0.25,
+    "tile_size": 1280
+  },
+  "detector_matching": {
+    "area_ratio_range": [
+      0.2,
+      5.0
+    ],
+    "center_expansion_gt_fraction_each_side": {
+      "x": 0.5,
+      "y": 0.5
+    },
+    "direct_selected_detector_outputs_only": true,
+    "gt_coverage_min": 0.6,
+    "height_ratio_range": [
+      0.33,
+      3.0
+    ],
+    "intersection_must_be_positive": true,
+    "iou_min": 0.2,
+    "min_confidence": 0.3,
+    "normalized_center_distance": "sqrt((center_dx / gt_width)^2 + (center_dy / gt_height)^2)",
+    "policy_version": "plate_detector_matching_v1.0",
+    "prediction_coverage_min": 0.12,
+    "rectangle_area_semantics": "xyxy half-open",
+    "required_category": "license_plate",
+    "width_ratio_range": [
+      0.33,
+      3.0
+    ]
+  },
+  "detector_metrics": [
+    "detector_scored_frames",
+    "hit_frames",
+    "miss_frames",
+    "target_frame_recall",
+    "miss_intervals",
+    "maximum_consecutive_miss_run",
+    "duplicate_matched_target_proposal_frames",
+    "confidence_summary"
+  ],
+  "evaluation_policy_id": "plate_evaluation_policy_v1.0",
+  "fail_closed_rules": [
+    "invalid GT",
+    "GT content SHA mismatch",
+    "unsupported GT version",
+    "invalid evaluation policy",
+    "policy SHA mismatch",
+    "source video hash mismatch",
+    "wrong benchmark",
+    "wrong frame mapping",
+    "incomplete source span",
+    "wrong category",
+    "wrong detector ID/config",
+    "wrong detector threshold",
+    "detector mode contaminated by tracker/interpolation/manual provenance",
+    "automatic mode contaminated by manual/reviewed provenance",
+    "needs_review counted as automatic",
+    "missing required artifact",
+    "stale Latest reviewed",
+    "stale Final",
+    "invalid finalization",
+    "missing sweep",
+    "failed media validation",
+    "failed region validation",
+    "unsupported report schema"
+  ],
+  "formal_precision": {
+    "publishable": false,
+    "reason": "insufficient_spatial_negative_ignore_map",
+    "value": null
+  },
+  "non_claims": [
+    "no formal detector precision",
+    "no universal scene false-positive rate",
+    "no automated pixel-level zero-leak certification",
+    "no full-source-video claim outside certified windows",
+    "no blended detector automatic reviewed score"
+  ],
+  "output_report_schema_version": "plate_evaluation_report.v1.0",
+  "over_redaction_diagnostics": [
+    "total automatic redacted plate-region area per frame",
+    "redacted area divided by frame area",
+    "automatic region area divided by GT area where associated",
+    "unmatched automatic plate-region count",
+    "duplicate region count",
+    "association-unverified coverage frames"
+  ],
+  "reviewed_final": {
+    "coverage_policy_version": "plate_reviewed_final_coverage_v1.0",
+    "coverage_threshold": 0.95,
+    "evidence_requirements": [
+      "reviewed_region_set_sha256",
+      "Latest reviewed revision identity and current pointer",
+      "Final revision identity and current pointer",
+      "source lineage",
+      "category-run lineage",
+      "media validation",
+      "region validation",
+      "human sweep acknowledgement",
+      "current finalization"
+    ],
+    "geometric_gt_coverage_is_precheck_only": true,
+    "human_zero_leak_review_is_distinct": true
+  },
+  "schema_version": "plate_evaluation_policy.v1.0"
+}

@@ -428,6 +428,20 @@ def validate_ground_truth_file(
 
 
 def plate_evaluation_capability(*, ground_truth_path: Path, clip_id: str) -> dict[str, Any]:
+    raw_ground_truth = json.loads(ground_truth_path.read_text(encoding="utf-8"))
+    if raw_ground_truth.get("schema_version") == "plate_ground_truth.v1.0":
+        from redactor import plate_evaluation as plate_evaluation_v1
+
+        capability = plate_evaluation_v1.plate_ground_truth_capability(
+            ground_truth_path,
+            benchmark_id=clip_id,
+        )
+        capability.setdefault("annotation_scope", {})
+        capability["can_publish_detector_metrics"] = False
+        capability["can_publish_privacy_metrics"] = False
+        capability["publishable_metrics"] = False
+        return capability
+
     ground_truth = load_ground_truth(ground_truth_path)
     validation_errors = validate_ground_truth_document(ground_truth)
     clip = next(

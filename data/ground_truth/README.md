@@ -31,8 +31,8 @@ Reference ROIs are search aids, not tight scoring boxes. Exact detector-hit adju
 
 The current day-plate gold interval describes the far-plate clip, not `eval_day_plate_close.mp4`.
 
-Plate metrics remain future work. The current `evaluate-plates` path is still capability-only and
-must not publish recall or privacy-coverage numbers until a separate plate evaluator phase is
-implemented and audited.
+Plate metrics remain unpublished here. `evaluate-plates` has a capability-only default plus
+explicit detector, automatic, and reviewed-final modes, but real certified recall or
+privacy-coverage numbers must be produced only in a separate audited execution phase.
 
 License-plate text must never be stored.

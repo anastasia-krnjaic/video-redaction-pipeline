@@ -122,8 +122,8 @@ review, proposal accepted unchanged, proposal human-adjusted, and manual/no-prop
 
 `artifacts/eval_day_plate_close.mp4` remains excluded from certified plate Ground Truth. The
 publication adds spatial Ground Truth only; it does not calculate detector recall, automatic
-privacy coverage, or reviewed-final metrics. `evaluate-plates` remains capability-only until a
-separate evaluator phase implements and audits plate scoring.
+privacy coverage, or reviewed-final metrics. `evaluate-plates` now has explicit scoring modes,
+but real certified plate metrics are intentionally left to a separate audited execution phase.
 
 ## Local Save Contract
 

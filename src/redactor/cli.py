@@ -1370,42 +1370,211 @@ def evaluate_faces(
     type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
     help="Machine-readable redaction ground-truth JSON.",
 )
-@click.option("--clip-id", required=True, help="Clip id inside the ground-truth file.")
+@click.option(
+    "--benchmark-id",
+    "--clip-id",
+    "benchmark_id",
+    required=True,
+    help="Plate benchmark id inside the ground-truth file.",
+)
+@click.option(
+    "--mode",
+    type=click.Choice(["capability", "detector", "automatic", "reviewed_final"]),
+    default="capability",
+    show_default=True,
+    help="Plate evaluation mode. Capability mode does not score.",
+)
+@click.option(
+    "--source-video",
+    "source_video_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Evaluation source video.",
+)
+@click.option(
+    "--detections",
+    "detections_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Detector-mode detections.jsonl.",
+)
+@click.option(
+    "--detection-summary",
+    "detection_summary_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Detector-mode source/config summary JSON.",
+)
+@click.option(
+    "--detector-config",
+    "detector_config_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Frozen selected detector configuration JSON.",
+)
+@click.option(
+    "--tracks",
+    "tracks_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Automatic-mode tracks or effective automatic regions JSONL.",
+)
+@click.option(
+    "--tracking-manifest",
+    "tracking_manifest_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Automatic-mode tracking_manifest.json.",
+)
+@click.option(
+    "--gap-decisions",
+    "gap_decisions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Automatic-mode gap_decisions.json when gap recovery was used.",
+)
+@click.option(
+    "--review-intervals",
+    "review_intervals_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Automatic-mode review_intervals.json.",
+)
+@click.option(
+    "--render-manifest",
+    "render_manifest_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Automatic or reviewed-final render_manifest.json.",
+)
+@click.option(
+    "--reviewed-regions",
+    "reviewed_regions_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Reviewed-final effective privacy regions JSONL.",
+)
+@click.option(
+    "--latest-reviewed-pointer",
+    "latest_reviewed_pointer_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Reviewed-final latest_reviewed/current.json.",
+)
+@click.option(
+    "--final-pointer",
+    "final_pointer_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Reviewed-final final/current.json.",
+)
+@click.option(
+    "--rendered-video",
+    "rendered_video_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Reviewed-final rendered video.",
+)
+@click.option(
+    "--media-validation",
+    "media_validation_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Reviewed-final media validation JSON.",
+)
+@click.option(
+    "--region-validation",
+    "region_validation_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Reviewed-final region validation JSON.",
+)
+@click.option(
+    "--evaluation-policy",
+    "evaluation_policy_path",
+    type=click.Path(exists=True, file_okay=True, dir_okay=False, path_type=Path),
+    default=Path("data/evaluations/plate_evaluation_policy_v1.0.json"),
+    show_default=True,
+    help="Versioned plate evaluation policy JSON.",
+)
 @click.option(
     "--output-dir",
     required=True,
     type=click.Path(file_okay=False, path_type=Path),
-    help="Directory for plate evaluation capability reports.",
+    help="Directory for plate evaluation metrics.json, validation.json, and report.md.",
+)
+@click.option(
+    "--validate-only",
+    is_flag=True,
+    help="Validate inputs and lineage without calculating certified scoring metrics.",
 )
 @click.option("--overwrite", is_flag=True, help="Replace outputs in a non-empty directory.")
 def evaluate_plates(
     ground_truth_path: Path,
-    clip_id: str,
+    benchmark_id: str,
+    mode: str,
+    source_video_path: Path | None,
+    detections_path: Path | None,
+    detection_summary_path: Path | None,
+    detector_config_path: Path | None,
+    tracks_path: Path | None,
+    tracking_manifest_path: Path | None,
+    gap_decisions_path: Path | None,
+    review_intervals_path: Path | None,
+    render_manifest_path: Path | None,
+    reviewed_regions_path: Path | None,
+    latest_reviewed_pointer_path: Path | None,
+    final_pointer_path: Path | None,
+    rendered_video_path: Path | None,
+    media_validation_path: Path | None,
+    region_validation_path: Path | None,
+    evaluation_policy_path: Path,
     output_dir: Path,
+    validate_only: bool,
     overwrite: bool,
 ) -> None:
-    """Report whether license-plate ground truth can support published scores."""
-    from redactor import evaluation
+    """Validate or score license-plate evaluation inputs."""
+    from redactor import plate_evaluation
 
     try:
-        metrics = evaluation.run_plate_evaluation(
+        metrics = plate_evaluation.run_plate_evaluation(
+            benchmark_id=benchmark_id,
+            detector_config_path=detector_config_path,
+            detection_summary_path=detection_summary_path,
+            detections_path=detections_path,
+            evaluation_policy_path=evaluation_policy_path,
+            final_pointer_path=final_pointer_path,
+            gap_decisions_path=gap_decisions_path,
             ground_truth_path=ground_truth_path,
-            clip_id=clip_id,
+            latest_reviewed_pointer_path=latest_reviewed_pointer_path,
+            media_validation_path=media_validation_path,
+            mode=mode,
             output_dir=output_dir,
+            region_validation_path=region_validation_path,
+            render_manifest_path=render_manifest_path,
+            rendered_video_path=rendered_video_path,
+            reviewed_regions_path=reviewed_regions_path,
+            review_intervals_path=review_intervals_path,
+            source_video_path=source_video_path,
+            tracking_manifest_path=tracking_manifest_path,
+            tracks_path=tracks_path,
+            validate_only=validate_only,
             overwrite=overwrite,
         )
     except (FileExistsError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
 
-    capability = metrics["capability"]
+    validation = dict(metrics.get("validation") or {})
     click.echo(
-        "Plate evaluation capability: "
-        f"publishable_metrics={capability['publishable_metrics']}; "
-        f"license_plate_objects={capability['license_plate_object_count']}."
+        "Plate evaluation: "
+        f"mode={metrics.get('mode')}; "
+        f"publishable_metrics={metrics.get('publishable_metrics')}; "
+        f"validation_status={validation.get('status')}."
     )
-    if capability["blockers"]:
-        click.echo(f"Blockers: {', '.join(capability['blockers'])}")
-    click.echo(f"Wrote evaluation capability report: {output_dir / 'report.md'}")
+    blockers = validation.get("blockers") or dict(metrics.get("capability") or {}).get("blockers")
+    if blockers:
+        click.echo(f"Blockers: {', '.join(blockers)}")
+    click.echo(f"Wrote plate evaluation report: {output_dir / 'report.md'}")
 
 
 @main.command("build-plate-annotation-package")

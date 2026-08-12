@@ -37,6 +37,17 @@ WORKSPACE_PUBLICATION_IDENTITY_KEYS = {
 LATEST_REVIEWED_CONTENT_IDENTITY_PREFIX = "latest_reviewed_"
 CURRENT_POINTER_RELATIVE_PATH = Path("latest_reviewed") / "current.json"
 FAILURE_INJECTION_ENV = "REDACTOR_REVIEWED_REGIONS_FAIL_AT"
+REVIEWED_REGION_SET_IDENTITY_RUNTIME_KEYS = {
+    "active_correction_audit_hash",
+    "active_corrections_hash",
+    "active_projection_hash_schema_version",
+    "case_manifest_input_sha256",
+    "reviewed_region_set_sha256",
+    "session_head_hash",
+    "session_id",
+    "workspace_manifest_input_sha256",
+    "working_state_projection_hash",
+}
 RUNTIME_REVIEW_STATE_KEYS = {
     "event_hash",
     "event_id",
@@ -1351,23 +1362,18 @@ def reviewed_region_identity(
         ),
         "working_state_projection_hash": state.get("active_projection_hash"),
     }
-    hash_payload = {
-        key: value
-        for key, value in identity.items()
-        if key
-        not in {
-            "active_correction_audit_hash",
-            "active_corrections_hash",
-            "active_projection_hash_schema_version",
-            "case_manifest_input_sha256",
-            "session_head_hash",
-            "session_id",
-            "workspace_manifest_input_sha256",
-            "working_state_projection_hash",
-        }
-    }
-    identity["reviewed_region_set_sha256"] = stable_hash(hash_payload)
+    identity["reviewed_region_set_sha256"] = reviewed_region_set_identity_hash(identity)
     return identity
+
+
+def reviewed_region_set_identity_hash(identity: dict[str, Any]) -> str:
+    return stable_hash(
+        {
+            key: value
+            for key, value in identity.items()
+            if key not in REVIEWED_REGION_SET_IDENTITY_RUNTIME_KEYS
+        }
+    )
 
 
 def semantic_decision_payload(decisions: dict[str, Any]) -> dict[str, Any]:
@@ -1912,6 +1918,183 @@ def validate_current_pointer(package_root: Path, pointer: dict[str, Any]) -> dic
     return dict(pointer) | {
         "case_id": case_id,
         "revision_manifest_payload": revision_manifest,
+    }
+
+
+def validate_reviewed_regions_artifact_binding(
+    package_root: Path,
+    reviewed_regions_path: Path,
+    *,
+    latest_pointer: dict[str, Any],
+    final_pointer: dict[str, Any] | None = None,
+    expected_source_sha256: str | None = None,
+    expected_case_id: str | None = None,
+    expected_category: str | None = None,
+) -> dict[str, Any]:
+    from redactor import review_finalization
+
+    package_root = package_root.resolve()
+    supplied_path = reviewed_regions_path.resolve()
+    if not supplied_path.exists():
+        raise ReviewedRegionCompilationError("reviewed regions artifact is missing")
+    try:
+        supplied_path.relative_to(package_root)
+    except ValueError as exc:
+        raise ReviewedRegionCompilationError(
+            "reviewed regions artifact is outside package root"
+        ) from exc
+
+    revision_manifest = dict(latest_pointer.get("revision_manifest_payload") or {})
+    if not revision_manifest:
+        raise ReviewedRegionCompilationError(
+            "Latest reviewed revision manifest payload is missing"
+        )
+    revision_manifest_path = case_ids.contained_path(
+        package_root,
+        *Path(str(latest_pointer.get("revision_manifest") or "")).parts,
+    )
+    revision_root = revision_manifest_path.parent
+    expected_artifact = str(revision_manifest.get("reviewed_regions") or "")
+    if not expected_artifact:
+        raise ReviewedRegionCompilationError(
+            "Latest reviewed revision missing reviewed_regions artifact"
+        )
+    authoritative_path = (revision_root / expected_artifact).resolve()
+    try:
+        authoritative_path.relative_to(package_root)
+    except ValueError as exc:
+        raise ReviewedRegionCompilationError(
+            "Latest reviewed reviewed-regions artifact is outside package root"
+        ) from exc
+    if supplied_path != authoritative_path:
+        raise ReviewedRegionCompilationError(
+            "reviewed regions artifact path does not match Latest reviewed revision"
+        )
+
+    validate_revision_artifacts(revision_root, revision_manifest)
+    raw_sha = media.sha256_file(supplied_path)
+    expected_raw_sha = str(revision_manifest.get("reviewed_regions_sha256") or "")
+    if not expected_raw_sha:
+        raise ReviewedRegionCompilationError("reviewed regions artifact SHA is missing")
+    if raw_sha != expected_raw_sha:
+        raise ReviewedRegionCompilationError("reviewed regions artifact SHA mismatch")
+
+    try:
+        records = review_finalization.load_privacy_region_records(supplied_path)
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        raise ReviewedRegionCompilationError(
+            f"invalid reviewed regions artifact: {exc}"
+        ) from exc
+    semantic_records_sha = semantic_region_set_hash(records)
+    identity = dict(revision_manifest.get("reviewed_region_identity") or {})
+    expected_semantic_records_sha = str(
+        identity.get("reviewed_region_records_sha256") or ""
+    )
+    if not expected_semantic_records_sha:
+        raise ReviewedRegionCompilationError(
+            "reviewed region semantic records SHA is missing"
+        )
+    if semantic_records_sha != expected_semantic_records_sha:
+        raise ReviewedRegionCompilationError(
+            "reviewed region semantic records SHA mismatch"
+        )
+
+    reviewed_region_set_sha = str(revision_manifest.get("reviewed_region_set_sha256") or "")
+    if not reviewed_region_set_sha:
+        raise ReviewedRegionCompilationError("reviewed_region_set_sha256 is missing")
+    if str(identity.get("reviewed_region_set_sha256") or "") != reviewed_region_set_sha:
+        raise ReviewedRegionCompilationError(
+            "reviewed_region_set_sha256 identity mismatch"
+        )
+    if reviewed_region_set_identity_hash(identity) != reviewed_region_set_sha:
+        raise ReviewedRegionCompilationError(
+            "reviewed_region_set_sha256 canonical identity mismatch"
+        )
+    if str(latest_pointer.get("reviewed_region_set_sha256") or "") != reviewed_region_set_sha:
+        raise ReviewedRegionCompilationError(
+            "Latest reviewed pointer reviewed_region_set_sha256 mismatch"
+        )
+    if str(latest_pointer.get("revision_id") or "") != str(
+        revision_manifest.get("revision_id") or ""
+    ):
+        raise ReviewedRegionCompilationError("Latest reviewed revision id mismatch")
+
+    if expected_source_sha256:
+        for label, payload in (
+            ("Latest reviewed pointer", latest_pointer),
+            ("Latest reviewed revision", revision_manifest),
+            ("reviewed region identity", identity),
+        ):
+            actual = payload.get("source_sha256") or payload.get("source_video_hash")
+            if str(actual or "") != expected_source_sha256:
+                raise ReviewedRegionCompilationError(f"{label} source SHA mismatch")
+        for record in records:
+            source = dict(record.source_record)
+            record_source = source.get("source_sha256") or source.get("source_video_hash")
+            if record_source and str(record_source) != expected_source_sha256:
+                raise ReviewedRegionCompilationError("reviewed region record source SHA mismatch")
+
+    if expected_case_id:
+        for label, payload in (
+            ("Latest reviewed pointer", latest_pointer),
+            ("Latest reviewed revision", revision_manifest),
+            ("reviewed region identity", identity),
+        ):
+            if str(payload.get("case_id") or "") != expected_case_id:
+                raise ReviewedRegionCompilationError(f"{label} case_id mismatch")
+        for record in records:
+            record_case_id = dict(record.source_record).get("case_id")
+            if record_case_id and str(record_case_id) != expected_case_id:
+                raise ReviewedRegionCompilationError("reviewed region record case_id mismatch")
+
+    if expected_category:
+        selected = {str(item) for item in list(identity.get("selected_categories") or [])}
+        if selected and expected_category not in selected:
+            raise ReviewedRegionCompilationError(
+                "reviewed region category is outside selected categories"
+            )
+        if not any(record.category == expected_category for record in records):
+            raise ReviewedRegionCompilationError(
+                "reviewed regions do not include expected category"
+            )
+
+    final_manifest = dict((final_pointer or {}).get("finalization_manifest_payload") or {})
+    if final_pointer is not None:
+        for label, payload in (
+            ("Final pointer", final_pointer),
+            ("Finalization manifest", final_manifest),
+        ):
+            if str(payload.get("reviewed_region_set_sha256") or "") != reviewed_region_set_sha:
+                raise ReviewedRegionCompilationError(
+                    f"{label} reviewed_region_set_sha256 mismatch"
+                )
+            if expected_source_sha256 and str(payload.get("source_sha256") or "") != (
+                expected_source_sha256
+            ):
+                raise ReviewedRegionCompilationError(f"{label} source SHA mismatch")
+        expected_revision = str(revision_manifest.get("revision_id") or "")
+        for label, payload in (
+            ("Final pointer", final_pointer),
+            ("Finalization manifest", final_manifest),
+        ):
+            actual_revision = (
+                payload.get("approved_latest_reviewed_revision_id")
+                or payload.get("latest_reviewed_revision_id")
+            )
+            if str(actual_revision or "") != expected_revision:
+                raise ReviewedRegionCompilationError(
+                    f"{label} Latest reviewed revision mismatch"
+                )
+
+    return {
+        "case_id": revision_manifest.get("case_id"),
+        "record_count": len(records),
+        "reviewed_region_records_sha256": semantic_records_sha,
+        "reviewed_region_set_sha256": reviewed_region_set_sha,
+        "reviewed_regions_path": supplied_path.as_posix(),
+        "reviewed_regions_sha256": raw_sha,
+        "revision_id": revision_manifest.get("revision_id"),
+        "source_sha256": revision_manifest.get("source_sha256"),
     }
 
 
