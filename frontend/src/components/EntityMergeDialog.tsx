@@ -63,7 +63,7 @@ export function EntityMergeDialog({ entities, onCancel, onMerge, open }: Props) 
                 {entity.representative_thumbnail_path ? (
                   <img src={`/${entity.representative_thumbnail_path}`} alt={`${entity.label} thumbnail`} />
                 ) : (
-                  <span className="thumbnail-placeholder" />
+                  <span className="thumbnail-placeholder">No preview available</span>
                 )}
                 <span>
                   <strong>{entity.label}</strong>

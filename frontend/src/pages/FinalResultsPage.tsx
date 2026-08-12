@@ -25,12 +25,23 @@ export function FinalResultsPage({
   session,
   workspace,
 }: Props) {
-  const [caseId, setCaseId] = usePersistentState<CaseId>('final:case', 'day');
+  const caseIds = Object.keys(workspace.cases);
+  const defaultCaseId = caseIds.includes('day') ? 'day' : caseIds[0] || '';
+  const [persistedCaseId, setCaseId] = usePersistentState<CaseId>('final:case', defaultCaseId);
+  const caseId = workspace.cases[persistedCaseId] ? persistedCaseId : defaultCaseId;
   const manifest = workspace.cases[caseId];
   const [caseFrame, setCaseFrame] = usePersistentState<number>(`final:${caseId}:frame`, 0);
   const [selectedRole, setSelectedRole] = usePersistentState<string>(`final:${caseId}:version`, 'latest_reviewed');
   const [finalStatus, setFinalStatus] = useState<Record<string, FinalizationStatus>>({});
   const [busy, setBusy] = useState(false);
+
+  if (!manifest) {
+    return (
+      <section className="case-panel active">
+        <div className="fatal-error">No review cases are available in this workspace.</div>
+      </section>
+    );
+  }
 
   const roles = publicVideoRoles(manifest.video_roles);
   const selectedVersion =
@@ -75,12 +86,16 @@ export function FinalResultsPage({
           <p className="case-subtitle">Final media appears only after backend gates pass.</p>
         </div>
         <div className="segmented">
-          <button type="button" className={caseId === 'day' ? 'active' : ''} onClick={() => setCaseId('day')}>
-            Day
-          </button>
-          <button type="button" className={caseId === 'night' ? 'active' : ''} onClick={() => setCaseId('night')}>
-            Night
-          </button>
+          {caseIds.map((item) => (
+            <button
+              key={item}
+              type="button"
+              className={caseId === item ? 'active' : ''}
+              onClick={() => setCaseId(item)}
+            >
+              {caseLabel(item, workspace.cases[item]?.display_name)}
+            </button>
+          ))}
         </div>
       </div>
       <div className="final-layout">
@@ -119,6 +134,12 @@ export function FinalResultsPage({
       </div>
     </section>
   );
+}
+
+function caseLabel(caseId: string, displayName?: string): string {
+  if (caseId === 'day') return 'Day';
+  if (caseId === 'night') return 'Night';
+  return displayName || caseId;
 }
 
 function publicVideoRoles(roles: MediaVersion[]): MediaVersion[] {

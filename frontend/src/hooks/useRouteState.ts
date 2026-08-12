@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { TopLevelRoute } from '../types/domain';
 
-const routes = new Set<TopLevelRoute>(['day', 'night', 'final', 'audit']);
+const staticRoutes = new Set<TopLevelRoute>(['final', 'audit']);
+const caseRoutePattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 export function routeFromLocation(): TopLevelRoute {
   const parts = window.location.pathname.split('/').filter(Boolean);
   const last = parts[parts.length - 1] as TopLevelRoute | undefined;
-  return last && routes.has(last) ? last : 'day';
+  if (!last || last === 'app' || last === 'index.html') return 'day';
+  if (staticRoutes.has(last) || caseRoutePattern.test(last)) return last;
+  return 'day';
 }
 
 export function useRouteState(): [TopLevelRoute, (route: TopLevelRoute) => void] {

@@ -8,7 +8,7 @@
     "dev": "vite --host 127.0.0.1",
     "generate:api-types": "node scripts/generate-api-types.mjs",
     "lint": "eslint .",
-    "test": "vitest run tests/frame.test.ts tests/reviewState.test.ts tests/correctionEditor.test.ts tests/noExternalUrls.test.ts",
+    "test": "vitest run tests/*.test.ts",
     "test:e2e": "playwright test",
     "typecheck": "tsc -b"
   },

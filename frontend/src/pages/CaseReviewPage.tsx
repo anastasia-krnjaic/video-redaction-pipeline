@@ -726,8 +726,13 @@ export function CaseReviewPage({
       setBucket('Open');
       setSelectedTaskId(null);
       setPreviewReady(false);
+      setPreviewInvalidated(false);
       setPreviewToken(undefined);
       setPreviewRole(undefined);
+      setCorrectionSaveStatus(undefined);
+      setMaterializationError(undefined);
+      setFocusTarget(null);
+      onError(undefined);
       setDraft(initialDraft(caseId, manifest, caseFrame, null));
       setSelectedRole('latest_reviewed');
       for (const job of result.materialization_jobs || []) trackMaterializationJob(job);

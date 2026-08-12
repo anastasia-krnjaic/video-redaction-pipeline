@@ -11,7 +11,12 @@ from typing import Any
 
 from redactor import case_ids, case_manifests, media, privacy_rendering
 from redactor.detection import rational_to_float
-from redactor.privacy_records import APPROVAL_ACCEPTED, PrivacyRegionRecord, stable_hash
+from redactor.privacy_records import (
+    APPROVAL_ACCEPTED,
+    MANUAL_REDACTION_CATEGORIES,
+    PrivacyRegionRecord,
+    stable_hash,
+)
 from redactor.review_corrections import (
     OP_ADD,
     OP_NOT_SENSITIVE,
@@ -968,11 +973,15 @@ def apply_review_corrections(
     added: list[PrivacyRegionRecord] = []
     replaced_count = 0
     selected = set(selected_categories)
+    allowed_manual_categories = set(MANUAL_REDACTION_CATEGORIES)
     fps = rational_to_float(manifest.fps) or 30.0
     for correction in corrections:
         if correction.case_id != manifest.case_id:
             continue
-        if correction.category not in selected:
+        if (
+            correction.category not in selected
+            and correction.category not in allowed_manual_categories
+        ):
             raise ReviewedRegionCompilationError(
                 f"{manifest.case_id}: correction category is outside selected workspace categories"
             )

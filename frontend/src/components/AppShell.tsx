@@ -7,6 +7,7 @@ import { SessionHeader } from './SessionHeader';
 interface Props {
   attribution: Attribution;
   busy?: boolean;
+  cases: Array<{ caseId: string; label: string }>;
   children: ReactNode;
   error?: string;
   route: TopLevelRoute;
@@ -20,6 +21,7 @@ interface Props {
 export function AppShell({
   attribution,
   busy,
+  cases,
   children,
   error,
   onExport,
@@ -40,7 +42,7 @@ export function AppShell({
         onStartSession={onStartSession}
         session={session}
       />
-      <CaseTabs active={route} onChange={onRouteChange} />
+      <CaseTabs active={route} cases={cases} onChange={onRouteChange} />
       <main>{children}</main>
     </>
   );

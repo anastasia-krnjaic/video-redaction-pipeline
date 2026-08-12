@@ -407,12 +407,16 @@ main {
   position: absolute;
   z-index: 2;
   min-width: 8px;
-  min-height: 9px;
-  height: 9px;
+  width: auto;
+  min-height: 12px;
+  max-height: 12px;
+  height: 12px;
   padding: 0;
   border: 1px solid rgba(255, 255, 255, 0.86);
   border-radius: 999px;
   cursor: pointer;
+  line-height: 0;
+  overflow: hidden;
   stroke: #fff;
   stroke-width: 1;
 }
@@ -659,6 +663,17 @@ main {
   height: 100%;
   object-fit: cover;
   background: #dbe3ec;
+}
+
+.thumbnail-placeholder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 4px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.05;
+  text-align: center;
 }
 
 .entity-actions {

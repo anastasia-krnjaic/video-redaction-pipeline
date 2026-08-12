@@ -24,13 +24,10 @@ export function PlayerChrome({ controller, manifest, onSelectTask, selectedTaskI
     () =>
       tasks.map((task, index) => {
         const start = sourceToCaseFrame(manifest, task.source_frame_start);
-        const end = sourceToCaseFrame(manifest, task.source_frame_end);
         return {
-          end,
           lane: index % 3,
           start,
           task,
-          widthPercent: Math.max(0.45, ((Math.max(start, end) - start + 1) / Math.max(1, maxFrame)) * 100),
         };
       }),
     [manifest, maxFrame, tasks],
@@ -139,7 +136,7 @@ export function PlayerChrome({ controller, manifest, onSelectTask, selectedTaskI
         }}
       >
         <div className="scrub-base" />
-        {markers.map(({ lane, start, task, widthPercent }) => (
+        {markers.map(({ lane, start, task }) => (
           <button
             key={task.review_task_id}
             type="button"
@@ -154,8 +151,7 @@ export function PlayerChrome({ controller, manifest, onSelectTask, selectedTaskI
             data-task-id={task.review_task_id}
             style={{
               left: `${timelinePercent(manifest, start)}%`,
-              top: `${8 + lane * 11}px`,
-              width: `${widthPercent}%`,
+              top: `${6 + lane * 14}px`,
             }}
             title={timelineTooltip(manifest, task)}
             aria-label={timelineTooltip(manifest, task)}

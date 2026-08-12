@@ -6,6 +6,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+import cv2 as cv
+import numpy as np
 import pytest
 
 from redactor import (
@@ -55,6 +57,19 @@ def fake_media_info() -> MediaInfo:
             width=120,
         ),
     )
+
+
+def write_synthetic_source_video(path: Path, *, frame_count: int = 2) -> None:
+    writer = cv.VideoWriter(str(path), cv.VideoWriter_fourcc(*"mp4v"), 10.0, (120, 80))
+    try:
+        for frame_index in range(frame_count):
+            frame = np.zeros((80, 120, 3), dtype=np.uint8)
+            frame[:, :] = (30 + frame_index * 35, 80, 150)
+            cv.rectangle(frame, (8, 8), (34, 34), (220, 220, 220), -1)
+            cv.rectangle(frame, (48, 36), (96, 64), (245, 245, 245), -1)
+            writer.write(frame)
+    finally:
+        writer.release()
 
 
 def region(category: str, frame: int, object_id: str) -> PrivacyRegionRecord:
@@ -159,8 +174,10 @@ def write_category_tasks(case_root: Path) -> None:
                         "blocking": True,
                         "frame_end": 1,
                         "frame_start": 1,
+                        "reason_codes": ["unresolved_internal_gap"],
                         "review_task_id": "plate_review_0001",
                         "severity": "blocker",
+                        "source_stage": "plate_tracking",
                         "title": "Plate review",
                         "track_uids": ["plate_track_1"],
                     }
@@ -559,8 +576,17 @@ def test_mixed_review_workspace_entities_tasks_and_manifest_are_deterministic(
         entity["entity_id"] for entity in second_entities["cases"]["case"]
     ]
     assert [task["category"] for task in tasks] == [CATEGORY_FACE, CATEGORY_PLATE]
+    assert tasks[1]["normal_task_class"] == "plate_track_review_required"
     assert {task["entity_id"] for task in tasks} <= {entity["entity_id"] for entity in entities}
     assert first["validation"]["passed"] is True
+    frontend_manifest = json.loads((workspace_root / "frontend_build_manifest.json").read_text())
+    manifest = json.loads((workspace_root / "workspace_manifest.json").read_text())
+    assert frontend_manifest["selected_frontend"] == "react"
+    assert manifest["selected_frontend"] == "react"
+    assert manifest["react_app_root"] == "app/"
+    assert (workspace_root / "app" / "index.html").exists()
+    assert (workspace_root / "legacy.html").exists()
+    assert "legacy.html" in (workspace_root / "index.html").read_text(encoding="utf-8")
 
 
 def test_authoritative_workspace_manifest_is_sole_runtime_authority(
@@ -853,6 +879,65 @@ def test_source_backed_entities_include_policy_and_no_task_targets(
         review_sessions.ACTION_PRIVACY_LEAK,
         review_sessions.ACTION_NOT_SENSITIVE,
     ]
+
+
+def test_source_backed_entities_get_real_representative_thumbnails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mixed_review_workspace.media, "probe_media", lambda _: fake_media_info())
+    fixture = workspace_fixture(tmp_path)
+    write_synthetic_source_video(fixture["context"].source_video)
+    records = [
+        region(CATEGORY_FACE, 0, "face_track_1"),
+        region(CATEGORY_FACE, 1, "face_track_2"),
+        region(CATEGORY_PLATE, 0, "plate_track_1"),
+        region(CATEGORY_PLATE, 1, "plate_track_2"),
+    ]
+    regions_path = fixture["case_root"] / "render_plan" / "effective_privacy_regions.jsonl"
+    case_pipeline.write_privacy_region_records(regions_path, records)
+    fixture["render_plan"]["effective_region_count"] = len(records)
+    fixture["render_plan"]["effective_regions_artifact"] = case_pipeline.artifact_reference(
+        fixture["case_root"],
+        regions_path,
+        role="effective_privacy_regions",
+    ).to_dict()
+    write_source_backed_entity_artifacts(fixture["case_root"])
+    write_source_backed_tasks(fixture["case_root"])
+
+    result = mixed_review_workspace.build_case_review_workspace(
+        fixture["context"],
+        category_results=category_results(fixture["case_root"]),
+        render_plan=fixture["render_plan"],
+        combined_preview=fixture["combined_preview"],
+        overwrite=True,
+    )
+
+    workspace_root = fixture["case_root"] / result["workspace_dir"]
+    entities = json.loads((workspace_root / "review_entities.json").read_text())["cases"]["case"]
+    geometry_entities = [entity for entity in entities if entity.get("representative_bbox")]
+    assert geometry_entities
+    for entity in geometry_entities:
+        thumbnail = entity.get("representative_thumbnail_path")
+        identity = entity.get("representative_thumbnail_identity") or {}
+        assert thumbnail
+        assert (workspace_root / thumbnail).exists()
+        assert identity["source_sha256"] == "source-sha256"
+        assert identity["entity_id"] == entity["entity_id"]
+        assert identity["category"] == entity["category"]
+
+    plate_review = next(
+        entity
+        for entity in entities
+        if (entity.get("source_lineage") or {}).get("technical_id") == "plate_track_3"
+    )
+    assert plate_review["representative_thumbnail_path"]
+    assert plate_review["evidence_summary"]["review_observation_count"] > 0
+    audit = json.loads((workspace_root / "representative_thumbnail_audit.json").read_text())
+    assert any(
+        row["status"] == "source_backed" and row["entity_id"] == plate_review["entity_id"]
+        for row in audit["cases"]["case"]
+    )
 
 
 def test_unbound_or_invalid_review_tasks_fail_closed(

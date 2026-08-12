@@ -8,7 +8,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from redactor import case_ids, case_manifests, media, review_finalization, review_sessions
+import cv2 as cv
+
+from redactor import (
+    case_ids,
+    case_manifests,
+    media,
+    review_api_contract,
+    review_finalization,
+    review_sessions,
+)
 from redactor.detection import rational_to_float
 from redactor.privacy_records import CATEGORY_FACE, CATEGORY_PLATE, PrivacyRegionRecord, stable_hash
 
@@ -209,6 +218,16 @@ def build_case_review_workspace(
         fps=fps,
     )
     entities = assign_entity_labels(entity_build["entities"])
+    thumbnail_audit = write_source_backed_entity_thumbnails(
+        workspace_dir=workspace_dir,
+        case_id=case_id,
+        entities=entities,
+        source_path=original_path,
+        source_sha256=context.source_identity.sha256,
+        source_frame_start=source_frame_start,
+        width=context.source_identity.width,
+        height=context.source_identity.height,
+    )
     validate_workspace_payload(
         case_id=case_id,
         selected_categories=selected_categories,
@@ -294,6 +313,8 @@ def build_case_review_workspace(
     atomic_write_json(case_path, case_payload)
 
     write_entity_registry(workspace_dir, case_id, entities)
+    atomic_write_json(workspace_dir / "representative_thumbnail_audit.json", thumbnail_audit)
+    atomic_write_json(workspace_dir / "review_entity_thumbnail_audit.json", thumbnail_audit)
     task_payload = {
         "actions": [
             {"action": action, "label": ACTION_LABELS[action]} for action in ALL_REVIEW_ACTIONS
@@ -379,6 +400,11 @@ def build_case_review_workspace(
             case_root,
             workspace_dir / "review_entities.json",
             "mixed_review_entities",
+        ),
+        "entity_thumbnail_audit": artifact_reference(
+            case_root,
+            workspace_dir / "representative_thumbnail_audit.json",
+            "mixed_review_entity_thumbnail_audit",
         ),
         "media_inventory": artifact_reference(
             case_root,
@@ -500,7 +526,25 @@ def build_case_review_workspace(
 
     from redactor import review_workspace
 
-    review_workspace.write_legacy_workspace_assets(workspace_dir)
+    try:
+        review_workspace.write_react_workspace_assets(workspace_dir, build_frontend=False)
+    except FileNotFoundError:
+        review_workspace.write_react_workspace_assets(workspace_dir, build_frontend=True)
+    workspace_manifest.update(
+        {
+            "api_schema_version": review_api_contract.API_SCHEMA_VERSION,
+            "frontend_build_manifest": "frontend_build_manifest.json",
+            "frontend_milestone_version": review_workspace.FRONTEND_MILESTONE_VERSION,
+            "legacy_fallback": "legacy.html",
+            "react_app_root": "app/",
+            "selected_frontend": "react",
+        }
+    )
+    atomic_write_json(
+        workspace_dir / "workspace_manifest.json",
+        workspace_manifest,
+        validator=validate_authoritative_workspace_manifest,
+    )
 
     artifacts = (
         artifact_reference(
@@ -1267,6 +1311,11 @@ def entity_from_builder(builder: dict[str, Any], *, fps: str) -> dict[str, Any]:
 def entity_from_source(source: ReviewEntitySource, *, fps: str) -> dict[str, Any]:
     fps_value = rational_to_float(fps) or 30.0
     bbox = median_bbox(source.bboxes)
+    observation_count = max(
+        int(source.render_region_count),
+        len(source.bboxes),
+        sum(int(value) for value in source.provenance_counts.values()),
+    )
     entity_id = deterministic_entity_id(
         case_id=source.case_id,
         category=source.category,
@@ -1299,7 +1348,7 @@ def entity_from_source(source: ReviewEntitySource, *, fps: str) -> dict[str, Any
         "evidence_summary": {
             "provenance_counts": dict(sorted(source.provenance_counts.items())),
             "region_count": source.render_region_count,
-            "review_observation_count": source.render_region_count,
+            "review_observation_count": observation_count,
             "review_task_count": len(task_ids),
             "review_tracklet_count": 1,
             "tracklet_count": 1,
@@ -1358,6 +1407,180 @@ def assign_entity_labels(entities: list[dict[str, Any]]) -> list[dict[str, Any]]
         label = f"{CATEGORY_LABEL_PREFIX[category]} {counters[category]:02d}"
         output.append(entity | {"display_name": label, "label": label})
     return output
+
+
+def write_source_backed_entity_thumbnails(
+    *,
+    workspace_dir: Path,
+    case_id: str,
+    entities: list[dict[str, Any]],
+    source_path: Path,
+    source_sha256: str,
+    source_frame_start: int,
+    width: int | None,
+    height: int | None,
+) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    if not source_path.exists():
+        for entity in entities:
+            entity["thumbnail_unavailable_reason"] = "source_media_missing"
+            rows.append(thumbnail_audit_row(entity, status="missing_source_media"))
+        return {
+            "cases": {case_id: rows},
+            "passed": False,
+            "schema_version": "representative_thumbnail_audit.v1",
+        }
+
+    capture = cv.VideoCapture(str(source_path))
+    try:
+        for entity in entities:
+            row = write_one_source_backed_entity_thumbnail(
+                workspace_dir=workspace_dir,
+                case_id=case_id,
+                entity=entity,
+                capture=capture,
+                source_sha256=source_sha256,
+                source_frame_start=source_frame_start,
+                width=width,
+                height=height,
+            )
+            rows.append(row)
+    finally:
+        capture.release()
+
+    return {
+        "cases": {case_id: rows},
+        "passed": not any(row["status"] == "failed" for row in rows),
+        "schema_version": "representative_thumbnail_audit.v1",
+    }
+
+
+def write_one_source_backed_entity_thumbnail(
+    *,
+    workspace_dir: Path,
+    case_id: str,
+    entity: dict[str, Any],
+    capture: cv.VideoCapture,
+    source_sha256: str,
+    source_frame_start: int,
+    width: int | None,
+    height: int | None,
+) -> dict[str, Any]:
+    bbox = parse_bbox(entity.get("representative_bbox"))
+    source_frame = optional_int(entity.get("representative_source_frame"))
+    entity_id = str(entity.get("entity_id") or "")
+    category = str(entity.get("category") or "")
+    if bbox is None or source_frame is None or not entity_id:
+        entity["thumbnail_unavailable_reason"] = "representative_geometry_missing"
+        return thumbnail_audit_row(entity, status="no_geometry")
+
+    frame_index = source_frame - int(source_frame_start or 0)
+    if frame_index < 0:
+        entity["thumbnail_unavailable_reason"] = "representative_frame_outside_source"
+        return thumbnail_audit_row(entity, status="failed")
+    capture.set(cv.CAP_PROP_POS_FRAMES, frame_index)
+    ok, frame = capture.read()
+    if not ok:
+        entity["thumbnail_unavailable_reason"] = "source_frame_unreadable"
+        return thumbnail_audit_row(entity, status="failed")
+
+    frame_height, frame_width = frame.shape[:2]
+    if width is not None and int(width) != frame_width:
+        entity["thumbnail_unavailable_reason"] = "source_width_mismatch"
+        return thumbnail_audit_row(entity, status="failed")
+    if height is not None and int(height) != frame_height:
+        entity["thumbnail_unavailable_reason"] = "source_height_mismatch"
+        return thumbnail_audit_row(entity, status="failed")
+
+    clamped = clamp_bbox(bbox, frame_width=frame_width, frame_height=frame_height)
+    if clamped is None:
+        entity["thumbnail_unavailable_reason"] = "representative_bbox_out_of_bounds"
+        return thumbnail_audit_row(entity, status="no_geometry")
+
+    x1, y1, x2, y2 = clamped
+    pad_fraction = 0.42 if category == CATEGORY_FACE else 0.55
+    pad = max(10, int(max(x2 - x1, y2 - y1) * pad_fraction))
+    left = max(0, x1 - pad)
+    top = max(0, y1 - pad)
+    right = min(frame_width, x2 + pad)
+    bottom = min(frame_height, y2 + pad)
+    crop = frame[top:bottom, left:right]
+    if crop.size == 0:
+        entity["thumbnail_unavailable_reason"] = "empty_source_crop"
+        return thumbnail_audit_row(entity, status="no_geometry")
+
+    target_height = 120
+    scale = target_height / max(1, crop.shape[0])
+    resized = cv.resize(
+        crop,
+        (max(1, int(crop.shape[1] * scale)), target_height),
+        interpolation=cv.INTER_AREA,
+    )
+    out_path = workspace_dir / "entities" / case_id / "thumbnails" / f"{entity_id}.jpg"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if not cv.imwrite(str(out_path), resized, [int(cv.IMWRITE_JPEG_QUALITY), 88]):
+        entity["thumbnail_unavailable_reason"] = "thumbnail_write_failed"
+        return thumbnail_audit_row(entity, status="failed")
+
+    relative = relative_to_workspace(out_path, workspace_dir)
+    identity = {
+        "bbox_xyxy": list(clamped),
+        "category": category,
+        "entity_id": entity_id,
+        "path": relative,
+        "schema_version": "source_backed_entity_thumbnail_identity.v1",
+        "source_frame": source_frame,
+        "source_frame_index": frame_index,
+        "source_sha256": source_sha256,
+        "thumbnail_sha256": media.sha256_file(out_path),
+    }
+    entity["representative_bbox"] = list(clamped)
+    entity["representative_thumbnail_identity"] = identity
+    entity["representative_thumbnail_path"] = relative
+    entity.pop("thumbnail_unavailable_reason", None)
+    return thumbnail_audit_row(entity, status="source_backed")
+
+
+def thumbnail_audit_row(entity: dict[str, Any], *, status: str) -> dict[str, Any]:
+    identity = dict(entity.get("representative_thumbnail_identity") or {})
+    return {
+        "bbox_xyxy": identity.get("bbox_xyxy") or entity.get("representative_bbox"),
+        "category": entity.get("category"),
+        "entity_id": entity.get("entity_id"),
+        "label": entity.get("label") or entity.get("display_name"),
+        "reason": entity.get("thumbnail_unavailable_reason"),
+        "representative_source_frame": entity.get("representative_source_frame"),
+        "source_sha256": identity.get("source_sha256"),
+        "status": status,
+        "thumbnail_path": entity.get("representative_thumbnail_path"),
+        "thumbnail_sha256": identity.get("thumbnail_sha256"),
+    }
+
+
+def parse_bbox(value: Any) -> tuple[int, int, int, int] | None:
+    if not isinstance(value, list | tuple) or len(value) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = (int(round(float(item))) for item in value)
+    except (TypeError, ValueError):
+        return None
+    return x1, y1, x2, y2
+
+
+def clamp_bbox(
+    bbox: tuple[int, int, int, int],
+    *,
+    frame_width: int,
+    frame_height: int,
+) -> tuple[int, int, int, int] | None:
+    x1, y1, x2, y2 = bbox
+    left = max(0, min(frame_width, min(x1, x2)))
+    right = max(0, min(frame_width, max(x1, x2)))
+    top = max(0, min(frame_height, min(y1, y2)))
+    bottom = max(0, min(frame_height, max(y1, y2)))
+    if right <= left or bottom <= top:
+        return None
+    return left, top, right, bottom
 
 
 def build_tasks(
@@ -2159,8 +2382,16 @@ def task_issue_type(category: str, task: dict[str, Any]) -> str:
             return "technical_signal"
         if "spot_check" in str(task.get("review_task_id") or ""):
             return "optional_spot_check"
-        if "false_positive" in stage or "false_positive" in reasons:
+        if "false_positive" in stage or any("false" in reason for reason in reasons):
             return "possible_false_redaction"
+        if reasons & {"anchor_scale_change_too_large", "gap_exceeds_safe_interpolation_limit"}:
+            return "plate_coverage_gap"
+        if stage in {"plate_tracking", "license_plate_tracking"} or reasons & {
+            "insufficient_observations_for_auto_accept",
+            "low_observation_density",
+            "unresolved_internal_gap",
+        }:
+            return "plate_track_review_required"
         return "possible_privacy_gap"
     task_category = str(task.get("category") or task.get("normal_task_class") or "")
     reasons = set(str(item) for item in task.get("raw_reason_codes") or [])
@@ -2194,7 +2425,11 @@ def task_allowed_actions(category: str, task: dict[str, Any], issue_type: str) -
     if explicit:
         return explicit
     if category == CATEGORY_PLATE:
-        if issue_type == "possible_privacy_gap":
+        if issue_type in {
+            "plate_coverage_gap",
+            "plate_track_review_required",
+            "possible_privacy_gap",
+        }:
             return [review_sessions.ACTION_PRIVACY_LEAK, review_sessions.ACTION_NOT_SENSITIVE]
         if issue_type in {"possible_false_redaction", "optional_spot_check"}:
             return [
@@ -2277,6 +2512,10 @@ def task_title(category: str, task: dict[str, Any], issue_type: str) -> str:
         return "Spot check this moment"
     if issue_type == "possible_false_redaction":
         return "Possible false redaction"
+    if issue_type == "plate_coverage_gap":
+        return "Plate coverage needs correction"
+    if issue_type == "plate_track_review_required":
+        return "Plate track requires review"
     if category == CATEGORY_FACE:
         return "Possible face privacy gap"
     return "Possible plate privacy gap"
@@ -2289,6 +2528,10 @@ def task_what_happened(category: str, task: dict[str, Any], issue_type: str) -> 
         return str(task["explanation"])
     if issue_type == "optional_spot_check":
         return "The system selected this moment for a deterministic review sample."
+    if issue_type == "plate_coverage_gap":
+        return "The plate tracker found a coverage gap that needs human correction."
+    if issue_type == "plate_track_review_required":
+        return "The plate tracker marked this interval for human review."
     if category == CATEGORY_FACE:
         return "The face pipeline marked this interval for human review."
     return "The plate pipeline marked this interval for human review."

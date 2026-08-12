@@ -35,7 +35,7 @@ export function EntityCard({ entity, onJump, onPolicy, onSelect, pending, select
         {entity.representative_thumbnail_path ? (
           <img src={`/${entity.representative_thumbnail_path}`} alt={`${entity.label} representative thumbnail`} />
         ) : (
-          <span className="thumbnail-placeholder" />
+          <span className="thumbnail-placeholder">No preview available</span>
         )}
       </button>
       <div className="entity-copy">

@@ -1588,6 +1588,119 @@ def test_manual_redaction_category_contract_is_shared() -> None:
     ) in frontend_api_types
 
 
+def test_manual_only_category_is_not_required_as_detector_run(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_OTHER_SENSITIVE,
+        configuration_freeze_hash="freeze",
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),),
+        operation=review_corrections.OP_ADD,
+        reason="manual-only sensitive region",
+        reviewer_identity={"reviewer_id": "analyst@example.test"},
+        source_frame_end=0,
+        source_frame_start=0,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id="manual_other_sensitive",
+    )
+
+    records, provenance = reviewed_regions.apply_review_corrections(
+        [],
+        [correction],
+        manifest=manifest,
+        selected_categories=[CATEGORY_FACE, CATEGORY_PLATE],
+        effective_entities=[],
+    )
+
+    assert [record.category for record in records] == [CATEGORY_OTHER_SENSITIVE]
+    assert records[0].source_record["reviewed_region_kind"] == "manual_correction"
+    assert provenance["added_region_count"] == 1
+
+
+def test_manual_only_category_preview_save_ignores_detector_run_selection(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_FACE, CATEGORY_PLATE),
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/v1/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        correction = {
+            "case_id": manifest.case_id,
+            "category": CATEGORY_OTHER_SENSITIVE,
+            "configuration_freeze_hash": session["configuration_freeze_hash"],
+            "interpolation_method": review_corrections.INTERPOLATION_NONE,
+            "keyframe_boxes": [{"bbox_xyxy": [12, 12, 44, 30], "source_frame": 1}],
+            "operation": review_corrections.OP_ADD,
+            "reason": "manual-only category preview",
+            "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+            "source_frame_end": 1,
+            "source_frame_start": 1,
+            "source_video_hash": manifest.source_video_hash,
+            "task_id": "manual_other_sensitive",
+        }
+
+        preview_response = post_json(
+            f"{base_url}/api/v1/corrections/preview",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "reason": "manual-only category preview",
+                "session_id": session["session_id"],
+            },
+        )
+        correction_response = post_json(
+            f"{base_url}/api/v1/corrections",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "correction": correction,
+                "preview_token": preview_response["preview"]["preview_token"],
+                "reason": "manual-only category save",
+                "session_id": session["session_id"],
+            },
+        )
+        effective_regions, provenance = review_working_state.compute_effective_privacy_regions(
+            package,
+            package / "sessions" / session["session_id"],
+            case_id=manifest.case_id,
+        )
+        manual_regions = [
+            record for record in effective_regions if record.provenance == "reviewed_correction"
+        ]
+
+        assert preview_response["ok"] is True
+        assert correction_response["ok"] is True
+        assert correction_response["event"]["after_state"]["category"] == CATEGORY_OTHER_SENSITIVE
+        assert [record.category for record in manual_regions] == [CATEGORY_OTHER_SENSITIVE]
+        assert provenance["reviewed_region_identity"]["selected_categories"] == [
+            CATEGORY_FACE,
+            CATEGORY_PLATE,
+        ]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_noop_entity_policy_skips_materialization_job(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest, entity = write_policy_entity_package(package)

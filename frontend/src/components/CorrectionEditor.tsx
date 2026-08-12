@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent, RefObject } from 'react';
 import type { Attribution, Case, Correction, Task } from '../types/api';
 import type { CaseId, CorrectionCheckpointDraft, CorrectionDraft, CorrectionKeyframeDraft, ManualRedactionCategory } from '../types/domain';
@@ -44,6 +44,10 @@ export function CorrectionEditor({
   const canPreview = validation.valid && !busy;
   const canSave = previewReady && !busy;
   const currentKeyframe = draft.keyframes.find((keyframe) => keyframe.source_frame === currentSourceFrame);
+
+  useEffect(() => {
+    setError('');
+  }, [draft.draft_hash, draft.case_id]);
 
   const startFrame = draft.start_source_frame;
   const endFrame = draft.end_source_frame;
@@ -289,7 +293,14 @@ export function CorrectionEditor({
           <button type="button" onClick={() => void run('save')} disabled={!canSave}>
             Save correction
           </button>
-          <button type="button" onClick={onDiscard} disabled={busy}>
+          <button
+            type="button"
+            onClick={() => {
+              setError('');
+              onDiscard();
+            }}
+            disabled={busy}
+          >
             Discard
           </button>
         </div>

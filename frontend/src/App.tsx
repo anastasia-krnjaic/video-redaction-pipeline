@@ -7,6 +7,7 @@ import { useWorkspace } from './hooks/useWorkspace';
 import { policyVerificationTask } from './state/reviewState';
 import type { AuditEvent, Task } from './types/api';
 import type { EffectiveEntity, TopLevelRoute } from './types/domain';
+import { caseTabLabel } from './utils/cases';
 import { AuditTrailPage } from './pages/AuditTrailPage';
 import { CaseReviewPage } from './pages/CaseReviewPage';
 import { FinalResultsPage } from './pages/FinalResultsPage';
@@ -18,6 +19,14 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [manualTasks, setManualTasks] = useState<Task[]>([]);
   const [entityOverrides, setEntityOverrides] = useState<Record<string, EffectiveEntity>>({});
+  const caseTabs = useMemo(() => caseTabsForWorkspace(workspaceState.workspace), [workspaceState.workspace]);
+
+  useEffect(() => {
+    if (!workspaceState.workspace || route === 'final' || route === 'audit') return;
+    if (workspaceState.workspace.cases[route]) return;
+    const firstCase = caseTabs[0]?.caseId;
+    if (firstCase) setRoute(firstCase);
+  }, [caseTabs, route, setRoute, workspaceState.workspace]);
 
   useEffect(() => {
     if (workspaceState.workingState) {
@@ -54,6 +63,7 @@ export function App() {
     if (route === 'audit') {
       return <AuditTrailPage events={workspaceState.events} workspace={workspaceState.workspace} />;
     }
+    if (!workspaceState.workspace.cases[route]) return null;
     return (
       <CaseReviewPage
         key={route}
@@ -138,6 +148,7 @@ export function App() {
       <AppShell
         attribution={workspaceState.attribution}
         busy={busy}
+        cases={caseTabs}
         error={workspaceState.error}
         route={route}
         session={workspaceState.session}
@@ -175,7 +186,7 @@ function rebuildFromEvents(events: AuditEvent[]): {
       const entity = after as unknown as EffectiveEntity;
       entityOverrides[entity.entity_id] = entity;
       const taskId = typeof after.verification_task_id === 'string' ? after.verification_task_id : null;
-      if (taskId && (event.case_id === 'day' || event.case_id === 'night')) {
+      if (taskId && typeof event.case_id === 'string') {
         manualTasks.push(policyVerificationTask(event.case_id, entity, taskId));
       }
     }
@@ -189,6 +200,16 @@ function rebuildFromEvents(events: AuditEvent[]): {
     }
   }
   return { entityOverrides, manualTasks };
+}
+
+export function caseTabsForWorkspace(
+  workspace: ReturnType<typeof useWorkspace>['workspace'],
+): Array<{ caseId: string; label: string }> {
+  if (!workspace) return [];
+  return Object.values(workspace.cases).map((item) => ({
+    caseId: item.case_id,
+    label: caseTabLabel(item.case_id, item.display_name),
+  }));
 }
 
 function isTask(value: unknown): value is Task {

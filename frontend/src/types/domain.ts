@@ -1,6 +1,6 @@
 import type { Entity, ManualPrivacyCategory, MediaVersion, Task, TaskDecision, WorkingState } from './api';
 
-export type CaseId = 'day' | 'night';
+export type CaseId = string;
 export type TopLevelRoute = CaseId | 'final' | 'audit';
 export type ReviewMode = 'review' | 'edit';
 export type QueueBucket = 'Open' | 'Waiting' | 'Needs correction' | 'Unsure / Escalated' | 'Completed';

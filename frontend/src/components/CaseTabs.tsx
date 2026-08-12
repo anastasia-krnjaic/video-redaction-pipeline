@@ -1,18 +1,17 @@
 import type { TopLevelRoute } from '../types/domain';
 
-const tabs: Array<{ route: TopLevelRoute; label: string }> = [
-  { route: 'day', label: 'Day' },
-  { route: 'night', label: 'Night' },
-  { route: 'final', label: 'Final Results' },
-  { route: 'audit', label: 'History' },
-];
-
 interface Props {
   active: TopLevelRoute;
+  cases: Array<{ caseId: string; label: string }>;
   onChange: (route: TopLevelRoute) => void;
 }
 
-export function CaseTabs({ active, onChange }: Props) {
+export function CaseTabs({ active, cases, onChange }: Props) {
+  const tabs: Array<{ route: TopLevelRoute; label: string }> = [
+    ...cases.map((item) => ({ route: item.caseId, label: item.label })),
+    { route: 'final', label: 'Final Results' },
+    { route: 'audit', label: 'History' },
+  ];
   return (
     <nav className="case-tabs" aria-label="Workspace pages">
       {tabs.map((tab) => (
