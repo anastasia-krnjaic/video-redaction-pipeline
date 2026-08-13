@@ -29,6 +29,9 @@ ENTITY_REGISTRY_SCHEMA_VERSION = "review_entity_registry.v2"
 SESSION_STATE_SCHEMA_VERSION = "mixed_review_session_state.v1"
 CATEGORY_RUN_IDENTITY_SCHEMA_VERSION = "category_run_manifest_identity.v1"
 LATEST_REVIEWED_PUBLICATION_SCHEMA_VERSION = "latest_reviewed_publication_capability.v1"
+TARGET_BINDING_SCHEMA_VERSION = "review_task_target_binding.v1"
+TARGET_BINDING_ENTITY = "entity"
+TARGET_BINDING_SOURCE_SPAN = "source_span"
 
 CATEGORY_ORDER = {CATEGORY_FACE: 0, CATEGORY_PLATE: 1}
 CATEGORY_LABEL_PREFIX = {CATEGORY_FACE: "Person", CATEGORY_PLATE: "Plate"}
@@ -67,6 +70,31 @@ ACTION_ALIASES = {
     "wrong_target": review_sessions.ACTION_WRONG_TARGET,
 }
 
+SOURCE_SPAN_REVIEW_REASON_CODES = {
+    "gap_exceeds_safe_interpolation_limit",
+    "identity_competition",
+    "insufficient_observations_for_auto_accept",
+    "insufficient_observed_hits",
+    "insufficient_strong_hits",
+    "long_gap",
+    "low_confidence_observations",
+    "low_median_observed_score",
+    "low_observation_density",
+    "needs_review_interval",
+    "observed_confirmation_window",
+    "policy_assignment_review",
+    "quality_status_rejected",
+    "rejected_interval",
+    "render_validation_failure",
+    "strong_confirmation_window",
+    "track_end",
+    "track_start",
+    "unresolved_interval",
+    "unresolved_internal_gap",
+    "unresolved_privacy_frames",
+    "weak_only_observations",
+}
+
 
 @dataclass
 class ReviewEntitySource:
@@ -95,6 +123,13 @@ class ReviewEntitySource:
         self.last_frame = value if self.last_frame is None else max(self.last_frame, value)
         if self.representative_frame is None:
             self.representative_frame = value
+
+
+@dataclass(frozen=True)
+class TaskTargetBinding:
+    kind: str
+    entity_keys: tuple[str, ...] = ()
+    payload: dict[str, Any] = field(default_factory=dict)
 
 ALL_REVIEW_ACTIONS = (
     review_sessions.ACTION_LOOKS_CORRECT,
@@ -970,20 +1005,37 @@ def build_entity_sources(
             start, end = task_frame_span(task, source_frame_end=source_frame_end)
             keys = task_entity_keys(category, task)
             missing_keys = [key for key in keys if (category, key) not in sources]
+            fallback_keys: tuple[str, ...] = ()
+            fallback_missing_keys: list[str] = []
             if (not keys or missing_keys) and task_allows_interval_fallback(category, task):
-                keys = fallback_interval_task_entity_keys(
+                fallback_keys = fallback_interval_task_entity_keys(
                     sources,
                     category=category,
                     frame_start=start,
                     frame_end=end,
                 )
-                missing_keys = [key for key in keys if (category, key) not in sources]
-            if not keys or missing_keys:
+                fallback_missing_keys = [
+                    key for key in fallback_keys if (category, key) not in sources
+                ]
+            binding = resolve_task_target_binding(
+                case_id=case_id,
+                category=category,
+                task=task,
+                frame_start=start,
+                frame_end=end,
+                entity_keys=keys,
+                missing_entity_keys=missing_keys,
+                fallback_entity_keys=fallback_keys,
+                fallback_missing_entity_keys=fallback_missing_keys,
+            )
+            if binding.kind == TARGET_BINDING_SOURCE_SPAN:
+                continue
+            if binding.kind != TARGET_BINDING_ENTITY:
                 raise ValueError(
                     f"unbound_review_task: {category}:{source_task_id(category, task)} "
                     "has no source-backed target identity"
                 )
-            for key in keys:
+            for key in binding.entity_keys:
                 source = sources[(category, key)]
                 source.task_ids.add(source_task_id(category, task))
                 source.observe_frame(start)
@@ -1191,7 +1243,9 @@ def build_entities_from_sources(
                 case_id=case_id,
                 category=source.category,
                 key=source.source_key,
-            )
+            ),
+            "first_frame": source.first_frame,
+            "last_frame": source.last_frame,
         }
         for source in sources.values()
     }
@@ -1599,23 +1653,44 @@ def build_tasks(
             validate_task_timestamps(source_task, start=start, end=end, fps=fps)
             keys = task_entity_keys(category, source_task)
             missing_keys = [key for key in keys if (category, key) not in entities_by_key]
+            fallback_keys: tuple[str, ...] = ()
+            fallback_missing_keys: list[str] = []
             if (not keys or missing_keys) and task_allows_interval_fallback(
                 category,
                 source_task,
             ):
-                keys = fallback_task_entity_keys(entities_by_key, category=category)
-                missing_keys = [key for key in keys if (category, key) not in entities_by_key]
-            if not keys or missing_keys:
+                fallback_keys = fallback_task_entity_keys(
+                    entities_by_key,
+                    category=category,
+                    frame_start=start,
+                    frame_end=end,
+                )
+                fallback_missing_keys = [
+                    key for key in fallback_keys if (category, key) not in entities_by_key
+                ]
+            binding = resolve_task_target_binding(
+                case_id=case_id,
+                category=category,
+                task=source_task,
+                frame_start=start,
+                frame_end=end,
+                entity_keys=keys,
+                missing_entity_keys=missing_keys,
+                fallback_entity_keys=fallback_keys,
+                fallback_missing_entity_keys=fallback_missing_keys,
+            )
+            if binding.kind not in {TARGET_BINDING_ENTITY, TARGET_BINDING_SOURCE_SPAN}:
                 raise ValueError(
                     f"unbound_review_task: {category}:{source_task_id(category, source_task)} "
                     "has no source-backed target identity"
                 )
+            keys = binding.entity_keys
             entity_ids = [
                 entities_by_key[(category, key)]["entity_id"]
                 for key in keys
                 if (category, key) in entities_by_key
             ]
-            if len(entity_ids) != len(keys):
+            if binding.kind == TARGET_BINDING_ENTITY and len(entity_ids) != len(keys):
                 raise ValueError(
                     f"{category} task has no review entity: {source_task_id(category, source_task)}"
                 )
@@ -1623,42 +1698,55 @@ def build_tasks(
             issue_type = task_issue_type(category, source_task)
             blocking = task_blocking(category, source_task)
             allowed_actions = task_allowed_actions(category, source_task, issue_type)
-            tasks.append(
-                {
-                    "allowed_actions": allowed_actions,
-                    "blocking": blocking,
-                    "case_id": case_id,
-                    "category": category,
-                    "category_allowed_actions": source_task.get("allowed_actions")
-                    or source_task.get("allowed_user_actions")
-                    or [],
-                    "category_review_source": category_tasks[category]["source_path"],
-                    "correction_required": blocking or issue_type in {"possible_privacy_gap"},
-                    "decision_state": "pending",
-                    "entity_id": entity_ids[0],
-                    "issue_type": issue_type,
-                    "media_roles": {
-                        "automatic": f"media/{case_id}/automatic_preview.mp4",
-                        "original": f"media/{case_id}/original.mp4",
-                    },
-                    "normal_task_class": issue_type,
-                    "optional": not blocking,
-                    "raw_signal_ids": raw_signal_ids(source_task),
-                    "review_task_id": task_id,
-                    "schema_version": TASK_SCHEMA_VERSION,
-                    "severity": task_severity(source_task, blocking),
-                    "source_frame_end": end,
-                    "source_frame_start": start,
-                    "source_task": source_task,
-                    "source_task_id": source_task_id(category, source_task),
-                    "target_entity_ids": entity_ids,
-                    "technical_only": bool(source_task.get("technical_only", False)),
-                    "technical_track_ids": list(keys),
-                    "title": task_title(category, source_task, issue_type),
-                    "what_happened": task_what_happened(category, source_task, issue_type),
-                    "what_to_inspect": task_what_to_inspect(category, source_task, issue_type),
-                }
-            )
+            task_payload = {
+                "allowed_actions": allowed_actions,
+                "blocking": blocking,
+                "case_id": case_id,
+                "category": category,
+                "category_allowed_actions": source_task.get("allowed_actions")
+                or source_task.get("allowed_user_actions")
+                or [],
+                "category_review_source": category_tasks[category]["source_path"],
+                "correction_required": blocking or issue_type in {"possible_privacy_gap"},
+                "decision_state": "pending",
+                "issue_type": issue_type,
+                "media_roles": {
+                    "automatic": f"media/{case_id}/automatic_preview.mp4",
+                    "original": f"media/{case_id}/original.mp4",
+                },
+                "normal_task_class": issue_type,
+                "optional": not blocking,
+                "raw_signal_ids": raw_signal_ids(source_task),
+                "review_task_id": task_id,
+                "schema_version": TASK_SCHEMA_VERSION,
+                "severity": task_severity(source_task, blocking),
+                "source_frame_end": end,
+                "source_frame_start": start,
+                "source_task": source_task,
+                "source_task_id": source_task_id(category, source_task),
+                "target_binding": binding.payload,
+                "technical_only": bool(source_task.get("technical_only", False)),
+                "title": task_title(category, source_task, issue_type),
+                "what_happened": task_what_happened(category, source_task, issue_type),
+                "what_to_inspect": task_what_to_inspect(category, source_task, issue_type),
+            }
+            if binding.kind == TARGET_BINDING_ENTITY:
+                task_payload.update(
+                    {
+                        "entity_id": entity_ids[0],
+                        "target_entity_ids": entity_ids,
+                        "technical_track_ids": list(keys),
+                    }
+                )
+            else:
+                task_payload.update(
+                    {
+                        "entity_id": None,
+                        "target_entity_ids": [],
+                        "technical_track_ids": [],
+                    }
+                )
+            tasks.append(task_payload)
     seen: set[str] = set()
     seen_semantic: set[tuple[Any, ...]] = set()
     for task in tasks:
@@ -1717,7 +1805,10 @@ def validate_workspace_payload(
     for task in tasks:
         task_id = str(task.get("review_task_id") or "")
         category = str(task.get("category") or "")
-        entity_id = str(task.get("entity_id") or "")
+        raw_entity_id = task.get("entity_id")
+        entity_id = str(raw_entity_id) if raw_entity_id not in {None, ""} else ""
+        target_binding = dict(task.get("target_binding") or {})
+        binding_kind = str(target_binding.get("kind") or "")
         if task_id in task_ids:
             errors.append(f"duplicate review task id: {task_id}")
         task_ids.add(task_id)
@@ -1725,10 +1816,38 @@ def validate_workspace_payload(
             errors.append(f"{task_id}: wrong case_id")
         if category not in selected:
             errors.append(f"{task_id}: unselected category {category}")
-        if entity_id not in entity_ids:
-            errors.append(f"{task_id}: unknown entity_id {entity_id}")
-        elif entity_ids[entity_id] != category:
-            errors.append(f"{task_id}: entity category mismatch")
+        if binding_kind == TARGET_BINDING_ENTITY:
+            if entity_id not in entity_ids:
+                errors.append(f"{task_id}: unknown entity_id {entity_id}")
+            elif entity_ids[entity_id] != category:
+                errors.append(f"{task_id}: entity category mismatch")
+            target_entity_ids = [str(item) for item in list(task.get("target_entity_ids") or [])]
+            if not target_entity_ids:
+                errors.append(f"{task_id}: entity binding missing target_entity_ids")
+            for target_entity_id in target_entity_ids:
+                if target_entity_id not in entity_ids:
+                    errors.append(f"{task_id}: unknown target_entity_id {target_entity_id}")
+                elif entity_ids[target_entity_id] != category:
+                    errors.append(f"{task_id}: target entity category mismatch")
+        elif binding_kind == TARGET_BINDING_SOURCE_SPAN:
+            if entity_id:
+                errors.append(f"{task_id}: source-span task must not reference entity_id")
+            if task.get("target_entity_ids"):
+                errors.append(f"{task_id}: source-span task must not reference target entities")
+            if target_binding.get("case_id") != case_id:
+                errors.append(f"{task_id}: source-span binding case mismatch")
+            if target_binding.get("category") != category:
+                errors.append(f"{task_id}: source-span binding category mismatch")
+            if target_binding.get("source_task_id") != task.get("source_task_id"):
+                errors.append(f"{task_id}: source-span binding task identity mismatch")
+            if target_binding.get("source_frame_start") != task.get("source_frame_start"):
+                errors.append(f"{task_id}: source-span binding start mismatch")
+            if target_binding.get("source_frame_end") != task.get("source_frame_end"):
+                errors.append(f"{task_id}: source-span binding end mismatch")
+            if not target_binding.get("event_ids"):
+                errors.append(f"{task_id}: source-span binding missing event identity")
+        else:
+            errors.append(f"{task_id}: missing target binding")
         if int(task.get("source_frame_end") or 0) < int(task.get("source_frame_start") or 0):
             errors.append(f"{task_id}: invalid frame span")
         if int(task.get("source_frame_start") or 0) < 0:
@@ -1783,6 +1902,7 @@ def workspace_validation_report(
             "selected_categories": list(selected_categories),
             "source_preview_dimensions_fps_span_valid": media_validation.get("passed") is True,
             "task_ids_unique": True,
+            "tasks_reference_valid_targets": True,
             "tasks_reference_valid_entities": True,
         },
         "entity_count": len(entities),
@@ -1799,6 +1919,11 @@ def workspace_validation_report(
         ),
         "preview_source_hash": preview_manifest.get("source_video_hash"),
         "schema_version": "mixed_review_workspace_validation.v1",
+        "source_span_task_count": sum(
+            1
+            for task in tasks
+            if dict(task.get("target_binding") or {}).get("kind") == TARGET_BINDING_SOURCE_SPAN
+        ),
         "task_count": len(tasks),
     }
 
@@ -2283,6 +2408,225 @@ def task_entity_keys(category: str, task: dict[str, Any]) -> tuple[str, ...]:
     return tuple(str(item) for item in track_uids if str(item))
 
 
+def resolve_task_target_binding(
+    *,
+    case_id: str,
+    category: str,
+    task: dict[str, Any],
+    frame_start: int,
+    frame_end: int,
+    entity_keys: tuple[str, ...],
+    missing_entity_keys: list[str],
+    fallback_entity_keys: tuple[str, ...],
+    fallback_missing_entity_keys: list[str],
+) -> TaskTargetBinding:
+    if entity_keys and not missing_entity_keys:
+        return TaskTargetBinding(
+            kind=TARGET_BINDING_ENTITY,
+            entity_keys=entity_keys,
+            payload=entity_target_binding_payload(
+                case_id=case_id,
+                category=category,
+                task=task,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                entity_keys=entity_keys,
+            ),
+        )
+    if fallback_entity_keys and not fallback_missing_entity_keys:
+        return TaskTargetBinding(
+            kind=TARGET_BINDING_ENTITY,
+            entity_keys=fallback_entity_keys,
+            payload=entity_target_binding_payload(
+                case_id=case_id,
+                category=category,
+                task=task,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                entity_keys=fallback_entity_keys,
+            )
+            | {"binding_source": "interval_entity_overlap"},
+        )
+    if task_supports_source_span_binding(
+        case_id=case_id,
+        category=category,
+        task=task,
+        frame_start=frame_start,
+        frame_end=frame_end,
+    ):
+        return TaskTargetBinding(
+            kind=TARGET_BINDING_SOURCE_SPAN,
+            payload=source_span_target_binding_payload(
+                case_id=case_id,
+                category=category,
+                task=task,
+                frame_start=frame_start,
+                frame_end=frame_end,
+                unresolved_entity_keys=entity_keys,
+                missing_entity_keys=missing_entity_keys,
+            ),
+        )
+    return TaskTargetBinding(kind="unbound")
+
+
+def entity_target_binding_payload(
+    *,
+    case_id: str,
+    category: str,
+    task: dict[str, Any],
+    frame_start: int,
+    frame_end: int,
+    entity_keys: tuple[str, ...],
+) -> dict[str, Any]:
+    return {
+        "case_id": case_id,
+        "category": category,
+        "kind": TARGET_BINDING_ENTITY,
+        "schema_version": TARGET_BINDING_SCHEMA_VERSION,
+        "source_frame_end": frame_end,
+        "source_frame_start": frame_start,
+        "source_task_id": source_task_id(category, task),
+        "technical_track_ids": list(entity_keys),
+    }
+
+
+def source_span_target_binding_payload(
+    *,
+    case_id: str,
+    category: str,
+    task: dict[str, Any],
+    frame_start: int,
+    frame_end: int,
+    unresolved_entity_keys: tuple[str, ...],
+    missing_entity_keys: list[str],
+) -> dict[str, Any]:
+    return {
+        "binding_source": "authoritative_review_task_interval",
+        "case_id": case_id,
+        "category": category,
+        "event_ids": task_event_ids(category, task),
+        "kind": TARGET_BINDING_SOURCE_SPAN,
+        "missing_entity_keys": list(missing_entity_keys),
+        "reason_codes": task_reason_codes(task),
+        "schema_version": TARGET_BINDING_SCHEMA_VERSION,
+        "source_frame_end": frame_end,
+        "source_frame_start": frame_start,
+        "source_review_category": str(task.get("category") or task.get("task_type") or ""),
+        "source_task_id": source_task_id(category, task),
+        "unresolved_entity_keys": list(unresolved_entity_keys),
+    }
+
+
+def task_supports_source_span_binding(
+    *,
+    case_id: str,
+    category: str,
+    task: dict[str, Any],
+    frame_start: int,
+    frame_end: int,
+) -> bool:
+    if task_has_explicit_entity_claim(category, task):
+        return False
+    task_case_id = task.get("case_id")
+    if task_case_id not in {None, "", case_id}:
+        raise ValueError(
+            f"source_span_review_task: {category}:{source_task_id(category, task)} "
+            f"case mismatch {task_case_id} != {case_id}"
+        )
+    object_category = task.get("object_category")
+    if object_category not in {None, "", category}:
+        raise ValueError(
+            f"source_span_review_task: {category}:{source_task_id(category, task)} "
+            f"category mismatch {object_category} != {category}"
+        )
+    explicit_id = first_present(task, "review_task_id", "reviewer_task_id")
+    if explicit_id in {None, ""}:
+        return False
+    event_ids = task_event_ids(category, task)
+    if not event_ids:
+        return False
+    if not source_span_media_covers_task(task, frame_start=frame_start, frame_end=frame_end):
+        return False
+    reasons = set(task_reason_codes(task))
+    issue_type = str(task.get("category") or task.get("task_type") or "").lower()
+    if issue_type not in {"action_required", "corrected_result_check"}:
+        return False
+    return bool(reasons & SOURCE_SPAN_REVIEW_REASON_CODES)
+
+
+def task_has_explicit_entity_claim(category: str, task: dict[str, Any]) -> bool:
+    fields = ("object_id", "track_id", "target_track_id", "target_track_ids")
+    if any(has_meaningful_value(task.get(field)) for field in fields):
+        return True
+    if category == CATEGORY_PLATE:
+        return bool(task.get("track_uids") or task.get("track_ids"))
+    return False
+
+
+def has_meaningful_value(value: Any) -> bool:
+    if value is None or value == "":
+        return False
+    if isinstance(value, list | tuple | set | dict):
+        return bool(value)
+    return True
+
+
+def task_event_ids(category: str, task: dict[str, Any]) -> list[str]:
+    ids = raw_signal_ids(task)
+    for key in ("primary_raw_review_item_ids", "review_task_id", "reviewer_task_id"):
+        value = task.get(key)
+        values = value if isinstance(value, list | tuple) else [value]
+        for item in values:
+            if item not in {None, ""} and str(item) not in ids:
+                ids.append(str(item))
+    if not ids and category == CATEGORY_PLATE:
+        value = task.get("review_task_id")
+        if value not in {None, ""}:
+            ids.append(str(value))
+    return ids
+
+
+def task_reason_codes(task: dict[str, Any]) -> list[str]:
+    raw = task.get("raw_reason_codes") or task.get("reason_codes") or task.get("reasons") or []
+    if isinstance(raw, (str, int)):
+        raw = [raw]
+    normalized: list[str] = []
+    for item in raw:
+        text = str(item).strip().lower().replace(":", "_")
+        if text and text not in normalized:
+            normalized.append(text)
+    return normalized
+
+
+def source_span_media_covers_task(
+    task: dict[str, Any],
+    *,
+    frame_start: int,
+    frame_end: int,
+) -> bool:
+    ranges = source_frame_ranges_from_task_media(task)
+    if not ranges:
+        return False
+    return any(start <= frame_start and frame_end <= end for start, end in ranges)
+
+
+def source_frame_ranges_from_task_media(task: dict[str, Any]) -> list[tuple[int, int]]:
+    roles = task.get("media_roles") or []
+    if isinstance(roles, dict):
+        roles = list(roles.values())
+    ranges: list[tuple[int, int]] = []
+    for role in roles:
+        if not isinstance(role, dict):
+            continue
+        audit = dict(role.get("media_audit") or {})
+        source_range = dict(audit.get("source_frame_range") or role.get("source_frame_range") or {})
+        start = optional_int(source_range.get("frame_start"))
+        end = optional_int(source_range.get("frame_end"))
+        if start is not None and end is not None:
+            ranges.append((start, end))
+    return ranges
+
+
 def task_allows_interval_fallback(category: str, task: dict[str, Any]) -> bool:
     if task.get("media_roles") or task.get("corrected_context"):
         return True
@@ -2321,10 +2665,18 @@ def fallback_task_entity_keys(
     entities_by_key: dict[tuple[str, str], dict[str, Any]],
     *,
     category: str,
+    frame_start: int,
+    frame_end: int,
 ) -> tuple[str, ...]:
-    return tuple(
-        key for source_category, key in sorted(entities_by_key) if source_category == category
-    )
+    keys: list[str] = []
+    for (source_category, key), entity in sorted(entities_by_key.items()):
+        if source_category != category:
+            continue
+        first = entity.get("first_frame")
+        last = entity.get("last_frame")
+        if first is None or last is None or int(first) <= frame_end and int(last) >= frame_start:
+            keys.append(key)
+    return tuple(keys)
 
 
 def entity_key_for_record(record: PrivacyRegionRecord) -> str:

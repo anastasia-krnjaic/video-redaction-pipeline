@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import type { Entity, Task, TaskDecision } from '../src/types/api';
-import { ACTIONS, bucketCounts, effectiveEntities, filteredEntities, taskBucket, tasksForCase } from '../src/state/reviewState';
+import {
+  ACTIONS,
+  bucketCounts,
+  effectiveEntities,
+  filteredEntities,
+  taskBucket,
+  taskDecisionActionOptions,
+  tasksForCase,
+} from '../src/state/reviewState';
 
 const task: Task = {
   case_id: 'day',
@@ -73,6 +81,39 @@ describe('review state helpers', () => {
       Completed: 1,
     });
     expect(Object.keys(counts)).not.toContain('Resolved');
+  });
+
+  it('renders only source-span restricted task actions from the manifest allowlist', () => {
+    const actions = taskDecisionActionOptions({
+      allowed_actions: [ACTIONS.needsCorrection, ACTIONS.unsure],
+    });
+
+    expect(actions.map((action) => action.action)).toEqual([
+      ACTIONS.needsCorrection,
+      ACTIONS.unsure,
+    ]);
+    expect(actions.map((action) => action.label)).toEqual(['Needs correction', 'Unsure']);
+    expect(actions.some((action) => action.action === ACTIONS.looksCorrect)).toBe(false);
+    expect(actions.some((action) => action.action === ACTIONS.notSensitive)).toBe(false);
+  });
+
+  it('preserves normal entity task actions when the manifest allows Correct', () => {
+    const actions = taskDecisionActionOptions({
+      allowed_actions: [
+        ACTIONS.looksCorrect,
+        ACTIONS.needsCorrection,
+        ACTIONS.notSensitive,
+        ACTIONS.unsure,
+      ],
+    });
+
+    expect(actions.map((action) => action.action)).toEqual([
+      ACTIONS.looksCorrect,
+      ACTIONS.needsCorrection,
+      ACTIONS.notSensitive,
+      ACTIONS.unsure,
+    ]);
+    expect(actions.map((action) => action.label)).toContain('Correct');
   });
 
   it('filters effective entities and hides retired merge targets', () => {

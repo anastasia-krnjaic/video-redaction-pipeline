@@ -2063,6 +2063,28 @@ def test_workspace_server_shutdown_cancels_pending_materialization_timer(
 def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest, _entity = write_policy_entity_package(package)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_ESCALATE,
+                    ],
+                    "blocking": False,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "correction_required": False,
+                    "review_task_id": "task_1",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
     session_dir = create_session(package, manifest)
     server = review_workspace.serve_workspace(package, port=0)
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
@@ -2086,9 +2108,151 @@ def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> N
         server.server_close()
 
 
+def test_review_decision_api_enforces_authoritative_task_allowed_actions(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    write_json(package / "workspace_manifest.json", {"case_count": 1})
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": [
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_ESCALATE,
+                    ],
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_FACE,
+                    "correction_required": True,
+                    "entity_id": None,
+                    "review_task_id": "source_span_task",
+                    "source_frame_end": 2,
+                    "source_frame_start": 1,
+                    "target_binding": {"kind": "source_span"},
+                    "target_entity_ids": [],
+                    "technical_only": False,
+                    "technical_track_ids": [],
+                },
+                {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_ESCALATE,
+                    ],
+                    "blocking": False,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "correction_required": False,
+                    "entity_id": "entity_plate_1",
+                    "review_task_id": "entity_task",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "target_binding": {"kind": "entity"},
+                    "technical_only": False,
+                },
+            ]
+        },
+    )
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/v1/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session_id = str(session_response["session"]["session_id"])
+
+        status, body = post_json_error(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "note": "incorrect green action",
+                "session_id": session_id,
+                "task_id": "source_span_task",
+            },
+        )
+        restricted_current = review_sessions.load_current_decisions(
+            package / "sessions" / session_id
+        )
+        legal_privacy = post_json(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_PRIVACY_LEAK,
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "note": "needs correction",
+                "session_id": session_id,
+                "task_id": "source_span_task",
+            },
+        )
+        legal_escalate = post_json(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_ESCALATE,
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "note": "escalate",
+                "session_id": session_id,
+                "task_id": "source_span_task",
+            },
+        )
+        entity_green = post_json(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "note": "correct",
+                "session_id": session_id,
+                "task_id": "entity_task",
+            },
+        )
+
+        assert status == 400
+        assert "not allowed" in str(body["error"])
+        assert "source_span_task" not in restricted_current
+        assert legal_privacy["ok"] is True
+        assert legal_escalate["ok"] is True
+        assert entity_green["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_region_compatible_job_publishes_after_non_media_decision(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest, entity = write_policy_entity_package(package)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_ESCALATE,
+                    ],
+                    "blocking": False,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "correction_required": False,
+                    "review_task_id": "task_1",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
     session_dir = create_session(package, manifest)
     server = review_workspace.serve_workspace(package, port=0)
     server.materialization_jobs.debounce_seconds = 0.01
@@ -2985,8 +3149,7 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     assert ".decision-correct" in css
     assert ".decision-needs-correction" in css
     assert ".decision-unsure" in css
-    assert "task.allowed_actions?.length" in js
-    assert "[ACTIONS.looks, ACTIONS.leak, ACTIONS.unsure]" in js
+    assert "task.allowed_actions || []" in js
     assert "actionLabel(action)" in js
     assert "actionTone(action)" in js
     assert 'data-action="filter"' in js
@@ -3003,6 +3166,8 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     decision_buttons = js[
         js.index("function decisionButtons") : js.index("function bindReviewPanel")
     ]
+    assert "task.allowed_actions || []" in decision_buttons
+    assert "[ACTIONS.looks, ACTIONS.leak, ACTIONS.unsure]" not in decision_buttons
     assert "Not sensitive" not in decision_buttons
 
 
@@ -3582,6 +3747,11 @@ def test_supported_canonical_unresolved_blocking_task_prevents_publication(
         {
             "tasks": [
                 {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_ESCALATE,
+                    ],
                     "blocking": True,
                     "case_id": manifest.case_id,
                     "category": CATEGORY_PLATE,
@@ -3632,6 +3802,75 @@ def test_supported_canonical_unresolved_blocking_task_prevents_publication(
     assert materialization["media_validation"]["passed"] is True
 
 
+def test_invalid_stored_task_decision_cannot_satisfy_publication_or_finalization(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": [
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_ESCALATE,
+                    ],
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_FACE,
+                    "correction_required": True,
+                    "entity_id": None,
+                    "review_task_id": "source_span_task",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "target_binding": {"kind": "source_span"},
+                    "target_entity_ids": [],
+                    "technical_only": False,
+                    "technical_track_ids": [],
+                }
+            ]
+        },
+    )
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_FACE, CATEGORY_PLATE),
+    )
+    session_dir = create_session(package, manifest)
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id="source_span_task",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="forged historical green decision",
+    )
+
+    with pytest.raises(
+        reviewed_regions.ReviewedRegionCompilationError,
+        match="invalid task decision",
+    ):
+        review_working_state.materialize_latest_reviewed(
+            package,
+            session_dir,
+            case_id=manifest.case_id,
+            accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+                "active_projection_hash"
+            ],
+        )
+    blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+
+    assert blockers["ready"] is False
+    assert any("invalid task decision" in blocker for blocker in blockers["blockers"])
+
+
 def test_supported_canonical_reviewed_region_hash_uses_semantic_decisions(
     tmp_path: Path,
 ) -> None:
@@ -3644,6 +3883,12 @@ def test_supported_canonical_reviewed_region_hash_uses_semantic_decisions(
         {
             "tasks": [
                 {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_NOT_SENSITIVE,
+                        review_sessions.ACTION_COSMETIC_ONLY,
+                    ],
                     "blocking": False,
                     "case_id": manifest.case_id,
                     "category": CATEGORY_PLATE,
@@ -4568,6 +4813,11 @@ def test_supported_canonical_public_required_task_blocks_then_allows_publication
         {
             "tasks": [
                 {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_ESCALATE,
+                    ],
                     "blocking": True,
                     "case_id": manifest.case_id,
                     "category": CATEGORY_PLATE,
@@ -4856,6 +5106,10 @@ def test_supported_canonical_sweep_acknowledgement_is_revision_bound(
         {
             "tasks": [
                 {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_COSMETIC_ONLY,
+                    ],
                     "blocking": True,
                     "case_id": manifest.case_id,
                     "category": CATEGORY_PLATE,
@@ -4921,6 +5175,10 @@ def test_supported_canonical_review_change_invalidates_current_final(
         {
             "tasks": [
                 {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_COSMETIC_ONLY,
+                    ],
                     "blocking": True,
                     "case_id": manifest.case_id,
                     "category": CATEGORY_PLATE,

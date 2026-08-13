@@ -4,8 +4,9 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 
-from redactor import rendering
+from redactor import privacy_rendering, rendering
 from redactor.models import MediaInfo, VideoStreamInfo
 
 
@@ -98,6 +99,146 @@ def test_pixelation_changes_region_into_blocks() -> None:
 
     assert not np.array_equal(rendered[8:40, 8:40], frame[8:40, 8:40])
     assert rendered[8, 8].tolist() == rendered[9, 9].tolist()
+
+
+def test_pixelation_enforces_visible_redaction_on_low_texture_roi() -> None:
+    frame = np.full((80, 120, 3), 24, dtype=np.uint8)
+    gradient = np.linspace(0, 4, 40, dtype=np.uint8)[:, None]
+    roi = np.repeat(24 + gradient, 60, axis=1)
+    frame[20:60, 30:90] = np.dstack([roi, roi, roi])
+    box = (30, 20, 90, 60)
+    settings = rendering.RenderSettings(
+        mode=rendering.MODE_FINAL,
+        method=rendering.METHOD_PIXELATE,
+        pixel_size=16,
+        preview_watermark=False,
+    )
+
+    rendered = rendering.render_frame(frame, 0, {0: [region(0, box)]}, settings)
+
+    metrics = privacy_rendering.localized_change_metrics(frame, rendered, box)
+    assert metrics["changed_pixel_fraction"] == 1.0
+    assert metrics["mean_absdiff"] >= rendering.MIN_REDACTION_MEAN_ABSDIFF
+    assert metrics["region_changed"] is True
+    assert np.array_equal(rendered[:20, :], frame[:20, :])
+    assert np.array_equal(rendered[60:, :], frame[60:, :])
+    assert np.array_equal(rendered[:, :30], frame[:, :30])
+    assert np.array_equal(rendered[:, 90:], frame[:, 90:])
+
+
+def test_pixelation_fallback_adds_codec_headroom_for_barely_changed_roi() -> None:
+    frame = np.full((80, 120, 3), 56, dtype=np.uint8)
+    frame[38:40, 30:90] = 92
+    box = (30, 20, 90, 60)
+    settings = rendering.RenderSettings(
+        mode=rendering.MODE_FINAL,
+        method=rendering.METHOD_PIXELATE,
+        pixel_size=16,
+        preview_watermark=False,
+    )
+
+    rendered = rendering.render_frame(frame, 0, {0: [region(0, box)]}, settings)
+    metrics = privacy_rendering.localized_change_metrics(frame, rendered, box)
+
+    assert metrics["changed_pixel_fraction"] >= (
+        rendering.PIXELATE_MIN_DIRECT_CHANGED_PIXEL_FRACTION
+    )
+    assert metrics["mean_absdiff"] >= rendering.PIXELATE_MIN_DIRECT_MEAN_ABSDIFF
+    assert metrics["region_changed"] is True
+
+
+@pytest.mark.parametrize(
+    "box",
+    [
+        (0, 0, 17, 19),
+        (-4, -3, 12, 14),
+        (48, 30, 64, 48),
+        (7, 9, 23, 28),
+    ],
+)
+def test_pixelation_privacy_signal_handles_neighboring_geometry_edges(
+    box: tuple[int, int, int, int],
+) -> None:
+    frame = np.full((48, 64, 3), 130, dtype=np.uint8)
+    settings = rendering.RenderSettings(
+        mode=rendering.MODE_FINAL,
+        method=rendering.METHOD_PIXELATE,
+        pixel_size=16,
+        preview_watermark=False,
+    )
+    expected = rendering.expanded_clipped_box(
+        box,
+        frame_width=64,
+        frame_height=48,
+        margin_pixels=0,
+        margin_fraction=0.0,
+    )
+
+    rendered = rendering.render_frame(frame, 0, {0: [region(0, box)]}, settings)
+
+    assert expected is not None
+    assert privacy_rendering.localized_change_metrics(frame, rendered, expected)[
+        "region_changed"
+    ] is True
+
+
+def test_pixelation_privacy_signal_handles_consecutive_and_overlapping_regions() -> None:
+    frame0 = np.full((48, 64, 3), 32, dtype=np.uint8)
+    frame1 = np.full((48, 64, 3), 36, dtype=np.uint8)
+    settings = rendering.RenderSettings(
+        mode=rendering.MODE_FINAL,
+        method=rendering.METHOD_PIXELATE,
+        pixel_size=16,
+        preview_watermark=False,
+    )
+    regions = {
+        0: [region(0, (8, 8, 30, 30)), region(0, (20, 20, 42, 42))],
+        1: [region(1, (10, 9, 32, 31))],
+    }
+
+    rendered0 = rendering.render_frame(frame0, 0, regions, settings)
+    rendered1 = rendering.render_frame(frame1, 1, regions, settings)
+
+    assert privacy_rendering.localized_change_metrics(frame0, rendered0, (8, 8, 30, 30))[
+        "region_changed"
+    ] is True
+    assert privacy_rendering.localized_change_metrics(frame0, rendered0, (20, 20, 42, 42))[
+        "region_changed"
+    ] is True
+    assert privacy_rendering.localized_change_metrics(frame1, rendered1, (10, 9, 32, 31))[
+        "region_changed"
+    ] is True
+
+
+def test_overlapping_pixelation_renders_broad_regions_before_specific_regions() -> None:
+    frame = np.full((80, 120, 3), 24, dtype=np.uint8)
+    small = (62, 34, 92, 58)
+    broad = (0, 0, 120, 80)
+    settings = rendering.RenderSettings(
+        mode=rendering.MODE_FINAL,
+        method=rendering.METHOD_PIXELATE,
+        pixel_size=16,
+        preview_watermark=False,
+    )
+
+    rendered = rendering.render_frame(
+        frame,
+        0,
+        {
+            0: [
+                region(0, small, provenance="specific_privacy_region"),
+                region(0, broad, provenance="broad_overlapping_privacy_region"),
+            ]
+        },
+        settings,
+    )
+
+    assert privacy_rendering.localized_change_metrics(frame, rendered, small)[
+        "region_changed"
+    ] is True
+    assert privacy_rendering.localized_change_metrics(frame, rendered, broad)[
+        "region_changed"
+    ] is True
 
 
 def test_box_clipping_and_privacy_margin() -> None:

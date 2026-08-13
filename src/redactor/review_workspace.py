@@ -5994,6 +5994,17 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 self.server.package_root,
                 str(payload["case_id"]),
             )
+            task = decision_task_for_session(
+                self.server.package_root,
+                session_dir,
+                task_id=str(payload["task_id"]),
+            )
+            if task is None:
+                self.send_json(
+                    {"error": "decision references an unknown review task", "ok": False},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return
             gate = review_working_state.correction_verification_decision_gate(
                 self.server.package_root,
                 session_dir,
@@ -6005,6 +6016,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     status=HTTPStatus.CONFLICT,
                 )
                 return
+            try:
+                review_sessions.validate_task_action(task, str(payload["action"]))
+            except ValueError as exc:
+                self.send_json({"error": str(exc), "ok": False}, status=HTTPStatus.BAD_REQUEST)
+                return
             event = review_sessions.append_decision_event(
                 session_dir,
                 actor=actor,
@@ -6012,6 +6028,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 task_id=str(payload["task_id"]),
                 action=str(payload["action"]),
                 note=str(payload.get("note") or ""),
+                task_before_state=task,
             )
             self.send_json({"event": event, "ok": True})
             return
@@ -7368,6 +7385,11 @@ def policy_verification_task(case_id: str, entity: dict[str, Any], task_id: str)
     policy = str(entity.get("current_policy") or entity.get("privacy_action") or "")
     label = "Keep visible" if policy == privacy_entities.POLICY_KEEP_VISIBLE else "Not sensitive"
     return {
+        "allowed_actions": [
+            review_sessions.ACTION_LOOKS_CORRECT,
+            review_sessions.ACTION_PRIVACY_LEAK,
+            review_sessions.ACTION_ESCALATE,
+        ],
         "blocking": True,
         "case_id": case_id,
         "category": str(entity.get("category") or ""),
@@ -7820,6 +7842,37 @@ def validate_workspace_case_id(package_root: Path, case_id: str) -> str:
 
 def require_workspace_case(package_root: Path, case_id: str) -> str:
     return validate_workspace_case_id(package_root, case_id)
+
+
+def load_reviewer_tasks_for_decisions(package_root: Path) -> list[dict[str, Any]]:
+    tasks_path = package_root / "reviewer_tasks.json"
+    if not tasks_path.exists():
+        return []
+    payload = read_json_file(tasks_path)
+    return [
+        dict(task)
+        for task in list(payload.get("tasks") or payload.get("reviewer_tasks") or [])
+        if isinstance(task, dict)
+    ]
+
+
+def decision_task_for_session(
+    package_root: Path,
+    session_dir: Path,
+    *,
+    task_id: str,
+) -> dict[str, Any] | None:
+    for task in load_reviewer_tasks_for_decisions(package_root):
+        if str(task.get("review_task_id") or "") == task_id:
+            return task
+    try:
+        state = review_working_state.derive_working_state(package_root, session_dir)
+    except Exception:
+        state = {}
+    for task in list(state.get("active_manual_tasks") or []):
+        if isinstance(task, dict) and str(task.get("review_task_id") or "") == task_id:
+            return dict(task)
+    return None
 
 
 def workspace_identity_hashes(package_root: Path) -> dict[str, str]:
@@ -8283,7 +8336,7 @@ function badgeClassForTask(task) { const stateName = taskState(task); if (stateN
 function cleanTaskTitle(task) { if (task.issue_type === 'spot_check' || task.issue_type === 'optional_spot_check') return 'Spot check this moment'; if (task.issue_type === 'possible_false_redaction' || String(task.issue_type || '').includes('false')) return 'Possible false redaction'; if (task.issue_type === 'possible_privacy_gap' && task.category === 'license_plate') return 'Possible plate privacy gap'; if (task.issue_type === 'possible_privacy_gap' && task.category === 'face') return 'Possible face privacy gap'; if (task.issue_type === 'manual_reviewer_issue' || task.issue_type === 'reviewer_created_issue') return 'Reviewer-created issue'; return task.title || 'Review this interval'; }
 function workflowStepperHtml(caseId) { const counts = taskCounts(caseId); const active = counts.open > 0 ? 'Review' : counts.needs_correction > 0 || counts.unsure > 0 ? 'Corrections' : 'Full-video sweep'; return ['Review','Corrections','Full-video sweep','Finalize','Final result'].map(step => `<span class="badge ${step === active ? 'warn' : 'done'}">${step}</span>`).join(' '); }
 function workflowMessageHtml(caseId) { const counts = taskCounts(caseId); if (counts.open === 0 && (counts.needs_correction > 0 || counts.unsure > 0)) return `<div class="stat"><strong>Review complete</strong><p>Corrections or escalations still require action.</p><button data-action="filter" data-filter="Needs correction">Open Corrections</button></div>`; if (counts.open === 0) return `<div class="stat"><strong>All review items are resolved</strong><p>Complete the full-video sweep before finalization.</p></div>`; return ''; }
-function decisionButtons(task) { const actions = task.allowed_actions?.length ? task.allowed_actions : [ACTIONS.looks, ACTIONS.leak, ACTIONS.unsure]; return actions.map(action => ({label: actionLabel(action), action, tone: actionTone(action)})); }
+function decisionButtons(task) { const actions = task.allowed_actions || []; return actions.map(action => ({label: actionLabel(action), action, tone: actionTone(action)})); }
 function actionTone(action) { if (action === ACTIONS.looks || action === ACTIONS.cosmetic) return 'correct'; if (action === ACTIONS.unsure) return 'unsure'; return 'needs-correction'; }
 function bindReviewPanel(caseId) { const panel = casePanel(caseId); if (panel.dataset.reviewDelegated === 'true') return; panel.dataset.reviewDelegated = 'true'; panel.addEventListener('click', e => { const actionEl = closestElement(e.target, '[data-action]'); if (actionEl) { const action = actionEl.dataset.action; if (action === 'filter') { state.filter[caseId] = actionEl.dataset.filter; refreshSidePanel(caseId, {preserveScroll:true}); return; } if (action === 'decision') { e.preventDefault(); e.stopPropagation(); recordDecision(caseId, actionEl.dataset.taskId, actionEl.dataset.decision, actionEl); return; } if (action === 'open-editor') { setMode(caseId, 'edit'); return; } } const card = closestElement(e.target, '.task-card'); if (card && !closestElement(e.target, 'button,input,select,textarea,a')) selectTask(caseId, card.dataset.taskId, {jump:true, preserveScroll:true}); }); }
 function refreshSidePanel(caseId, opts = {}) { const panel = casePanel(caseId); const side = panel?.querySelector('.side-panel'); if (!side) return; const scrollTop = side.scrollTop; side.innerHTML = state.mode[caseId] === 'edit' ? editPanelHtml(caseId) : reviewPanelHtml(caseId); if (state.mode[caseId] === 'edit') { bindEditPanel(caseId); bindEntityPanel(caseId); } bindTimeline(caseId); if (opts.preserveScroll) side.scrollTop = scrollTop; if (opts.scrollActive !== false) setTimeout(() => document.querySelector(`${caseSelector(caseId)} .side-panel [data-task-id="${CSS.escape(state.selectedTask[caseId] || '')}"]`)?.scrollIntoView({block:'nearest'}), 0); }
@@ -8331,7 +8384,7 @@ async function saveCorrection(caseId, opts = {}) {
   }
 }
 async function verifyCorrection(caseId) { const task = selectedTask(caseId); if (!task) return; await recordDecision(caseId, task.review_task_id, ACTIONS.looks); }
-async function createManualIssue(caseId, startSource, endSource, reason) { const task = { blocking: true, case_id: caseId, category: 'license_plate', correction_required: true, decision_state: 'pending', issue_type: 'reviewer_created_issue', normal_task_class: 'reviewer_created_issue', raw_signal_ids: [], review_task_id: `manual_${caseId}_${Date.now()}`, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: startSource, source_frame_end: endSource, technical_only: false, title: 'Reviewer-created issue', what_happened: 'A reviewer added this issue during full-video review.', what_to_inspect: 'Open in editor, add a reviewed correction if privacy protection is needed.' }; if (state.session) await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'manual_issue_created', case_id: caseId, entity_id: null, payload: { after: { task } } } }); state.manualTasks.push(task); state.selectedTask[caseId] = task.review_task_id; refreshSidePanel(caseId, {preserveScroll:true}); return task; }
+async function createManualIssue(caseId, startSource, endSource, reason) { const task = { allowed_actions: [ACTIONS.leak, ACTIONS.unsure], blocking: true, case_id: caseId, category: 'license_plate', correction_required: true, decision_state: 'pending', issue_type: 'reviewer_created_issue', normal_task_class: 'reviewer_created_issue', raw_signal_ids: [], review_task_id: `manual_${caseId}_${Date.now()}`, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: startSource, source_frame_end: endSource, technical_only: false, title: 'Reviewer-created issue', what_happened: 'A reviewer added this issue during full-video review.', what_to_inspect: 'Open in editor, add a reviewed correction if privacy protection is needed.' }; if (state.session) await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'manual_issue_created', case_id: caseId, entity_id: null, payload: { after: { task } } } }); state.manualTasks.push(task); state.selectedTask[caseId] = task.review_task_id; refreshSidePanel(caseId, {preserveScroll:true}); return task; }
 
 function entityFilterButtons(active) { const rows = [['all','All'], ['face','People'], ['license_plate','Plates'], ['needs_review','Needs review'], ['unresolved','Unresolved evidence']]; return rows.map(([value,label]) => `<button data-action="entity-filter" data-filter="${value}" class="${value === active ? 'active' : ''}">${label}</button>`).join(''); }
 function entityCardsHtml(caseId, filter = 'all') {
@@ -8356,7 +8409,7 @@ function possibleDuplicateSuggestions(caseId) { const entities = effectiveEntiti
 function findEntity(caseId, id) { return effectiveEntities(caseId).find(e => e.entity_id === id); }
 function policyLabel(policy) { return {redact:'Redact', keep_visible:'Keep visible', not_sensitive:'Invalid / not sensitive', review_required:'Needs review'}[policy] || policy; }
 async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; const reason = 'Reviewer object policy update.'; const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; state.workingState = null; if (verificationTaskId && !state.manualTasks.some(t => t.review_task_id === verificationTaskId)) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); const response = await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after, child_track_ids: entity.member_detector_tracker_ids || entity.automatic_source_track_ids || [] } }, reason }); state.workingState = response.working_state || state.workingState; renderCase(caseId); refreshSidePanel(caseId, {preserveScroll:true}); refreshOpenEntities(caseId); }
-function policyTask(caseId, entity, taskId) { return { blocking: true, case_id: caseId, category: entity.category, correction_required: false, decision_state: 'pending', issue_type: 'entity_policy_verification', raw_signal_ids: [], review_task_id: taskId, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: entity.first_visible_source_frame || caseData(caseId).source_frame_start, source_frame_end: entity.first_visible_source_frame || caseData(caseId).source_frame_start, technical_only: false, title: `Verify ${policyLabel(entity.current_policy)} for ${entity.label}`, what_to_inspect: 'Confirm this object policy is correct before finalization.' }; }
+function policyTask(caseId, entity, taskId) { return { allowed_actions: [ACTIONS.looks, ACTIONS.leak, ACTIONS.unsure], blocking: true, case_id: caseId, category: entity.category, correction_required: false, decision_state: 'pending', issue_type: 'entity_policy_verification', raw_signal_ids: [], review_task_id: taskId, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: entity.first_visible_source_frame || caseData(caseId).source_frame_start, source_frame_end: entity.first_visible_source_frame || caseData(caseId).source_frame_start, technical_only: false, title: `Verify ${policyLabel(entity.current_policy)} for ${entity.label}`, what_to_inspect: 'Confirm this object policy is correct before finalization.' }; }
 function refreshOpenEntities(caseId) { const modal = document.getElementById('entitiesModal'); if (!modal?.classList.contains('open')) return; const content = document.getElementById('entitiesModalContent'); const filter = modal.dataset.filter || 'all'; content.innerHTML = `<div class="entity-filter-row">${entityFilterButtons(filter)}</div><div class="object-list">${entityCardsHtml(caseId, filter)}</div><details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; bindEntityPanel(caseId, content); }
 function openMergeModal(caseId, entityId) { if (!state.session) return showSessionError('Start review before merging objects.'); const source = findEntity(caseId, entityId); if (!source) return; const modal = document.getElementById('mergeModal'); const content = document.getElementById('mergeModalContent'); const candidates = mergeCandidates(caseId, source); state.mergeDraft = {caseId, sourceEntityId: entityId, targetEntityId: candidates[0]?.entity_id || null}; content.innerHTML = `<p class="task-title">Merge ${esc(source.label)} with...</p><p class="muted">Only same-category, non-overlapping candidates are shown.</p><div class="merge-candidates">${candidates.map((candidate, index) => mergeCandidateHtml(candidate, index === 0)).join('') || '<p class="muted">No safe merge candidates are available.</p>'}</div>`; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); content.querySelectorAll('.merge-card').forEach(card => card.addEventListener('click', () => { state.mergeDraft.targetEntityId = card.dataset.entityId; content.querySelectorAll('.merge-card').forEach(item => item.classList.toggle('selected', item === card)); })); }
 function mergeCandidateHtml(candidate, selected) { return `<article class="merge-card ${selected ? 'selected' : ''}" data-entity-id="${esc(candidate.entity_id)}"><img src="${esc(candidate.representative_thumbnail_path || '')}" alt="${esc(candidate.label)} thumbnail"><div><div class="task-title">${esc(candidate.label)}</div><p class="task-meta">source ${candidate.first_visible_source_frame ?? '?'}-${candidate.last_visible_source_frame ?? '?'} · ${esc(candidate.similarity_label || 'Medium')} similarity</p><p class="muted">${esc(candidate.merge_reason || 'Compatible review-object evidence')}</p></div><input type="radio" ${selected ? 'checked' : ''} aria-label="Select ${esc(candidate.label)}"></article>`; }

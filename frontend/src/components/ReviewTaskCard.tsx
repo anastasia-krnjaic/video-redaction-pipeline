@@ -1,6 +1,6 @@
 import type { Case } from '../types/api';
 import type { TaskWithDecision } from '../types/domain';
-import { ACTIONS, decisionLabel } from '../state/reviewState';
+import { decisionLabel, taskDecisionActionOptions } from '../state/reviewState';
 import { sourceSpan, taskTimestamp } from '../utils/frame';
 
 interface Props {
@@ -16,6 +16,7 @@ export function ReviewTaskCard({ manifest, onDecision, onSelect, pending, select
   const taskActionable = task.actionable !== false;
   const waitingForMedia = task.normal_task_class === 'correction_verification' && !taskActionable;
   const actionsDisabled = pending || !taskActionable;
+  const actionOptions = taskDecisionActionOptions(task);
   return (
     <article
       className={`task-card ${selected ? 'selected' : ''}`}
@@ -36,30 +37,17 @@ export function ReviewTaskCard({ manifest, onDecision, onSelect, pending, select
         {task.blocking ? <span className="badge warn">Blocking</span> : null}
       </div>
       <div className="task-actions" onClick={(event) => event.stopPropagation()}>
-        <button
-          type="button"
-          className={`decision-choice decision-correct ${task.decision?.action === ACTIONS.looksCorrect ? 'selected' : ''}`}
-          disabled={actionsDisabled}
-          onClick={() => onDecision(task, ACTIONS.looksCorrect)}
-        >
-          Correct
-        </button>
-        <button
-          type="button"
-          className={`decision-choice decision-needs-correction ${task.decision?.action === ACTIONS.needsCorrection ? 'selected' : ''}`}
-          disabled={actionsDisabled}
-          onClick={() => onDecision(task, ACTIONS.needsCorrection)}
-        >
-          Needs correction
-        </button>
-        <button
-          type="button"
-          className={`decision-choice decision-unsure ${task.decision?.action === ACTIONS.unsure ? 'selected' : ''}`}
-          disabled={actionsDisabled}
-          onClick={() => onDecision(task, ACTIONS.unsure)}
-        >
-          Unsure
-        </button>
+        {actionOptions.map((option) => (
+          <button
+            key={option.action}
+            type="button"
+            className={`decision-choice ${option.className} ${task.decision?.action === option.action ? 'selected' : ''}`}
+            disabled={actionsDisabled}
+            onClick={() => onDecision(task, option.action)}
+          >
+            {option.label}
+          </button>
+        ))}
       </div>
       {pending ? <p className="saved-note">Saving...</p> : null}
       {waitingForMedia ? <p className="saved-note">Saved - updating Latest reviewed</p> : null}

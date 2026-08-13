@@ -53,6 +53,54 @@ BLOCKING_ACTIONS = {
 }
 
 
+def allowed_actions_for_task(task: dict[str, Any]) -> tuple[str, ...]:
+    raw_actions = task.get("allowed_actions") or []
+    actions: list[str] = []
+    for raw_action in raw_actions:
+        action = str(raw_action)
+        if action not in DECISION_ACTIONS:
+            raise ValueError(f"task allows unsupported decision action: {action}")
+        if action not in actions:
+            actions.append(action)
+    return tuple(actions)
+
+
+def invalid_task_action_reason(task: dict[str, Any] | None, action: str) -> str | None:
+    if action not in DECISION_ACTIONS:
+        return f"unsupported decision action: {action}"
+    if task is None:
+        return "decision references an unknown review task"
+    task_id = str(task.get("review_task_id") or task.get("task_id") or "")
+    try:
+        allowed_actions = allowed_actions_for_task(task)
+    except ValueError as exc:
+        return f"{task_id}: {exc}"
+    if not allowed_actions:
+        return f"{task_id}: review task has no allowed decision actions"
+    if action not in allowed_actions:
+        allowed_text = ", ".join(allowed_actions)
+        return (
+            f"{task_id}: decision action {action} is not allowed; "
+            f"allowed actions: {allowed_text}"
+        )
+    return None
+
+
+def validate_task_action(task: dict[str, Any] | None, action: str) -> None:
+    reason = invalid_task_action_reason(task, action)
+    if reason is not None:
+        raise ValueError(reason)
+
+
+def invalid_task_decision_reason(
+    task: dict[str, Any] | None,
+    decision: dict[str, Any] | None,
+) -> str | None:
+    if decision is None:
+        return None
+    return invalid_task_action_reason(task, str(decision.get("action") or ""))
+
+
 @dataclass(frozen=True)
 class ReviewerIdentity:
     display_name: str | None = None
@@ -226,6 +274,8 @@ def append_decision_event(
 ) -> dict[str, Any]:
     if action not in DECISION_ACTIONS:
         raise ValueError(f"unsupported decision action: {action}")
+    if task_before_state is not None:
+        validate_task_action(task_before_state, action)
     current = load_current_decisions(session_dir)
     before = current.get(task_id)
     status = decision_status_for_action(action)

@@ -77,6 +77,20 @@ def synthetic_frame(index: int, *, dark: bool = False) -> np.ndarray:
     )
 
 
+def synthetic_large_frame(index: int, *, value: int | None = None) -> np.ndarray:
+    if value is not None:
+        return np.full((120, 160, 3), value, dtype=np.uint8)
+    y, x = np.indices((120, 160))
+    base = ((x * 7 + y * 11 + index * 23) % 256).astype(np.uint8)
+    return np.dstack(
+        [
+            base,
+            np.roll(base, index % 11, axis=1),
+            np.roll(base, index % 13, axis=0),
+        ]
+    )
+
+
 def write_synthetic_video(path: Path, frames: list[np.ndarray], *, fps: float = 30.0) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     height, width = frames[0].shape[:2]
@@ -91,6 +105,45 @@ def write_synthetic_video(path: Path, frames: list[np.ndarray], *, fps: float = 
         writer.write(frame)
     writer.release()
     return path
+
+
+def single_frame_render_validation(
+    tmp_path: Path,
+    *,
+    candidate_regions: dict[int, list[review_bundle.rendering.RenderRegion]],
+    expected_regions: dict[int, list[review_bundle.rendering.RenderRegion]],
+    frame: np.ndarray | None = None,
+    settings: review_bundle.rendering.RenderSettings | None = None,
+    source_frame: np.ndarray | None = None,
+) -> dict[str, Any]:
+    source = frame if frame is not None else synthetic_large_frame(0)
+    authoritative_source = source_frame if source_frame is not None else source
+    render_settings = settings or review_bundle.ReviewRenderConfig(
+        margin_fraction=0.5,
+        pixel_size=8,
+    ).render_settings()
+    source_path = write_synthetic_video(tmp_path / "source.mp4", [authoritative_source])
+    candidate_source = (
+        review_bundle.decode_video_frames(source_path)[0]
+        if source_frame is None
+        else source
+    )
+    original_path = write_synthetic_video(tmp_path / "original.mp4", [candidate_source])
+    rendered = review_bundle.rendering.render_frame(
+        candidate_source,
+        0,
+        candidate_regions,
+        render_settings,
+    )
+    rendered_path = write_synthetic_video(tmp_path / "rendered.mp4", [rendered])
+    return review_bundle.validate_rendered_region_application(
+        original_clip_path=original_path,
+        rendered_clip_path=rendered_path,
+        frame_mapping=review_bundle.TaskFrameMapping(0, 0),
+        regions_by_frame=expected_regions,
+        settings=render_settings,
+        source_video_path=source_path,
+    )
 
 
 def patch_probe(monkeypatch: pytest.MonkeyPatch, frame_count: int = 100) -> None:
@@ -851,6 +904,405 @@ def test_rendered_region_application_validates_nonzero_start_mapping(
     assert validation["expected_region_frames"] == [6]
     assert validation["successfully_rendered_region_frames"] == [6]
     assert validation["region_results"][0]["local_task_frame_index"] == 1
+
+
+def test_rendered_region_application_uses_shared_visibility_contract_for_h264_overlap(
+    tmp_path: Path,
+) -> None:
+    frame_count = 36
+    height = 96
+    width = 128
+    settings = review_bundle.ReviewRenderConfig(pixel_size=4).render_settings()
+    broad_region = review_bundle.rendering.RenderRegion(
+        frame_index=22,
+        bbox_xyxy=(0, 0, width, height),
+        provenance="ordinary_tracker",
+        state="covered",
+        source_record={},
+    )
+    specific_region = review_bundle.rendering.RenderRegion(
+        frame_index=22,
+        bbox_xyxy=(84, 68, 126, 94),
+        provenance="detector",
+        state="covered",
+        source_record={},
+    )
+    regions_by_frame = {
+        10: [
+            review_bundle.rendering.RenderRegion(
+                frame_index=10,
+                bbox_xyxy=(0, 0, 30, 24),
+                provenance="detector",
+                state="covered",
+                source_record={},
+            )
+        ],
+        14: [
+            review_bundle.rendering.RenderRegion(
+                frame_index=14,
+                bbox_xyxy=(22, 18, 58, 48),
+                provenance="ordinary_tracker",
+                state="covered",
+                source_record={},
+            )
+        ],
+        15: [
+            review_bundle.rendering.RenderRegion(
+                frame_index=15,
+                bbox_xyxy=(22, 18, 58, 48),
+                provenance="ordinary_tracker",
+                state="covered",
+                source_record={},
+            )
+        ],
+        16: [
+            review_bundle.rendering.RenderRegion(
+                frame_index=16,
+                bbox_xyxy=(22, 18, 58, 48),
+                provenance="ordinary_tracker",
+                state="covered",
+                source_record={},
+            )
+        ],
+        22: [broad_region, specific_region],
+        35: [
+            review_bundle.rendering.RenderRegion(
+                frame_index=35,
+                bbox_xyxy=(98, 70, 128, 96),
+                provenance="bidirectional_privacy_bridge",
+                state="covered",
+                source_record={},
+            )
+        ],
+    }
+    originals: list[np.ndarray] = []
+    rendered: list[np.ndarray] = []
+    for index in range(frame_count):
+        base = np.full((height, width, 3), 72 + (index % 5), dtype=np.uint8)
+        originals.append(base)
+        rendered.append(
+            review_bundle.rendering.render_frame(base, index, regions_by_frame, settings)
+        )
+
+    source_video_only = write_synthetic_video(tmp_path / "source_video_only.mp4", originals)
+    rendered_video_only = write_synthetic_video(tmp_path / "rendered_video_only.mp4", rendered)
+    source_clip = tmp_path / "source_clip.mp4"
+    rendered_clip = tmp_path / "rendered_clip.mp4"
+    review_bundle.mux_review_clip_audio(
+        source_video_only,
+        source_video_only,
+        source_clip,
+        source_has_audio=False,
+        start_seconds=0.0,
+        duration_seconds=frame_count / 30.0,
+    )
+    review_bundle.mux_review_clip_audio(
+        source_video_only,
+        rendered_video_only,
+        rendered_clip,
+        source_has_audio=False,
+        start_seconds=0.0,
+        duration_seconds=frame_count / 30.0,
+    )
+
+    validation = review_bundle.validate_rendered_region_application(
+        original_clip_path=source_clip,
+        rendered_clip_path=rendered_clip,
+        frame_mapping=review_bundle.TaskFrameMapping(0, frame_count - 1),
+        regions_by_frame=regions_by_frame,
+        settings=settings,
+    )
+
+    assert validation["passed"] is True
+    assert validation["expected_region_count"] == 7
+    assert validation["successfully_rendered_region_count"] == 7
+    assert validation["successfully_rendered_region_frames"] == [10, 14, 15, 16, 22, 35]
+    assert validation["region_results"][0]["local_task_frame_index"] == 10
+    assert validation["region_results"][-1]["local_task_frame_index"] == frame_count - 1
+    overlap_result = next(
+        result
+        for result in validation["region_results"]
+        if result["source_frame_index"] == 22 and result["bbox_xyxy"] == [84, 68, 126, 94]
+    )
+    legacy_inside_outside_pass = (
+        overlap_result["mean_absdiff_inside_bbox"]
+        >= max(4.0, overlap_result["mean_absdiff_outside_bbox"] + 2.0)
+        and overlap_result["max_absdiff_inside_bbox"] >= 40
+    )
+    assert legacy_inside_outside_pass is False
+    assert overlap_result["changed_pixel_fraction_inside_bbox"] >= 0.01
+    assert overlap_result["localized_mean_absdiff_inside_bbox"] >= 1.0
+
+
+def test_rendered_region_application_uses_source_video_for_expected_render_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frames = [np.full((48, 64, 3), 150, dtype=np.uint8) for _ in range(9)]
+    source_video = write_synthetic_video(tmp_path / "source.mp4", frames)
+    settings = review_bundle.ReviewRenderConfig(pixel_size=4).render_settings()
+    region = review_bundle.rendering.RenderRegion(
+        frame_index=6,
+        bbox_xyxy=(18, 12, 50, 40),
+        provenance="ordinary_tracker",
+        state="covered",
+        source_record={},
+    )
+    regions_by_frame = {6: [region]}
+    rendered_clip = tmp_path / "rendered_clip.mp4"
+    config = review_bundle.ReviewRenderConfig(pixel_size=4)
+    review_bundle.render_review_clip_by_frames(
+        source_video,
+        rendered_clip,
+        5,
+        8,
+        fps=30.0,
+        width=64,
+        height=48,
+        source_has_audio=False,
+        role="automatic",
+        regions_by_frame=regions_by_frame,
+        settings=settings,
+        privacy_regions_path=None,
+        interval_decisions_path=None,
+        renderer_config=config.payload(),
+        renderer_config_hash=config.stable_hash(),
+        overwrite=True,
+    )
+
+    source_clip_frames = [frame.copy() for frame in frames[5:9]]
+    source_clip_frames[1][12:40, 18:50] = 40
+    source_clip = tmp_path / "source_clip.mp4"
+    source_clip_video_only = write_synthetic_video(
+        tmp_path / "source_clip_video_only.mp4",
+        source_clip_frames,
+    )
+    review_bundle.mux_review_clip_audio(
+        source_video,
+        source_clip_video_only,
+        source_clip,
+        source_has_audio=False,
+        start_seconds=5 / 30.0,
+        duration_seconds=4 / 30.0,
+    )
+    monkeypatch.setattr(review_bundle, "region_redaction_applied", lambda metrics: False)
+
+    validation = review_bundle.validate_rendered_region_application(
+        original_clip_path=source_clip,
+        rendered_clip_path=rendered_clip,
+        source_video_path=source_video,
+        frame_mapping=review_bundle.TaskFrameMapping(5, 8),
+        regions_by_frame=regions_by_frame,
+        settings=settings,
+    )
+
+    assert validation["passed"] is True
+    assert validation["successfully_rendered_region_count"] == 1
+    assert validation["region_results"][0]["expected_render_matches_clip"] is True
+    assert validation["region_results"][0]["expected_render_source"] == "source_video"
+
+
+def test_rendered_region_application_rejects_unrelated_redaction_inside_expanded_target_roi(
+    tmp_path: Path,
+) -> None:
+    target = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(40, 40, 80, 80),
+        provenance="target",
+        state="covered",
+        source_record={},
+    )
+    unrelated_inside_target_margin = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(22, 22, 36, 36),
+        provenance="wrong_region",
+        state="covered",
+        source_record={},
+    )
+
+    validation = single_frame_render_validation(
+        tmp_path,
+        candidate_regions={0: [unrelated_inside_target_margin]},
+        expected_regions={0: [target]},
+    )
+
+    result = validation["region_results"][0]
+    assert validation["passed"] is False
+    assert validation["missing_rendered_region_frames"] == [0]
+    assert result["legacy_expanded_inside_outside_render_applied"] is True
+    assert result["legacy_inside_outside_render_applied"] is False
+    assert result["target_region_privacy_signal"] is False
+    assert (
+        result["target_bbox_changed_pixel_fraction"]
+        < review_bundle.rendering.MIN_REDACTION_CHANGED_PIXEL_FRACTION
+    )
+    assert result["target_bbox_mean_absdiff"] < review_bundle.rendering.MIN_REDACTION_MEAN_ABSDIFF
+    assert result["expected_render_matches_clip"] is False
+    assert "rendered region count mismatch" in " ".join(validation["errors"])
+
+
+def test_rendered_region_application_accepts_target_with_unrelated_extra_redaction(
+    tmp_path: Path,
+) -> None:
+    target = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(40, 40, 80, 80),
+        provenance="target",
+        state="covered",
+        source_record={},
+    )
+    unrelated_elsewhere = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(118, 72, 148, 108),
+        provenance="reviewer_extra",
+        state="covered",
+        source_record={},
+    )
+
+    validation = single_frame_render_validation(
+        tmp_path,
+        candidate_regions={0: [target, unrelated_elsewhere]},
+        expected_regions={0: [target]},
+    )
+
+    assert validation["passed"] is True
+    assert validation["successfully_rendered_region_count"] == 1
+    assert validation["region_results"][0]["legacy_inside_outside_render_applied"] is True
+    assert validation["region_results"][0]["expected_render_matches_clip"] is True
+
+
+def test_rendered_region_application_accepts_authoritative_overlapping_regions(
+    tmp_path: Path,
+) -> None:
+    broad = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(32, 30, 94, 94),
+        provenance="broad",
+        state="covered",
+        source_record={"render_order": 0},
+    )
+    specific = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(52, 48, 82, 76),
+        provenance="specific",
+        state="covered",
+        source_record={"render_order": 1},
+    )
+
+    validation = single_frame_render_validation(
+        tmp_path,
+        candidate_regions={0: [broad, specific]},
+        expected_regions={0: [broad, specific]},
+        settings=review_bundle.ReviewRenderConfig(
+            margin_fraction=0.0,
+            pixel_size=8,
+        ).render_settings(),
+        frame=synthetic_large_frame(0, value=150),
+    )
+
+    assert validation["passed"] is True
+    assert validation["expected_region_count"] == 2
+    assert validation["successfully_rendered_region_count"] == 2
+    assert all(result["expected_render_matches_clip"] for result in validation["region_results"])
+
+
+def test_rendered_region_application_accepts_low_texture_target_privacy_signal(
+    tmp_path: Path,
+) -> None:
+    target = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(40, 40, 80, 80),
+        provenance="low_texture",
+        state="covered",
+        source_record={},
+    )
+
+    validation = single_frame_render_validation(
+        tmp_path,
+        candidate_regions={0: [target]},
+        expected_regions={0: [target]},
+        frame=synthetic_large_frame(0, value=150),
+    )
+
+    assert validation["passed"] is True
+    assert validation["region_results"][0]["target_region_privacy_signal"] is True
+    assert validation["region_results"][0]["expected_render_matches_clip"] is True
+
+
+def test_rendered_region_application_rejects_shifted_wrong_bbox_and_source_mismatch(
+    tmp_path: Path,
+) -> None:
+    target = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(40, 40, 80, 80),
+        provenance="target",
+        state="covered",
+        source_record={},
+    )
+    shifted = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(52, 52, 92, 92),
+        provenance="shifted",
+        state="covered",
+        source_record={},
+    )
+    shifted_validation = single_frame_render_validation(
+        tmp_path / "shifted",
+        candidate_regions={0: [shifted]},
+        expected_regions={0: [target]},
+    )
+    source_mismatch_validation = single_frame_render_validation(
+        tmp_path / "source_mismatch",
+        candidate_regions={0: [target]},
+        expected_regions={0: [target]},
+        source_frame=synthetic_large_frame(5),
+    )
+
+    assert shifted_validation["passed"] is False
+    assert shifted_validation["region_results"][0]["expected_render_matches_clip"] is False
+    assert source_mismatch_validation["passed"] is False
+    assert source_mismatch_validation["region_results"][0]["expected_render_matches_clip"] is False
+
+
+def test_rendered_region_application_rejects_materially_wrong_privacy_transform(
+    tmp_path: Path,
+) -> None:
+    source = synthetic_large_frame(0)
+    target = review_bundle.rendering.RenderRegion(
+        frame_index=0,
+        bbox_xyxy=(40, 40, 80, 80),
+        provenance="target",
+        state="covered",
+        source_record={},
+    )
+    settings = review_bundle.ReviewRenderConfig(
+        margin_fraction=0.5,
+        pixel_size=8,
+    ).render_settings()
+    source_path = write_synthetic_video(tmp_path / "source.mp4", [source])
+    original_path = write_synthetic_video(tmp_path / "original.mp4", [source])
+    wrong = source.copy()
+    x1, y1, x2, y2 = review_bundle.rendering.expanded_clipped_box(
+        target.bbox_xyxy,
+        frame_width=source.shape[1],
+        frame_height=source.shape[0],
+        margin_pixels=settings.margin_pixels,
+        margin_fraction=settings.margin_fraction,
+    )
+    wrong[y1:y2, x1:x2] = 0
+    rendered_path = write_synthetic_video(tmp_path / "wrong_transform.mp4", [wrong])
+
+    validation = review_bundle.validate_rendered_region_application(
+        original_clip_path=original_path,
+        rendered_clip_path=rendered_path,
+        frame_mapping=review_bundle.TaskFrameMapping(0, 0),
+        regions_by_frame={0: [target]},
+        settings=settings,
+        source_video_path=source_path,
+    )
+
+    assert validation["passed"] is False
+    assert validation["region_results"][0]["expected_render_matches_clip"] is False
 
 
 def test_rendered_region_application_fails_when_expected_bbox_is_unchanged(

@@ -453,6 +453,57 @@ def write_source_backed_tasks(case_root: Path) -> None:
     )
 
 
+def source_span_face_task(**overrides: Any) -> dict[str, Any]:
+    task: dict[str, Any] = {
+        "allowed_user_actions": [
+            {"action": review_sessions.ACTION_PRIVACY_LEAK},
+            {"action": review_sessions.ACTION_ESCALATE},
+        ],
+        "case_id": "case",
+        "category": "action_required",
+        "final_export_blocking": True,
+        "frame_end": 1,
+        "frame_start": 1,
+        "media_roles": [
+            {
+                "media_audit": {
+                    "source_frame_range": {
+                        "frame_count": 1,
+                        "frame_end": 1,
+                        "frame_start": 1,
+                    }
+                },
+                "role": "original",
+            }
+        ],
+        "object_category": CATEGORY_FACE,
+        "object_id": None,
+        "primary_raw_review_item_ids": ["face_interval_gap_0001"],
+        "raw_reason_codes": [
+            "insufficient_observed_hits",
+            "needs_review_interval",
+            "unresolved_privacy_frames",
+        ],
+        "raw_review_item_ids": ["face_interval_gap_0001"],
+        "reviewer_task_id": "face_interval_gap_review",
+        "title": "Automatic redaction was uncertain",
+        "what_to_check": ["Inspect the original context."],
+    }
+    for key, value in overrides.items():
+        if value is None:
+            task.pop(key, None)
+        else:
+            task[key] = value
+    return task
+
+
+def append_face_task(case_root: Path, task: dict[str, Any]) -> None:
+    face_path = case_root / "review" / "review_tasks.json"
+    payload = json.loads(face_path.read_text(encoding="utf-8"))
+    payload["reviewer_tasks"].append(task)
+    face_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def category_results(
     case_root: Path,
     categories: tuple[str, ...] = (CATEGORY_FACE, CATEGORY_PLATE),
@@ -879,6 +930,154 @@ def test_source_backed_entities_include_policy_and_no_task_targets(
         review_sessions.ACTION_PRIVACY_LEAK,
         review_sessions.ACTION_NOT_SENSITIVE,
     ]
+    binding_by_id = {task["source_task_id"]: task["target_binding"] for task in tasks}
+    assert binding_by_id["face_review_0001"]["kind"] == "entity"
+    assert binding_by_id["face_review_0002"]["kind"] == "entity"
+    assert all(task["entity_id"] for task in tasks)
+
+
+def test_source_span_action_required_task_does_not_create_fake_entity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mixed_review_workspace.media, "probe_media", lambda _: fake_media_info())
+    fixture = workspace_fixture(tmp_path)
+    append_face_task(fixture["case_root"], source_span_face_task())
+
+    result = mixed_review_workspace.build_case_review_workspace(
+        fixture["context"],
+        category_results=category_results(fixture["case_root"]),
+        render_plan=fixture["render_plan"],
+        combined_preview=fixture["combined_preview"],
+        overwrite=True,
+    )
+
+    workspace_root = fixture["case_root"] / result["workspace_dir"]
+    entities = json.loads((workspace_root / "review_entities.json").read_text())["cases"]["case"]
+    tasks = json.loads((workspace_root / "reviewer_tasks.json").read_text())["tasks"]
+    source_span = next(
+        task for task in tasks if task["source_task_id"] == "face_interval_gap_review"
+    )
+    assert source_span["target_binding"] == {
+        "binding_source": "authoritative_review_task_interval",
+        "case_id": "case",
+        "category": CATEGORY_FACE,
+        "event_ids": ["face_interval_gap_0001", "face_interval_gap_review"],
+        "kind": "source_span",
+        "missing_entity_keys": ["face_interval_gap_0001"],
+        "reason_codes": [
+            "insufficient_observed_hits",
+            "needs_review_interval",
+            "unresolved_privacy_frames",
+        ],
+        "schema_version": "review_task_target_binding.v1",
+        "source_frame_end": 1,
+        "source_frame_start": 1,
+        "source_review_category": "action_required",
+        "source_task_id": "face_interval_gap_review",
+        "unresolved_entity_keys": ["face_interval_gap_0001"],
+    }
+    assert source_span["entity_id"] is None
+    assert source_span["target_entity_ids"] == []
+    assert source_span["technical_track_ids"] == []
+    assert source_span["correction_required"] is True
+    assert "face_interval_gap" not in {
+        entity["source_lineage"]["technical_id"] for entity in entities
+    }
+
+
+def test_entity_bound_action_required_task_preserves_real_entity_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mixed_review_workspace.media, "probe_media", lambda _: fake_media_info())
+    fixture = workspace_fixture(tmp_path)
+
+    result = mixed_review_workspace.build_case_review_workspace(
+        fixture["context"],
+        category_results=category_results(fixture["case_root"]),
+        render_plan=fixture["render_plan"],
+        combined_preview=fixture["combined_preview"],
+        overwrite=True,
+    )
+
+    workspace_root = fixture["case_root"] / result["workspace_dir"]
+    tasks = json.loads((workspace_root / "reviewer_tasks.json").read_text())["tasks"]
+    face_task = next(task for task in tasks if task["source_task_id"] == "face_review_0001")
+    assert face_task["target_binding"]["kind"] == "entity"
+    assert face_task["target_binding"]["technical_track_ids"] == ["face_track_1"]
+    assert face_task["entity_id"]
+    assert face_task["target_entity_ids"] == [face_task["entity_id"]]
+
+
+@pytest.mark.parametrize(
+    ("task", "match"),
+    [
+        (
+            source_span_face_task(media_roles=[]),
+            "unbound_review_task",
+        ),
+        (
+            source_span_face_task(case_id="wrong_case"),
+            "case mismatch",
+        ),
+        (
+            source_span_face_task(object_category=CATEGORY_PLATE),
+            "category mismatch",
+        ),
+        (
+            source_span_face_task(
+                media_roles=[
+                    {
+                        "media_audit": {
+                            "source_frame_range": {
+                                "frame_count": 1,
+                                "frame_end": 0,
+                                "frame_start": 0,
+                            }
+                        },
+                        "role": "original",
+                    }
+                ],
+            ),
+            "unbound_review_task",
+        ),
+        (
+            source_span_face_task(
+                primary_raw_review_item_ids=[],
+                raw_review_item_ids=[],
+                reviewer_task_id=None,
+            ),
+            "unbound_review_task",
+        ),
+        (
+            source_span_face_task(category="reviewer_created_issue"),
+            "unbound_review_task",
+        ),
+        (
+            source_span_face_task(object_id="face_track_404"),
+            "unbound_review_task",
+        ),
+    ],
+)
+def test_invalid_source_span_task_binding_attempts_fail_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    task: dict[str, Any],
+    match: str,
+) -> None:
+    monkeypatch.setattr(mixed_review_workspace.media, "probe_media", lambda _: fake_media_info())
+    fixture = workspace_fixture(tmp_path)
+    append_face_task(fixture["case_root"], task)
+
+    with pytest.raises(ValueError, match=match):
+        mixed_review_workspace.build_case_review_workspace(
+            fixture["context"],
+            category_results=category_results(fixture["case_root"]),
+            render_plan=fixture["render_plan"],
+            combined_preview=fixture["combined_preview"],
+            overwrite=True,
+        )
 
 
 def test_source_backed_entities_get_real_representative_thumbnails(

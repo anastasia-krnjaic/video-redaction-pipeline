@@ -27,7 +27,12 @@ from redactor.review_corrections import (
     ReviewCorrection,
     interpolate_correction_boxes,
 )
-from redactor.review_sessions import BLOCKING_ACTIONS, GREEN_ACTIONS, append_event
+from redactor.review_sessions import (
+    BLOCKING_ACTIONS,
+    GREEN_ACTIONS,
+    append_event,
+    invalid_task_decision_reason,
+)
 
 COMPILER_SCHEMA_VERSION = "reviewed_region_compiler.v1"
 REVISION_SCHEMA_VERSION = "latest_reviewed_revision.v1"
@@ -1249,6 +1254,10 @@ def publication_blockers(
             continue
         if decision is None:
             continue
+        invalid_decision = invalid_task_decision_reason(task, decision)
+        if invalid_decision is not None:
+            blockers.append(f"{task_id}: invalid task decision: {invalid_decision}")
+            continue
         action = str(decision.get("action") or "")
         if action in BLOCKING_ACTIONS:
             blockers.append(f"{task_id}: decision requires correction or escalation")
@@ -1265,6 +1274,10 @@ def publication_blockers(
         decision = decisions.get(task_id)
         if decision is None:
             blockers.append(f"{task_id}: reviewer-added issue has no decision")
+            continue
+        invalid_decision = invalid_task_decision_reason(task, decision)
+        if invalid_decision is not None:
+            blockers.append(f"{task_id}: invalid task decision: {invalid_decision}")
             continue
         if str(decision.get("action") or "") not in GREEN_ACTIONS:
             blockers.append(f"{task_id}: reviewer-added issue remains unresolved")

@@ -23,6 +23,14 @@ METHOD_GAUSSIAN_BLUR = "gaussian_blur"
 METHOD_PIXELATE = "pixelate"
 
 FINAL_BLOCKING_STATUSES = {"needs_review", "rejected"}
+REDACTION_DIFF_VISIBILITY_THRESHOLD = 8
+MIN_REDACTION_CHANGED_PIXEL_FRACTION = 0.01
+MIN_REDACTION_MEAN_ABSDIFF = 1.0
+PIXELATE_MIN_DIRECT_CHANGED_PIXEL_FRACTION = 0.03
+PIXELATE_MIN_DIRECT_MEAN_ABSDIFF = 3.0
+PIXELATE_FALLBACK_LIGHT_FILL = 224
+PIXELATE_FALLBACK_DARK_FILL = 32
+PIXELATE_FALLBACK_BLEND = 0.5
 
 Box = tuple[int, int, int, int]
 
@@ -446,27 +454,60 @@ def render_frame(
 ) -> np.ndarray:
     output = frame.copy()
     height, width = output.shape[:2]
-    for region in regions_by_frame.get(frame_index, []):
-        if not region.is_renderable:
-            continue
-        box = expanded_clipped_box(
-            region.bbox_xyxy,
-            frame_width=width,
-            frame_height=height,
-            margin_pixels=settings.margin_pixels,
-            margin_fraction=settings.margin_fraction,
-        )
-        if box is None:
-            continue
-        apply_redaction(output, box, settings)
+    for region, box in ordered_render_regions(
+        regions_by_frame.get(frame_index, []),
+        frame_width=width,
+        frame_height=height,
+        settings=settings,
+    ):
+        apply_redaction(output, box, settings, source_frame=frame)
     if settings.mode == MODE_PREVIEW and settings.preview_watermark:
         draw_preview_watermark(output)
     return output
 
 
-def apply_redaction(frame: np.ndarray, box: Box, settings: RenderSettings) -> None:
+def ordered_render_regions(
+    regions: list[RenderRegion],
+    *,
+    frame_width: int,
+    frame_height: int,
+    settings: RenderSettings,
+) -> list[tuple[RenderRegion, Box]]:
+    sortable: list[tuple[int, int, int, RenderRegion, Box]] = []
+    for index, region in enumerate(regions):
+        if not region.is_renderable:
+            continue
+        box = expanded_clipped_box(
+            region.bbox_xyxy,
+            frame_width=frame_width,
+            frame_height=frame_height,
+            margin_pixels=settings.margin_pixels,
+            margin_fraction=settings.margin_fraction,
+        )
+        if box is None:
+            continue
+        area = (box[2] - box[0]) * (box[3] - box[1])
+        sortable.append((-area, render_order(region), index, region, box))
+    return [(region, box) for _, _, _, region, box in sorted(sortable)]
+
+
+def render_order(region: RenderRegion) -> int:
+    try:
+        return int(region.source_record.get("render_order", 0))
+    except (AttributeError, TypeError, ValueError):
+        return 0
+
+
+def apply_redaction(
+    frame: np.ndarray,
+    box: Box,
+    settings: RenderSettings,
+    *,
+    source_frame: np.ndarray | None = None,
+) -> None:
     x1, y1, x2, y2 = box
-    roi = frame[y1:y2, x1:x2]
+    source = frame if source_frame is None else source_frame
+    roi = source[y1:y2, x1:x2]
     if roi.size == 0:
         return
     if settings.method == METHOD_GAUSSIAN_BLUR:
@@ -476,16 +517,71 @@ def apply_redaction(frame: np.ndarray, box: Box, settings: RenderSettings) -> No
             0,
         )
     elif settings.method == METHOD_PIXELATE:
-        width = max(1, x2 - x1)
-        height = max(1, y2 - y1)
-        small = cv.resize(
-            roi,
-            (max(1, width // settings.pixel_size), max(1, height // settings.pixel_size)),
-            interpolation=cv.INTER_LINEAR,
-        )
-        frame[y1:y2, x1:x2] = cv.resize(small, (width, height), interpolation=cv.INTER_NEAREST)
+        frame[y1:y2, x1:x2] = pixelated_redaction(roi, settings)
     else:
         raise ValueError(f"unsupported render method: {settings.method}")
+
+
+def pixelated_redaction(roi: np.ndarray, settings: RenderSettings) -> np.ndarray:
+    width = max(1, roi.shape[1])
+    height = max(1, roi.shape[0])
+    small = cv.resize(
+        roi,
+        (max(1, width // settings.pixel_size), max(1, height // settings.pixel_size)),
+        interpolation=cv.INTER_LINEAR,
+    )
+    redacted = cv.resize(small, (width, height), interpolation=cv.INTER_NEAREST)
+    if pixelation_has_encoder_headroom(roi, redacted):
+        return redacted
+    return enforce_pixelation_privacy_signal(roi, redacted)
+
+
+def enforce_pixelation_privacy_signal(original: np.ndarray, redacted: np.ndarray) -> np.ndarray:
+    gray = cv.cvtColor(original, cv.COLOR_BGR2GRAY)
+    fill_value = (
+        PIXELATE_FALLBACK_DARK_FILL
+        if float(gray.mean()) >= 128.0
+        else PIXELATE_FALLBACK_LIGHT_FILL
+    )
+    fill = np.full_like(redacted, fill_value)
+    strengthened = cv.addWeighted(
+        redacted,
+        1.0 - PIXELATE_FALLBACK_BLEND,
+        fill,
+        PIXELATE_FALLBACK_BLEND,
+        0,
+    )
+    if region_changed_enough(original, strengthened):
+        return strengthened
+    return fill
+
+
+def region_changed_enough(original: np.ndarray, rendered: np.ndarray) -> bool:
+    metrics = redaction_change_metrics(original, rendered)
+    return (
+        metrics[0] >= MIN_REDACTION_MEAN_ABSDIFF
+        and metrics[1] >= MIN_REDACTION_CHANGED_PIXEL_FRACTION
+    )
+
+
+def pixelation_has_encoder_headroom(original: np.ndarray, rendered: np.ndarray) -> bool:
+    metrics = redaction_change_metrics(original, rendered)
+    return (
+        metrics[0] >= PIXELATE_MIN_DIRECT_MEAN_ABSDIFF
+        and metrics[1] >= PIXELATE_MIN_DIRECT_CHANGED_PIXEL_FRACTION
+    )
+
+
+def redaction_change_metrics(original: np.ndarray, rendered: np.ndarray) -> tuple[float, float]:
+    if original.size == 0 or rendered.size == 0:
+        return 0.0, 0.0
+    diff = cv.absdiff(original, rendered)
+    gray = cv.cvtColor(diff, cv.COLOR_BGR2GRAY)
+    changed_fraction = float(
+        np.count_nonzero(gray > REDACTION_DIFF_VISIBILITY_THRESHOLD) / gray.size
+    )
+    mean_absdiff = float(gray.mean())
+    return mean_absdiff, changed_fraction
 
 
 def expanded_clipped_box(

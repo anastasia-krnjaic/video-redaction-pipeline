@@ -35,6 +35,7 @@ from redactor.review_sessions import (
     BLOCKING_ACTIONS,
     GREEN_ACTIONS,
     append_event,
+    invalid_task_decision_reason,
     last_event_hash,
     load_events,
     validate_event_hash_chain,
@@ -78,6 +79,10 @@ def finalization_blockers(
             continue
         if decision is None:
             continue
+        invalid_decision = invalid_task_decision_reason(task, decision)
+        if invalid_decision is not None:
+            blockers.append(f"{task_id}: invalid task decision: {invalid_decision}")
+            continue
         action = str(decision.get("action"))
         if action in BLOCKING_ACTIONS:
             blockers.append(f"{task_id}: decision requires correction or escalation")
@@ -97,6 +102,10 @@ def finalization_blockers(
         decision = decisions.get(task_id)
         if decision is None:
             blockers.append(f"{task_id}: reviewer-added issue has no decision")
+            continue
+        invalid_decision = invalid_task_decision_reason(task, decision)
+        if invalid_decision is not None:
+            blockers.append(f"{task_id}: invalid task decision: {invalid_decision}")
             continue
         if str(decision.get("action")) not in GREEN_ACTIONS:
             blockers.append(f"{task_id}: reviewer-added issue remains unresolved")

@@ -413,12 +413,14 @@ def localized_change_metrics(
         }
     diff = cv.absdiff(original_roi, rendered_roi)
     gray = cv.cvtColor(diff, cv.COLOR_BGR2GRAY)
-    changed_fraction = float(np.count_nonzero(gray > 8) / gray.size)
+    changed_fraction = float(
+        np.count_nonzero(gray > rendering.REDACTION_DIFF_VISIBILITY_THRESHOLD) / gray.size
+    )
     mean_absdiff = float(gray.mean())
     return {
         "changed_pixel_fraction": round(changed_fraction, 6),
         "mean_absdiff": round(mean_absdiff, 6),
-        "region_changed": mean_absdiff >= 1.0 and changed_fraction >= 0.01,
+        "region_changed": rendering.region_changed_enough(original_roi, rendered_roi),
     }
 
 

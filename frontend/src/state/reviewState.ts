@@ -19,6 +19,23 @@ const NEEDS_CORRECTION_ACTIONS = new Set<string>([
   ACTIONS.wrongTarget,
 ]);
 
+const ACTION_ORDER = [
+  ACTIONS.looksCorrect,
+  ACTIONS.needsCorrection,
+  ACTIONS.partialCoverage,
+  ACTIONS.falseRedaction,
+  ACTIONS.wrongTarget,
+  ACTIONS.notSensitive,
+  ACTIONS.cosmeticOnly,
+  ACTIONS.unsure,
+] as const;
+
+export interface DecisionActionOption {
+  action: string;
+  className: string;
+  label: string;
+}
+
 export function taskBucket(task: Task, decision?: TaskDecision): QueueBucket {
   if (task.decision_state === 'resolved') return 'Completed';
   if (task.normal_task_class === 'correction_verification' && task.actionable === false) return 'Waiting';
@@ -55,6 +72,25 @@ export function decisionLabel(action?: string): string {
   if (action === ACTIONS.cosmeticOnly) return 'Cosmetic only';
   if (NEEDS_CORRECTION_ACTIONS.has(action)) return 'Needs correction';
   return action;
+}
+
+export function taskDecisionActionOptions(task: Pick<Task, 'allowed_actions'>): DecisionActionOption[] {
+  const allowed = new Set(task.allowed_actions || []);
+  return ACTION_ORDER
+    .filter((action) => allowed.has(action))
+    .map((action) => ({
+      action,
+      className: decisionActionClass(action),
+      label: decisionLabel(action),
+    }));
+}
+
+export function decisionActionClass(action: string): string {
+  if (action === ACTIONS.looksCorrect || action === ACTIONS.notSensitive || action === ACTIONS.cosmeticOnly) {
+    return 'decision-correct';
+  }
+  if (action === ACTIONS.unsure) return 'decision-unsure';
+  return 'decision-needs-correction';
 }
 
 export function taskColorClass(task: TaskWithDecision): string {
@@ -124,6 +160,7 @@ export function policyVerificationTask(caseId: CaseId, entity: EffectiveEntity, 
   const frame =
     typeof entity.first_visible_source_frame === 'number' ? entity.first_visible_source_frame : 0;
   return {
+    allowed_actions: [ACTIONS.looksCorrect, ACTIONS.needsCorrection, ACTIONS.unsure],
     blocking: true,
     case_id: caseId,
     category: entity.category,

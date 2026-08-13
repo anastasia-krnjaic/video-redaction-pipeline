@@ -31,6 +31,9 @@ REVIEW_QUEUE_SCHEMA_ID = "face_review_queue_schema_v1.0"
 REVIEW_TASK_SCHEMA_ID = "face_reviewer_task_schema_v1.2.3"
 REVIEW_BUNDLE_ID = "automated_review_bundle_v1_2_3"
 SUPPORTED_REVIEW_TASK_SCHEMA_VERSIONS = {"1.1", "1.2", "1.2.1", "1.2.2", "1.2.3"}
+REVIEW_CLIP_EXPECTED_RENDER_MAX_MEAN_ABSDIFF = 4.0
+REVIEW_CLIP_EXPECTED_RENDER_MAX_CHANGED_PIXEL_FRACTION = 0.02
+REVIEW_CLIP_EXPECTED_RENDER_MAX_CHANGED_PIXEL_FRACTION_RATIO = 0.2
 
 SEVERITY_ORDER = {
     "blocking": 0,
@@ -2277,6 +2280,7 @@ def add_visual_evidence(
                 frame_mapping=frame_mapping,
                 regions_by_frame=privacy_input.regions_by_frame,
                 settings=render_settings,
+                source_video_path=source_video_path,
                 decoded_audit_dir=bundle_paths["decoded_frame_audit"],
                 media_slug=f"{item_id}_automatic_preview_application",
             )
@@ -2326,6 +2330,7 @@ def add_visual_evidence(
                 frame_mapping=frame_mapping,
                 regions_by_frame=corrected_privacy_input.regions_by_frame,
                 settings=render_settings,
+                source_video_path=source_video_path,
                 decoded_audit_dir=bundle_paths["decoded_frame_audit"],
                 media_slug=f"{item_id}_reviewed_final_application",
             )
@@ -2895,6 +2900,7 @@ def validate_rendered_region_application(
     frame_mapping: TaskFrameMapping,
     regions_by_frame: dict[int, list[rendering.RenderRegion]],
     settings: rendering.RenderSettings,
+    source_video_path: Path | None = None,
     decoded_audit_dir: Path | None = None,
     media_slug: str | None = None,
 ) -> dict[str, Any]:
@@ -2919,71 +2925,173 @@ def validate_rendered_region_application(
     unexpected_rendered_region_frames: set[int] = set()
     expected_region_count = 0
     successful_region_count = 0
+    source_capture = cv.VideoCapture(str(source_video_path)) if source_video_path else None
+    if source_capture is not None and not source_capture.isOpened():
+        source_capture.release()
+        source_capture = None
+    source_capture_next_frame_index = frame_mapping.source_frame_start
+    if source_capture is not None:
+        source_capture.set(cv.CAP_PROP_POS_FRAMES, frame_mapping.source_frame_start)
 
-    for source_frame_index in range(
-        frame_mapping.source_frame_start,
-        frame_mapping.source_frame_end + 1,
-    ):
-        local_index = frame_mapping.local_for_source(source_frame_index)
-        if local_index >= len(original_frames) or local_index >= len(rendered_frames):
-            continue
-        original = original_frames[local_index]
-        rendered = rendered_frames[local_index]
-        renderable_regions = [
-            region
-            for region in regions_by_frame.get(source_frame_index, [])
-            if region.is_renderable
-        ]
-        frame_region_successes: list[bool] = []
-        if not renderable_regions:
-            if unexpected_frame_change(original, rendered):
-                unexpected_rendered_region_frames.add(source_frame_index)
-            continue
-        expected_region_frames.add(source_frame_index)
-        for region_index, region in enumerate(renderable_regions):
-            expected_region_count += 1
-            box = rendering.expanded_clipped_box(
-                region.bbox_xyxy,
-                frame_width=original.shape[1],
-                frame_height=original.shape[0],
-                margin_pixels=settings.margin_pixels,
-                margin_fraction=settings.margin_fraction,
-            )
-            if box is None:
+    def read_source_frame_for_expected_render(source_frame_index: int) -> np.ndarray | None:
+        nonlocal source_capture_next_frame_index
+        if source_capture is None:
+            return None
+        if source_capture_next_frame_index != source_frame_index:
+            source_capture.set(cv.CAP_PROP_POS_FRAMES, source_frame_index)
+            source_capture_next_frame_index = source_frame_index
+        ok, frame = source_capture.read()
+        source_capture_next_frame_index = source_frame_index + 1
+        return frame if ok else None
+
+    try:
+        for source_frame_index in range(
+            frame_mapping.source_frame_start,
+            frame_mapping.source_frame_end + 1,
+        ):
+            local_index = frame_mapping.local_for_source(source_frame_index)
+            if local_index >= len(original_frames) or local_index >= len(rendered_frames):
+                continue
+            original = original_frames[local_index]
+            rendered = rendered_frames[local_index]
+            renderable_regions = [
+                region
+                for region in regions_by_frame.get(source_frame_index, [])
+                if region.is_renderable
+            ]
+            frame_region_successes: list[bool] = []
+            if not renderable_regions:
+                if unexpected_frame_change(original, rendered):
+                    unexpected_rendered_region_frames.add(source_frame_index)
+                continue
+            expected_region_frames.add(source_frame_index)
+            expected_render_source_frame: np.ndarray | None = None
+            expected_rendered_frame: np.ndarray | None = None
+            expected_render_source = "original_clip"
+            for region_index, region in enumerate(renderable_regions):
+                expected_region_count += 1
+                box = rendering.expanded_clipped_box(
+                    region.bbox_xyxy,
+                    frame_width=original.shape[1],
+                    frame_height=original.shape[0],
+                    margin_pixels=settings.margin_pixels,
+                    margin_fraction=settings.margin_fraction,
+                )
+                target_box = rendering.clipped_box(
+                    region.bbox_xyxy,
+                    frame_width=original.shape[1],
+                    frame_height=original.shape[0],
+                )
+                if box is None or target_box is None:
+                    result = {
+                        "bbox_xyxy": region.bbox_xyxy,
+                        "error": "invalid expanded bbox",
+                        "local_task_frame_index": local_index,
+                        "provenance": region.provenance,
+                        "region_index": region_index,
+                        "render_applied": False,
+                        "source_frame_index": source_frame_index,
+                    }
+                    region_results.append(result)
+                    frame_region_successes.append(False)
+                    continue
+                metrics = region_difference_metrics(original, rendered, box)
+                target_metrics = region_difference_metrics(original, rendered, target_box)
+                target_region_changed = bool(target_metrics["region_changed"])
+                legacy_expanded_render_applied = region_redaction_applied(metrics)
+                legacy_render_applied = legacy_expanded_render_applied and target_region_changed
+                target_region_privacy_signal = legacy_render_applied or target_region_changed
+                source_backed_expected_match_required = source_capture is not None
+                render_applied = False if source_backed_expected_match_required else legacy_render_applied
+                expected_render_match: dict[str, Any] | None = None
+                if source_backed_expected_match_required or (
+                    target_region_privacy_signal and not render_applied
+                    ):
+                    if expected_rendered_frame is None:
+                        expected_render_source_frame = read_source_frame_for_expected_render(
+                            source_frame_index
+                        )
+                        if expected_render_source_frame is None:
+                            expected_render_source_frame = original
+                            expected_render_source = "original_clip"
+                        else:
+                            expected_render_source = "source_video"
+                        expected_rendered_frame = rendering.render_frame(
+                            expected_render_source_frame,
+                            source_frame_index,
+                            regions_by_frame,
+                            settings,
+                        )
+                    expected_render_match = expected_render_match_metrics(
+                        expected_rendered_frame,
+                        rendered,
+                        target_box,
+                        source_frame=expected_render_source_frame,
+                    )
+                    render_applied = (
+                        expected_render_matches_clip(expected_render_match)
+                        if source_backed_expected_match_required
+                        else legacy_render_applied
+                        or expected_render_matches_clip(expected_render_match)
+                    )
+                if render_applied:
+                    successful_region_count += 1
                 result = {
-                    "bbox_xyxy": region.bbox_xyxy,
-                    "error": "invalid expanded bbox",
+                    "bbox_xyxy": list(region.bbox_xyxy) if region.bbox_xyxy else None,
+                    "changed_pixel_fraction_inside_bbox": metrics[
+                        "changed_pixel_fraction_inside_bbox"
+                    ],
+                    "expanded_render_bbox_xyxy": list(box),
+                    "expected_render_changed_pixel_fraction_inside_bbox": None
+                    if expected_render_match is None
+                    else expected_render_match["changed_pixel_fraction_inside_bbox"],
+                    "expected_render_matches_clip": None
+                    if expected_render_match is None
+                    else expected_render_match["matches_clip"],
+                    "expected_render_mean_absdiff_inside_bbox": None
+                    if expected_render_match is None
+                    else expected_render_match["mean_absdiff_inside_bbox"],
+                    "expected_render_source": None
+                    if expected_render_match is None
+                    else expected_render_source,
+                    "expected_render_vs_source_changed_pixel_fraction": None
+                    if expected_render_match is None
+                    else expected_render_match[
+                        "expected_vs_source_changed_pixel_fraction_inside_bbox"
+                    ],
+                    "expected_render_vs_source_mean_absdiff_inside_bbox": None
+                    if expected_render_match is None
+                    else expected_render_match["expected_vs_source_mean_absdiff_inside_bbox"],
+                    "localized_mean_absdiff_inside_bbox": metrics[
+                        "localized_mean_absdiff_inside_bbox"
+                    ],
                     "local_task_frame_index": local_index,
+                    "legacy_expanded_inside_outside_render_applied": (
+                        legacy_expanded_render_applied
+                    ),
+                    "legacy_inside_outside_render_applied": legacy_render_applied,
+                    "max_absdiff_inside_bbox": metrics["max_absdiff_inside_bbox"],
+                    "mean_absdiff_inside_bbox": metrics["mean_absdiff_inside_bbox"],
+                    "mean_absdiff_outside_bbox": metrics["mean_absdiff_outside_bbox"],
                     "provenance": region.provenance,
                     "region_index": region_index,
-                    "render_applied": False,
+                    "render_applied": render_applied,
                     "source_frame_index": source_frame_index,
+                    "target_region_privacy_signal": target_region_privacy_signal,
+                    "target_bbox_changed_pixel_fraction": target_metrics[
+                        "changed_pixel_fraction_inside_bbox"
+                    ],
+                    "target_bbox_mean_absdiff": target_metrics["localized_mean_absdiff_inside_bbox"],
                 }
                 region_results.append(result)
-                frame_region_successes.append(False)
-                continue
-            metrics = region_difference_metrics(original, rendered, box)
-            render_applied = region_redaction_applied(metrics)
-            if render_applied:
-                successful_region_count += 1
-            result = {
-                "bbox_xyxy": list(region.bbox_xyxy) if region.bbox_xyxy else None,
-                "expanded_render_bbox_xyxy": list(box),
-                "local_task_frame_index": local_index,
-                "max_absdiff_inside_bbox": metrics["max_absdiff_inside_bbox"],
-                "mean_absdiff_inside_bbox": metrics["mean_absdiff_inside_bbox"],
-                "mean_absdiff_outside_bbox": metrics["mean_absdiff_outside_bbox"],
-                "provenance": region.provenance,
-                "region_index": region_index,
-                "render_applied": render_applied,
-                "source_frame_index": source_frame_index,
-            }
-            region_results.append(result)
-            frame_region_successes.append(render_applied)
-        if frame_region_successes and all(frame_region_successes):
-            successful_region_frames.add(source_frame_index)
-        else:
-            missing_region_frames.add(source_frame_index)
+                frame_region_successes.append(render_applied)
+            if frame_region_successes and all(frame_region_successes):
+                successful_region_frames.add(source_frame_index)
+            else:
+                missing_region_frames.add(source_frame_index)
+    finally:
+        if source_capture is not None:
+            source_capture.release()
 
     if missing_region_frames:
         errors.append(
@@ -3040,12 +3148,20 @@ def region_difference_metrics(
     box: Box,
 ) -> dict[str, Any]:
     x1, y1, x2, y2 = box
-    inside_diff = cv.absdiff(original[y1:y2, x1:x2], rendered[y1:y2, x1:x2])
+    original_roi = original[y1:y2, x1:x2]
+    rendered_roi = rendered[y1:y2, x1:x2]
+    inside_diff = cv.absdiff(original_roi, rendered_roi)
     outside_mask = np.ones(original.shape[:2], dtype=np.uint8)
     outside_mask[y1:y2, x1:x2] = 0
     outside_diff = cv.absdiff(original, rendered)
     outside_values = outside_diff[outside_mask.astype(bool)]
+    localized_mean_absdiff, changed_pixel_fraction = rendering.redaction_change_metrics(
+        original_roi,
+        rendered_roi,
+    )
     return {
+        "changed_pixel_fraction_inside_bbox": round(changed_pixel_fraction, 6),
+        "localized_mean_absdiff_inside_bbox": round(localized_mean_absdiff, 6),
         "max_absdiff_inside_bbox": int(inside_diff.max()) if inside_diff.size else 0,
         "mean_absdiff_inside_bbox": round(float(inside_diff.mean()), 6)
         if inside_diff.size
@@ -3053,6 +3169,7 @@ def region_difference_metrics(
         "mean_absdiff_outside_bbox": round(float(outside_values.mean()), 6)
         if outside_values.size
         else 0.0,
+        "region_changed": rendering.region_changed_enough(original_roi, rendered_roi),
     }
 
 
@@ -3061,6 +3178,65 @@ def region_redaction_applied(metrics: dict[str, Any]) -> bool:
     outside_mean = float(metrics["mean_absdiff_outside_bbox"])
     inside_max = int(metrics["max_absdiff_inside_bbox"])
     return inside_mean >= max(4.0, outside_mean + 2.0) and inside_max >= 40
+
+
+def expected_render_match_metrics(
+    expected_rendered: np.ndarray,
+    actual_rendered: np.ndarray,
+    box: Box,
+    *,
+    source_frame: np.ndarray | None = None,
+) -> dict[str, Any]:
+    x1, y1, x2, y2 = box
+    expected_roi = expected_rendered[y1:y2, x1:x2]
+    actual_roi = actual_rendered[y1:y2, x1:x2]
+    mean_absdiff, changed_pixel_fraction = rendering.redaction_change_metrics(
+        expected_roi,
+        actual_roi,
+    )
+    expected_vs_source_mean_absdiff: float | None = None
+    expected_vs_source_changed_pixel_fraction: float | None = None
+    if source_frame is not None:
+        source_roi = source_frame[y1:y2, x1:x2]
+        expected_vs_source_mean_absdiff, expected_vs_source_changed_pixel_fraction = (
+            rendering.redaction_change_metrics(source_roi, expected_roi)
+        )
+    metrics = {
+        "changed_pixel_fraction_inside_bbox": round(changed_pixel_fraction, 6),
+        "expected_vs_source_changed_pixel_fraction_inside_bbox": None
+        if expected_vs_source_changed_pixel_fraction is None
+        else round(expected_vs_source_changed_pixel_fraction, 6),
+        "expected_vs_source_mean_absdiff_inside_bbox": None
+        if expected_vs_source_mean_absdiff is None
+        else round(expected_vs_source_mean_absdiff, 6),
+        "mean_absdiff_inside_bbox": round(mean_absdiff, 6),
+    }
+    return metrics | {"matches_clip": expected_render_matches_clip(metrics)}
+
+
+def expected_render_matches_clip(metrics: dict[str, Any]) -> bool:
+    mean_absdiff = float(metrics["mean_absdiff_inside_bbox"])
+    changed_pixel_fraction = float(metrics["changed_pixel_fraction_inside_bbox"])
+    if (
+        mean_absdiff <= REVIEW_CLIP_EXPECTED_RENDER_MAX_MEAN_ABSDIFF
+        and changed_pixel_fraction <= REVIEW_CLIP_EXPECTED_RENDER_MAX_CHANGED_PIXEL_FRACTION
+    ):
+        return True
+    expected_vs_source_mean = metrics.get("expected_vs_source_mean_absdiff_inside_bbox")
+    expected_vs_source_fraction = metrics.get(
+        "expected_vs_source_changed_pixel_fraction_inside_bbox"
+    )
+    if expected_vs_source_mean is None or expected_vs_source_fraction is None:
+        return False
+    return (
+        mean_absdiff <= REVIEW_CLIP_EXPECTED_RENDER_MAX_MEAN_ABSDIFF
+        and float(expected_vs_source_mean) >= rendering.MIN_REDACTION_MEAN_ABSDIFF
+        and float(expected_vs_source_fraction)
+        >= rendering.MIN_REDACTION_CHANGED_PIXEL_FRACTION
+        and changed_pixel_fraction
+        <= float(expected_vs_source_fraction)
+        * REVIEW_CLIP_EXPECTED_RENDER_MAX_CHANGED_PIXEL_FRACTION_RATIO
+    )
 
 
 def unexpected_frame_change(original: np.ndarray, rendered: np.ndarray) -> bool:
