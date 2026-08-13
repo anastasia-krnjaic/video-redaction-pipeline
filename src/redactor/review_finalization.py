@@ -70,10 +70,16 @@ def finalization_blockers(
         for task in tasks_payload.get("tasks", [])
         if task.get("case_id") == case_id and not task.get("technical_only")
     ]
-    decisions = dict(working_state.get("task_decisions") or {})
+    decisions_by_case = review_working_state.task_decisions_by_case_from_payload(working_state)
+    resolutions_by_case = review_working_state.task_resolutions_by_case_from_payload(working_state)
     for task in tasks:
         task_id = str(task["review_task_id"])
-        decision = decisions.get(task_id)
+        decision = review_working_state.effective_task_state_for_case(
+            decisions_by_case,
+            resolutions_by_case,
+            case_id=case_id,
+            task_id=task_id,
+        )
         if task.get("blocking") and decision is None:
             blockers.append(f"{task_id}: required task has no decision")
             continue
@@ -99,7 +105,12 @@ def finalization_blockers(
         if not task_id:
             blockers.append(f"{case_id}: manual issue is missing a task id")
             continue
-        decision = decisions.get(task_id)
+        decision = review_working_state.effective_task_state_for_case(
+            decisions_by_case,
+            resolutions_by_case,
+            case_id=case_id,
+            task_id=task_id,
+        )
         if decision is None:
             blockers.append(f"{task_id}: reviewer-added issue has no decision")
             continue
@@ -113,7 +124,14 @@ def finalization_blockers(
     if case_id not in dict(working_state.get("sweep_acknowledgements") or {}):
         blockers.append(f"{case_id}: full-video sweep has not been acknowledged")
 
-    blockers.extend(object_policy_blockers(working_state, decisions, case_id=case_id))
+    blockers.extend(
+        object_policy_blockers(
+            working_state,
+            decisions_by_case,
+            resolutions_by_case,
+            case_id=case_id,
+        )
+    )
     if review_working_state.latest_reviewed_publication_deferred(package_root):
         blockers.append(f"{case_id}: latest_reviewed_publication_deferred")
     elif review_working_state.latest_reviewed_publication_supported(package_root):
@@ -212,10 +230,13 @@ def finalization_blockers(
 
 def object_policy_blockers(
     working_state: dict[str, Any],
-    decisions: dict[str, dict[str, Any]],
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+    resolutions_by_case: dict[str, dict[str, dict[str, Any]]],
     *,
     case_id: str,
 ) -> list[str]:
+    from redactor import review_working_state
+
     blockers: list[str] = []
     for entity_id, raw_entity in sorted(
         dict(working_state.get("object_policy_overrides") or {}).items()
@@ -242,7 +263,12 @@ def object_policy_blockers(
             task_id = str(
                 after.get("verification_task_id") or f"object_policy_verify_{case_id}_{entity_id}"
             )
-            decision = decisions.get(task_id)
+            decision = review_working_state.effective_task_state_for_case(
+                decisions_by_case,
+                resolutions_by_case,
+                case_id=case_id,
+                task_id=task_id,
+            )
             if decision is None:
                 action_label = "Keep" if policy == "keep_visible" else "Not sensitive"
                 blockers.append(f"{label}: {action_label} policy has not been verified")
@@ -1011,7 +1037,10 @@ def required_task_resolution_identity(
     case_id: str,
 ) -> dict[str, Any]:
     rows: dict[str, dict[str, Any]] = {}
-    decisions = dict(working_state.get("task_decisions") or {})
+    from redactor import review_working_state
+
+    decisions_by_case = review_working_state.task_decisions_by_case_from_payload(working_state)
+    resolutions_by_case = review_working_state.task_resolutions_by_case_from_payload(working_state)
     tasks_payload = load_json(package_root / "reviewer_tasks.json") if (
         package_root / "reviewer_tasks.json"
     ).exists() else {"tasks": []}
@@ -1026,7 +1055,15 @@ def required_task_resolution_identity(
         task_id = str(task.get("review_task_id") or "")
         if not task_id:
             continue
-        decision = dict(decisions.get(task_id) or {})
+        decision = dict(
+            review_working_state.effective_task_state_for_case(
+                decisions_by_case,
+                resolutions_by_case,
+                case_id=case_id,
+                task_id=task_id,
+            )
+            or {}
+        )
         rows[task_id] = {
             "action": decision.get("action"),
             "blocking": bool(task.get("blocking")),
@@ -1036,6 +1073,9 @@ def required_task_resolution_identity(
             "decision_status": decision.get("decision_status"),
             "issue_type": task.get("issue_type"),
             "normal_task_class": task.get("normal_task_class"),
+            "resolved_by": decision.get("resolved_by") or "explicit_decision"
+            if decision
+            else None,
             "task_id": task_id,
         }
     ordered = [rows[key] for key in sorted(rows)]
@@ -1062,11 +1102,20 @@ def correction_verification_identity(
         )
         if correction.correction_id in active_ids
     ]
-    decisions = dict(working_state.get("task_decisions") or {})
+    from redactor import review_working_state
+
+    decisions_by_case = review_working_state.task_decisions_by_case_from_payload(working_state)
     rows = []
     for correction in corrections:
         verification_task_id = f"correction_verify_{case_id}_{correction.correction_id}"
-        decision = dict(decisions.get(verification_task_id) or {})
+        decision = dict(
+            review_working_state.task_decision_for_case(
+                decisions_by_case,
+                case_id=case_id,
+                task_id=verification_task_id,
+            )
+            or {}
+        )
         rows.append(
             {
                 "correction_hash": correction.correction_hash(),

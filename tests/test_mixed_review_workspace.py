@@ -922,11 +922,19 @@ def test_source_backed_entities_include_policy_and_no_task_targets(
     assert by_key["face_track_2"]["source_lineage"]["source_task_ids"] == []
     assert by_key["plate_track_2"]["source_lineage"]["source_task_ids"] == []
     actions_by_id = {task["source_task_id"]: task["allowed_actions"] for task in tasks}
+    labels_by_id = {task["source_task_id"]: task["category_allowed_actions"] for task in tasks}
     assert actions_by_id["face_review_0001"] == [
         review_sessions.ACTION_LOOKS_CORRECT,
         review_sessions.ACTION_PRIVACY_LEAK,
+        review_sessions.ACTION_NOT_SENSITIVE,
+    ]
+    assert labels_by_id["plate_review_0002"] == [
+        "Correct",
+        "Needs correction",
+        "Not sensitive",
     ]
     assert actions_by_id["plate_review_0002"] == [
+        review_sessions.ACTION_LOOKS_CORRECT,
         review_sessions.ACTION_PRIVACY_LEAK,
         review_sessions.ACTION_NOT_SENSITIVE,
     ]

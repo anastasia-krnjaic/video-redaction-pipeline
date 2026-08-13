@@ -51,6 +51,7 @@ DEFAULT_BLUR_KERNEL = 51
 DEFAULT_FRAME_CONTEXT = 15
 DEFAULT_SPOT_CHECK_COUNT = 3
 SHORT_ACCEPTED_TRACK_REVIEW_MAX_FRAMES = 12
+FINAL_REVIEW_ACTION_LABELS = ("Correct", "Needs correction", "Not sensitive")
 
 Box = tuple[int, int, int, int]
 
@@ -767,22 +768,14 @@ def build_plate_review_tasks(
         has_region = not bool(interval.get("blocking")) and not any(
             code in BLOCKING_REVIEW_REASONS for code in reason_codes
         )
-        allowed = (
-            ("Needs correction", "Not a license plate")
-            if not has_region
-            else (
-                "Looks correct",
-                "Needs correction",
-                "Not a license plate",
-            )
-        )
+        allowed = FINAL_REVIEW_ACTION_LABELS
         title = (
             "Plate coverage needs correction"
             if not has_region
-            else "Check an uncertain plate track"
+            else "Check a low-confidence plate track"
         )
         explanation = (
-            "The tracker found a gap or uncertain plate track. Final plate export remains "
+            "The tracker found a gap or low-confidence plate track. Final plate export remains "
             "blocked until reviewed regions are supplied."
             if not has_region
             else "This plate-like track is plausible but not strong enough for automatic approval."
@@ -832,10 +825,8 @@ def build_plate_review_tasks(
                     "This sample looks normal to the automatic system. Spot checks reduce the "
                     "risk of silent mistakes but do not prove the full video is perfect."
                 ),
-                allowed_actions=("Looks correct", "Needs correction", "Not a license plate"),
-                default_action_statuses=action_status_map(
-                    ("Looks correct", "Needs correction", "Not a license plate")
-                ),
+                allowed_actions=FINAL_REVIEW_ACTION_LABELS,
+                default_action_statuses=action_status_map(FINAL_REVIEW_ACTION_LABELS),
                 track_uids=(),
                 media_roles={},
             )
@@ -919,10 +910,8 @@ def short_accepted_track_review_tasks(
                     "A short accepted track will be redacted in the preview. Confirm it is a "
                     "real license plate, not a transient text or graphic detection."
                 ),
-                allowed_actions=("Looks correct", "Needs correction", "Not a license plate"),
-                default_action_statuses=action_status_map(
-                    ("Looks correct", "Needs correction", "Not a license plate")
-                ),
+                allowed_actions=FINAL_REVIEW_ACTION_LABELS,
+                default_action_statuses=action_status_map(FINAL_REVIEW_ACTION_LABELS),
                 track_uids=(uid,),
                 media_roles={},
             )
@@ -932,9 +921,9 @@ def short_accepted_track_review_tasks(
 
 def action_status_map(actions: tuple[str, ...]) -> dict[str, str]:
     mapping = {
-        "Looks correct": "accepted_current",
+        "Correct": "accepted_current",
         "Needs correction": "correction_required",
-        "Not a license plate": "false_positive",
+        "Not sensitive": "false_positive",
     }
     return {action: mapping[action] for action in actions}
 
@@ -1435,7 +1424,7 @@ def write_review_markdown(
         "",
         "- Confirm unresolved gaps are not approved without correction regions.",
         "- Confirm accepted automatic plate regions cover visible plate characters.",
-        "- Mark text, graphics, or other non-plate redactions as Not a license plate.",
+        "- Mark text, graphics, or other non-plate redactions as Not sensitive.",
         "- Export decisions before closing the browser.",
         "",
     ]

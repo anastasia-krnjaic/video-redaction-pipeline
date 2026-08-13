@@ -46,6 +46,7 @@ PLATE_ACTIVE_STATUSES = {
     "needs_review": "review_required",
 }
 ACTION_ALIASES = {
+    "Correct": review_sessions.ACTION_LOOKS_CORRECT,
     "Cosmetic only": review_sessions.ACTION_COSMETIC_ONLY,
     "False redaction": review_sessions.ACTION_FALSE_REDACTION,
     "Looks correct": review_sessions.ACTION_LOOKS_CORRECT,
@@ -131,25 +132,16 @@ class TaskTargetBinding:
     entity_keys: tuple[str, ...] = ()
     payload: dict[str, Any] = field(default_factory=dict)
 
-ALL_REVIEW_ACTIONS = (
-    review_sessions.ACTION_LOOKS_CORRECT,
-    review_sessions.ACTION_PRIVACY_LEAK,
-    review_sessions.ACTION_PARTIAL_COVERAGE,
-    review_sessions.ACTION_FALSE_REDACTION,
-    review_sessions.ACTION_WRONG_TARGET,
-    review_sessions.ACTION_NOT_SENSITIVE,
-    review_sessions.ACTION_COSMETIC_ONLY,
-    review_sessions.ACTION_ESCALATE,
-)
+ALL_REVIEW_ACTIONS = review_sessions.CANONICAL_REVIEW_ACTIONS
 
 ACTION_LABELS = {
     review_sessions.ACTION_COSMETIC_ONLY: "Cosmetic only",
     review_sessions.ACTION_ESCALATE: "Uncertain / Escalate",
     review_sessions.ACTION_FALSE_REDACTION: "False redaction",
-    review_sessions.ACTION_LOOKS_CORRECT: "Looks correct",
+    review_sessions.ACTION_LOOKS_CORRECT: "Correct",
     review_sessions.ACTION_NOT_SENSITIVE: "Not sensitive",
     review_sessions.ACTION_PARTIAL_COVERAGE: "Partial coverage",
-    review_sessions.ACTION_PRIVACY_LEAK: "Privacy leak",
+    review_sessions.ACTION_PRIVACY_LEAK: "Needs correction",
     review_sessions.ACTION_WRONG_TARGET: "Wrong target",
 }
 
@@ -1703,9 +1695,9 @@ def build_tasks(
                 "blocking": blocking,
                 "case_id": case_id,
                 "category": category,
-                "category_allowed_actions": source_task.get("allowed_actions")
-                or source_task.get("allowed_user_actions")
-                or [],
+                "category_allowed_actions": [
+                    ACTION_LABELS[action] for action in allowed_actions
+                ],
                 "category_review_source": category_tasks[category]["source_path"],
                 "correction_required": blocking or issue_type in {"possible_privacy_gap"},
                 "decision_state": "pending",
@@ -2773,30 +2765,8 @@ def task_severity(task: dict[str, Any], blocking: bool) -> str:
 
 
 def task_allowed_actions(category: str, task: dict[str, Any], issue_type: str) -> list[str]:
-    explicit = source_allowed_actions(task)
-    if explicit:
-        return explicit
-    if category == CATEGORY_PLATE:
-        if issue_type in {
-            "plate_coverage_gap",
-            "plate_track_review_required",
-            "possible_privacy_gap",
-        }:
-            return [review_sessions.ACTION_PRIVACY_LEAK, review_sessions.ACTION_NOT_SENSITIVE]
-        if issue_type in {"possible_false_redaction", "optional_spot_check"}:
-            return [
-                review_sessions.ACTION_LOOKS_CORRECT,
-                review_sessions.ACTION_PRIVACY_LEAK,
-                review_sessions.ACTION_NOT_SENSITIVE,
-            ]
-    actions = [
-        review_sessions.ACTION_LOOKS_CORRECT,
-        review_sessions.ACTION_PRIVACY_LEAK,
-        review_sessions.ACTION_ESCALATE,
-    ]
-    if issue_type in {"possible_false_redaction", "optional_spot_check"}:
-        actions.append(review_sessions.ACTION_NOT_SENSITIVE)
-    return actions
+    source_allowed_actions(task)
+    return list(review_sessions.CANONICAL_REVIEW_ACTIONS)
 
 
 def source_allowed_actions(task: dict[str, Any]) -> list[str]:
@@ -2805,6 +2775,8 @@ def source_allowed_actions(task: dict[str, Any]) -> list[str]:
     for item in raw:
         value = item.get("action") if isinstance(item, dict) else item
         action = normalize_review_action(str(value))
+        if action in review_sessions.LEGACY_DECISION_ACTIONS - review_sessions.DECISION_ACTIONS:
+            continue
         if action not in review_sessions.DECISION_ACTIONS:
             raise ValueError(f"unsupported review action: {value}")
         if action not in actions:

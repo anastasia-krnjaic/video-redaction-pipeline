@@ -341,8 +341,7 @@ def test_plate_review_task_blocks_looks_correct_for_unresolved_gap() -> None:
     )
     blocking = [task for task in tasks if task.blocking][0]
 
-    assert "Looks correct" not in blocking.allowed_actions
-    assert blocking.allowed_actions == ("Needs correction", "Not a license plate")
+    assert blocking.allowed_actions == ("Correct", "Needs correction", "Not sensitive")
 
 
 def test_short_accepted_track_becomes_false_positive_review_task() -> None:
@@ -361,7 +360,7 @@ def test_short_accepted_track_becomes_false_positive_review_task() -> None:
         "possible_false_accepted_track",
         "short_accepted_track",
     )
-    assert "Not a license plate" in tasks[0].allowed_actions
+    assert "Not sensitive" in tasks[0].allowed_actions
 
 
 def test_review_decision_validation_rejects_duplicate_decisions(tmp_path: Path) -> None:
@@ -381,10 +380,11 @@ def test_review_decision_validation_rejects_duplicate_decisions(tmp_path: Path) 
                         reason_codes=("gap_exceeds_safe_interpolation_limit",),
                         title="Plate coverage needs correction",
                         explanation="Needs correction.",
-                        allowed_actions=("Needs correction", "Not a license plate"),
+                        allowed_actions=("Correct", "Needs correction", "Not sensitive"),
                         default_action_statuses={
+                            "Correct": "accepted_current",
                             "Needs correction": "correction_required",
-                            "Not a license plate": "false_positive",
+                            "Not sensitive": "false_positive",
                         },
                         track_uids=("plate_track_0001",),
                         media_roles={},

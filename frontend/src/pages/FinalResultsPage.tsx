@@ -3,13 +3,14 @@ import { finalizeCase as finalizeCaseRequest } from '../api/client';
 import { ReviewVideoPlayer } from '../components/ReviewVideoPlayer';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useVideoController } from '../hooks/useVideoController';
-import type { Attribution, AuditEvent, FinalizationStatus, MediaVersion, Session, WorkspaceSummary } from '../types/api';
+import type { Attribution, AuditEvent, FinalizationStatus, MediaVersion, Session, WorkingState, WorkspaceSummary } from '../types/api';
 import type { CaseId } from '../types/domain';
 
 interface Props {
   attribution: Attribution;
   events: AuditEvent[];
   session: Session | null;
+  workingState?: WorkingState;
   workspace: WorkspaceSummary;
   onError: (message?: string) => void;
   onEventsChange: (events: AuditEvent[]) => void;
@@ -23,6 +24,7 @@ export function FinalResultsPage({
   onEventsChange,
   onRequireAttribution,
   session,
+  workingState,
   workspace,
 }: Props) {
   const caseIds = Object.keys(workspace.cases);
@@ -34,6 +36,7 @@ export function FinalResultsPage({
   const [selectedRole, setSelectedRole] = usePersistentState<string>(`final:${caseId}:version`, 'latest_reviewed');
   const [finalStatus, setFinalStatus] = useState<Record<string, FinalizationStatus>>({});
   const [busy, setBusy] = useState(false);
+  const status = finalStatus[caseId];
 
   if (!manifest) {
     return (
@@ -43,12 +46,25 @@ export function FinalResultsPage({
     );
   }
 
-  const roles = publicVideoRoles(manifest.video_roles);
+  const materializedLatestRole = workingState?.materialized_latest_reviewed?.[caseId] as MediaVersion | undefined;
+  const finalRole = status?.finalized && status.final_video
+    ? ({
+        label: 'Final',
+        path: status.final_video,
+        role: 'final_reviewed',
+        sha256: status.final_video_sha256 as string | null | undefined,
+        source_frame_end: manifest.source_frame_end,
+        source_frame_start: manifest.source_frame_start,
+      } satisfies MediaVersion)
+    : undefined;
+  const roles = publicVideoRoles(manifest.video_roles, materializedLatestRole, finalRole);
   const selectedVersion =
     roles.find((role) => role.role === selectedRole) ||
     roles.find((role) => role.role === 'latest_reviewed') ||
     roles[0];
   const controller = useVideoController(manifest, selectedVersion, caseFrame, setCaseFrame);
+  const sweepAcknowledged = Boolean((workingState?.sweep_acknowledgements as Record<string, unknown> | undefined)?.[caseId]);
+  const finalizationReady = Boolean(materializedLatestRole && sweepAcknowledged);
 
   const finalize = async () => {
     if (!session) {
@@ -76,8 +92,6 @@ export function FinalResultsPage({
     }
   };
 
-  const status = finalStatus[caseId];
-
   return (
     <section className="case-panel active">
       <div className="case-header">
@@ -103,12 +117,17 @@ export function FinalResultsPage({
           controller={controller}
           manifest={manifest}
           roles={roles}
+          finalRole={finalRole}
+          sessionId={session?.session_id}
           selectedRole={selectedVersion?.role || selectedRole}
           version={selectedVersion}
           onVersionChange={setSelectedRole}
         />
         <aside className="side-panel final-status">
           <h3>{manifest.display_name}</h3>
+          <div className={`status-box ${finalizationReady ? 'success' : 'warning'}`}>
+            <strong>{finalizationReady ? 'Ready to finalize' : 'Finalization waits for current Latest reviewed and approved full-video review'}</strong>
+          </div>
           <div className="button-row">
             <button type="button" className="primary" onClick={finalize} disabled={busy}>
               Check finalization
@@ -142,13 +161,13 @@ function caseLabel(caseId: string, displayName?: string): string {
   return displayName || caseId;
 }
 
-function publicVideoRoles(roles: MediaVersion[]): MediaVersion[] {
+function publicVideoRoles(roles: MediaVersion[], latestRole?: MediaVersion, finalRole?: MediaVersion): MediaVersion[] {
   const byRole = new Map(roles.map((role) => [role.role, role]));
   const automatic = byRole.get('automatic') || byRole.get('current_result');
-  const latest = byRole.get('latest_reviewed') || automatic;
   return [
     byRole.get('original'),
     automatic ? { ...automatic, label: 'Automatic', role: 'automatic' as const } : undefined,
-    latest ? { ...latest, label: 'Latest reviewed', role: 'latest_reviewed' as const } : undefined,
+    latestRole ? { ...latestRole, label: 'Latest reviewed', role: 'latest_reviewed' as const } : undefined,
+    finalRole ? { ...finalRole, label: 'Final', role: 'final_reviewed' as const } : undefined,
   ].filter((role): role is MediaVersion => Boolean(role));
 }

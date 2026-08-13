@@ -313,6 +313,22 @@ export async function retryMaterializationJob(payload: {
   return { job: response.job };
 }
 
+export async function acknowledgeFullVideoSweep(payload: {
+  session_id: string;
+  actor: Attribution | Record<string, unknown>;
+  case_id: CaseId;
+  viewed_ranges?: Record<string, unknown>[];
+}): Promise<{ event: AuditEvent; working_state?: WorkingState }> {
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/events/sweep`, {
+    session_id: payload.session_id,
+    actor: payload.actor,
+    case_id: payload.case_id,
+    viewed_ranges: payload.viewed_ranges || [],
+  });
+  if (!response.event) throw new Error('Sweep acknowledgement response did not include an event.');
+  return { event: response.event, working_state: response.working_state };
+}
+
 export async function setReviewerAttribution(payload: {
   session_id: string;
   display_name: string;

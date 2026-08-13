@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -29,12 +30,47 @@ def write_report(package: Path, report: dict[str, Any]) -> None:
     out.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def task_card_selector(task_id: str) -> str:
-    return f'#case-day.active .task-card[data-task-id="{task_id}"]'
+def migration_session_id(package: Path) -> str | None:
+    report_path = package / "review_state_migration_report.json"
+    if not report_path.exists():
+        report_path = package / "review_v2_final_migration_report.json"
+    if not report_path.exists():
+        return None
+    payload = json.loads(report_path.read_text(encoding="utf-8"))
+    for key in ("migration_session_id", "session_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.startswith("session_"):
+            return value
+    migration = payload.get("migration")
+    if isinstance(migration, dict):
+        value = migration.get("session_id")
+        if isinstance(value, str) and value.startswith("session_"):
+            return value
+    return None
 
 
-def marker_selector(task_id: str) -> str:
-    return f'#case-day.active .marker[data-task-id="{task_id}"]'
+def task_card_selector(case_id: str, task_id: str) -> str:
+    return f'.case-panel[data-case-id="{case_id}"] .task-card[data-task-id="{task_id}"]'
+
+
+def active_case_panel(page: Any, case_id: str) -> Any:
+    panel = page.locator(f'.case-panel[data-case-id="{case_id}"]')
+    panel.wait_for(state="visible", timeout=10_000)
+    return panel
+
+
+def click_bucket(page: Any, case_id: str, bucket: str) -> None:
+    panel = active_case_panel(page, case_id)
+    panel.locator(".filter-row").get_by_role(
+        "button", name=re.compile(rf"^{re.escape(bucket)}\b")
+    ).click()
+
+
+def bucket_names(panel: Any) -> list[str]:
+    names = []
+    for raw in panel.locator(".filter-row button").all_inner_texts():
+        names.append(re.sub(r"\s+\d+\s*$", "", raw.strip()).strip())
+    return names
 
 
 def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
@@ -47,12 +83,18 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
     )
     if not package.exists():
         pytest.skip(f"workspace package does not exist: {package}")
+    session_id = migration_session_id(package)
+    if not session_id:
+        pytest.skip(f"workspace package does not include a migration session id: {package}")
+    if not (package / "sessions" / session_id).exists():
+        pytest.skip(f"workspace package does not include migration session state: {session_id}")
 
     report: dict[str, Any] = {
         "browser": "firefox",
         "package": package.as_posix(),
         "passed": False,
         "schema_version": "final_review_workspace_browser_smoke.v1",
+        "session_id": session_id,
         "steps": [],
     }
     server = review_workspace.serve_workspace(package, port=0)
@@ -71,212 +113,120 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
                 pytest.skip(f"Firefox automation is unavailable: {exc}")
             try:
                 page = browser.new_page(viewport={"width": 1440, "height": 900})
-                page.goto(f"{base_url}/index.html", wait_until="domcontentloaded")
-                page.wait_for_function("() => Boolean(DATA?.cases?.day)", timeout=8000)
-                record_step(report, "app_load")
-
-                page.get_by_role("button", name="Start review").click()
-                page.wait_for_function(SESSION_READY_JS, timeout=5000)
+                page.goto(
+                    f"{base_url}/app/day?session_id={session_id}",
+                    wait_until="domcontentloaded",
+                )
+                day_panel = active_case_panel(page, "day")
+                page.wait_for_function(SESSION_READY_JS, timeout=10_000)
                 assert "Local session" in page.locator("#sessionBanner").inner_text()
-                record_step(report, "start_anonymous_review")
-
-                page.get_by_role("button", name="Entities").click()
-                page.locator("#entitiesModal.open").wait_for()
-                entity_count = page.locator("#entitiesModal .entity-card").count()
-                assert entity_count > 0
-                assert "Unresolved evidence" in page.locator("#entitiesModal").inner_text()
-                assert page.locator("#entitySearch").count() == 0
-                assert page.locator("#entitiesModal .policy-segment").count() > 0
-                record_step(report, "entity_modal", entity_count=entity_count)
-
-                page.locator("#entitiesModal [data-filter='unresolved']").click()
-                assert "Unresolved evidence" in page.locator("#entitiesModal").inner_text()
-                assert page.evaluate(
-                    "() => DATA.entities.unresolved_evidence_by_case.day.fragment_count > 0"
-                )
-                page.locator("#entitiesModal [data-filter='all']").click()
-                record_step(report, "unresolved_filter")
-
-                representative_frame = page.locator("#entitiesModal .entity-card").first.evaluate(
-                    "node => Number((findEntity('day', node.dataset.entityId) || {})"
-                    ".representative_case_frame)"
-                )
-                page.locator("#entitiesModal .entity-card img").first.click()
-                page.wait_for_function(
-                    "(frame) => state.frame.day === frame",
-                    arg=representative_frame,
-                    timeout=3000,
-                )
-                record_step(report, "representative_thumbnail_jump", frame=representative_frame)
-
-                page.get_by_role("button", name="Entities").click()
-                page.locator("#entitiesModal.open").wait_for()
-                dialog_seen = False
-                page.on(
-                    "dialog", lambda dialog: (_ for _ in ()).throw(AssertionError(dialog.message))
-                )
-                first_entity_id = page.locator("#entitiesModal .entity-card").first.get_attribute(
-                    "data-entity-id"
-                )
-                with page.expect_response("**/api/entity-events"):
-                    page.locator(
-                        f'#entitiesModal .entity-card[data-entity-id="{first_entity_id}"] '
-                        '[data-policy="keep_visible"]'
-                    ).click()
-                assert (
-                    page.locator(
-                        f'#entitiesModal .entity-card[data-entity-id="{first_entity_id}"] '
-                        '[data-policy="keep_visible"]'
-                    ).get_attribute("aria-pressed")
-                    == "true"
-                )
-                record_step(report, "policy_segment_no_prompt", dialog_seen=dialog_seen)
-
-                page.locator(
-                    f'#entitiesModal .entity-card[data-entity-id="{first_entity_id}"] '
-                    '[data-action="entity-merge"]'
-                ).click()
-                page.locator("#mergeModal.open").wait_for()
-                assert page.locator("#mergeModal .merge-card").count() >= 0
-                assert "entity_" not in page.locator("#mergeModal").inner_text()
-                record_step(report, "visual_merge_modal")
-                page.keyboard.press("Escape")
-
-                page.keyboard.press("Escape")
-                page.wait_for_function(
-                    "() => !document.querySelector('#entitiesModal')?.classList.contains('open')",
-                    timeout=3000,
-                )
-
-                first_marker = page.locator("#case-day.active .marker").first
-                first_task_id = first_marker.get_attribute("data-task-id")
-                first_task_frame = page.evaluate(
-                    """(taskId) => {
-                      const t = allTasks('day').find(x => x.review_task_id === taskId);
-                      return t.source_frame_start - caseData('day').source_frame_start;
-                    }""",
-                    first_task_id,
-                )
-                first_marker.click()
-                page.wait_for_function(
-                    "(expected) => state.frame.day === expected",
-                    arg=first_task_frame,
-                    timeout=3000,
-                )
-                assert page.locator(task_card_selector(first_task_id)).count() == 1
-                record_step(
-                    report,
-                    "timeline_marker_to_task",
-                    task_id=first_task_id,
-                    frame=first_task_frame,
-                )
-
-                page.locator(task_card_selector(first_task_id)).click()
-                page.wait_for_function(
-                    "(expected) => state.frame.day === expected",
-                    arg=first_task_frame,
-                    timeout=3000,
-                )
-                assert "active" in page.locator(marker_selector(first_task_id)).get_attribute(
-                    "class"
-                )
-                record_step(report, "task_to_timeline_marker", task_id=first_task_id)
-
-                video = page.locator("#case-day.active video").first
-                video_src = video.evaluate("node => node.currentSrc")
-                current_time = video.evaluate("node => node.currentTime")
-                with page.expect_response("**/api/decisions"):
-                    page.locator(
-                        task_card_selector(first_task_id) + " .decision-choice"
-                    ).first.click()
-                assert video.evaluate("node => node.currentSrc") == video_src
-                assert video.evaluate("node => node.currentTime") >= current_time
-                page.wait_for_function(
-                    "(taskId) => document.querySelector("
-                    '`#case-day.active .marker[data-task-id="${taskId}"]`'
-                    ")?.className.includes('resolved')",
-                    arg=first_task_id,
-                    timeout=3000,
-                )
-                assert "resolved" in page.locator(marker_selector(first_task_id)).get_attribute(
-                    "class"
-                )
-                record_step(
-                    report,
-                    "correct_decision_green_marker_no_video_reload",
-                    task_id=first_task_id,
-                )
-
-                needs_task_id = page.evaluate("() => firstOpenTask('day').review_task_id")
-                with page.expect_response("**/api/decisions"):
-                    page.locator(
-                        task_card_selector(needs_task_id) + " .decision-needs-correction"
-                    ).click()
-                assert "blocking" in page.locator(marker_selector(needs_task_id)).get_attribute(
-                    "class"
-                )
-                record_step(report, "needs_correction_bucket_red_marker", task_id=needs_task_id)
-
-                unsure_task_id = page.evaluate("() => firstOpenTask('day').review_task_id")
-                with page.expect_response("**/api/decisions"):
-                    page.locator(task_card_selector(unsure_task_id) + " .decision-unsure").click()
-                assert "partial" in page.locator(marker_selector(unsure_task_id)).get_attribute(
-                    "class"
-                )
-                record_step(report, "unsure_bucket_orange_marker", task_id=unsure_task_id)
-
-                page.locator(marker_selector(first_task_id)).click()
-                assert page.evaluate("state.selectedTask.day") == first_task_id
-                record_step(report, "completed_task_selection")
-
-                page.locator("#case-day.active video").click()
-                page.wait_for_function(
-                    "() => !document.querySelector('#case-day.active video').paused", timeout=5000
-                )
-                page.locator("#case-day.active video").click()
-                page.wait_for_function(
-                    "() => document.querySelector('#case-day.active video').paused", timeout=5000
-                )
-                record_step(report, "video_click_play_pause")
-
-                page.keyboard.press("ArrowRight")
-                frame_after_right = page.evaluate("state.frame.day")
-                page.keyboard.press("ArrowLeft")
-                assert page.evaluate("state.frame.day") == frame_after_right - 1
-                record_step(report, "single_frame_keys")
-
-                before_shift = page.evaluate("state.frame.day")
-                page.keyboard.press("Shift+ArrowRight")
-                assert page.evaluate("state.frame.day") == before_shift + 10
-                page.keyboard.press("Shift+ArrowLeft")
-                assert page.evaluate("state.frame.day") == before_shift
-                record_step(report, "ten_frame_keys")
-
-                page.locator("#case-day.active [data-action='fullscreen']").click()
-                page.wait_for_function(
-                    "() => document.fullscreenElement && "
-                    "document.querySelector('#case-day.active .frame-hud')"
-                    "?.offsetParent !== null",
-                    timeout=5000,
-                )
-                assert "Source frame" in page.locator("#case-day.active .frame-hud").inner_text()
-                page.keyboard.press("Escape")
-                record_step(report, "fullscreen_hud")
-
-                session_id = page.evaluate("state.session?.session_id")
-                page.reload(wait_until="domcontentloaded")
-                page.wait_for_function(SESSION_READY_JS, timeout=5000)
-                assert page.evaluate("state.session?.session_id") == session_id
                 assert session_id in page.locator("#sessionBanner").inner_text()
-                assert page.evaluate("(taskId) => Boolean(state.decisions[taskId])", first_task_id)
+                assert "Unsure" not in page.locator("body").inner_text()
+                assert "Uncertain" not in page.locator("body").inner_text()
+                record_step(report, "migration_session_app_load")
+
+                assert bucket_names(day_panel) == [
+                    "Open",
+                    "Needs correction",
+                    "Correct",
+                    "Not sensitive",
+                ]
+                assert "Waiting" not in bucket_names(day_panel)
+                assert "Completed" not in bucket_names(day_panel)
+                record_step(report, "canonical_queue_buckets")
+
+                duplicate_task_id = "license_plate_plate_review_0005"
+                click_bucket(page, "day", "Correct")
+                day_duplicate = page.locator(task_card_selector("day", duplicate_task_id))
+                day_duplicate.wait_for(state="visible", timeout=5_000)
                 assert (
-                    page.evaluate(
-                        "(entityId) => findEntity('day', entityId)?.current_policy",
-                        first_entity_id,
-                    )
-                    == "keep_visible"
+                    day_duplicate.locator(".task-state-row .badge").first.inner_text()
+                    == "Correct"
                 )
-                record_step(report, "reload_state_restoration")
+                record_step(report, "day_duplicate_completed", task_id=duplicate_task_id)
+
+                day_panel.get_by_role("button", name="Entities").click()
+                entity_dialog = page.get_by_role("dialog", name="Review objects")
+                entity_dialog.wait_for(state="visible", timeout=5_000)
+                entity_dialog.get_by_role("button", name="All").click()
+                entity_count = entity_dialog.locator(".entity-card").count()
+                assert entity_count > 0
+                assert entity_dialog.locator(".entity-card img").count() > 0
+                assert entity_dialog.locator(".policy-segment").count() > 0
+                record_step(report, "entity_modal_assets", entity_count=entity_count)
+                entity_dialog.get_by_role("button", name="Close").last.click()
+
+                page.get_by_role("button", name="Night").click()
+                night_panel = active_case_panel(page, "night")
+                assert "night" in night_panel.locator(".case-header").inner_text().lower()
+                assert bucket_names(night_panel) == [
+                    "Open",
+                    "Needs correction",
+                    "Correct",
+                    "Not sensitive",
+                ]
+                click_bucket(page, "night", "Open")
+                night_duplicate = page.locator(task_card_selector("night", duplicate_task_id))
+                night_duplicate.wait_for(state="visible", timeout=5_000)
+                assert (
+                    night_duplicate.locator(".task-state-row .badge").first.inner_text()
+                    == "Open"
+                )
+                action_labels = [
+                    item.strip()
+                    for item in night_duplicate.locator(".task-actions button").all_inner_texts()
+                ]
+                assert action_labels == [
+                    "Correct",
+                    "Needs correction",
+                    "Not sensitive",
+                ]
+                assert "WHY THIS WAS FLAGGED" in night_duplicate.inner_text()
+                assert "WHAT TO CHECK" in night_duplicate.inner_text()
+                record_step(
+                    report,
+                    "night_duplicate_open_and_three_actions",
+                    task_id=duplicate_task_id,
+                )
+
+                with page.expect_response("**/api/v1/decisions"):
+                    night_duplicate.get_by_role("button", name=re.compile(r"^Correct$")).click()
+                click_bucket(page, "night", "Correct")
+                night_completed = page.locator(task_card_selector("night", duplicate_task_id))
+                night_completed.wait_for(state="visible", timeout=5_000)
+                assert (
+                    night_completed.locator(".task-state-row .badge").first.inner_text()
+                    == "Correct"
+                )
+                record_step(report, "night_duplicate_decision_isolated", task_id=duplicate_task_id)
+
+                page.get_by_role("button", name="Day").click()
+                active_case_panel(page, "day")
+                click_bucket(page, "day", "Correct")
+                day_duplicate = page.locator(task_card_selector("day", duplicate_task_id))
+                day_duplicate.wait_for(state="visible", timeout=5_000)
+                assert (
+                    day_duplicate.locator(".task-state-row .badge").first.inner_text()
+                    == "Correct"
+                )
+                record_step(report, "day_duplicate_still_completed", task_id=duplicate_task_id)
+
+                page.get_by_role("button", name="Final Results").click()
+                page.locator(".case-panel.active").get_by_role(
+                    "heading", name="Final Results"
+                ).wait_for(timeout=5_000)
+                final_options = [
+                    item.strip()
+                    for item in page.locator(
+                        ".case-panel.active .version-selector option"
+                    ).all_inner_texts()
+                ]
+                assert "Original" in final_options
+                assert "Automatic" in final_options
+                assert "Latest reviewed" not in final_options
+                assert "Final" not in final_options
+                assert page.locator(".download-menu").count() > 0
+                record_step(report, "final_results_hides_unavailable_roles")
                 report["passed"] = True
             finally:
                 browser.close()

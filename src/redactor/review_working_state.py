@@ -4,6 +4,7 @@ import json
 import shutil
 import time
 import uuid
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -28,11 +29,17 @@ from redactor.review_corrections import (
     load_corrections_jsonl,
 )
 from redactor.review_sessions import (
+    CANONICAL_REVIEW_ACTIONS,
     EVENT_CORRECTION_SAVED_LEGACY,
     EVENT_MANUAL_CORRECTION_SAVED,
+    EVENT_TASK_RESOLUTION_DERIVED,
+    REVIEW_DECISION_IDENTITY_V2,
     append_event,
+    current_decision_for_task,
     ensure_session_layout,
+    flatten_decisions_by_case,
     load_events,
+    normalize_decisions_by_case,
 )
 
 WORKING_STATE_SCHEMA_VERSION = "review_working_state.v1"
@@ -55,6 +62,131 @@ POLICY_KEEP_VISIBLE = privacy_entities.POLICY_KEEP_VISIBLE
 POLICY_NOT_SENSITIVE = privacy_entities.POLICY_NOT_SENSITIVE
 POLICY_REVIEW_REQUIRED = privacy_entities.POLICY_REVIEW_REQUIRED
 SUPPRESSING_POLICIES = {POLICY_KEEP_VISIBLE, POLICY_NOT_SENSITIVE}
+
+
+def task_decisions_by_case_from_payload(
+    payload: dict[str, Any],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    return normalize_decisions_by_case(
+        {
+            "decisions": payload.get("task_decisions") or payload.get("decisions") or {},
+            "decisions_by_case": payload.get("task_decisions_by_case")
+            or payload.get("decisions_by_case")
+            or {},
+        }
+    )
+
+
+def task_resolutions_by_case_from_payload(
+    payload: dict[str, Any],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    return normalize_decisions_by_case(
+        {
+            "decisions": payload.get("task_resolutions") or payload.get("resolutions") or {},
+            "decisions_by_case": payload.get("task_resolutions_by_case")
+            or payload.get("resolutions_by_case")
+            or {},
+        }
+    )
+
+
+def task_decision_for_case(
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+    *,
+    case_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    return current_decision_for_task(decisions_by_case, case_id=case_id, task_id=task_id)
+
+
+def task_resolution_for_case(
+    resolutions_by_case: dict[str, dict[str, dict[str, Any]]],
+    *,
+    case_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    return current_decision_for_task(resolutions_by_case, case_id=case_id, task_id=task_id)
+
+
+def set_task_decision_for_case(
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+    *,
+    case_id: str,
+    task_id: str,
+    decision: dict[str, Any],
+) -> None:
+    decisions_by_case.setdefault(str(case_id), {})[str(task_id)] = dict(decision) | {
+        "case_id": str(case_id),
+        "task_id": str(task_id),
+    }
+
+
+def set_task_resolution_for_case(
+    resolutions_by_case: dict[str, dict[str, dict[str, Any]]],
+    *,
+    case_id: str,
+    task_id: str,
+    resolution: dict[str, Any],
+) -> None:
+    resolutions_by_case.setdefault(str(case_id), {})[str(task_id)] = dict(resolution) | {
+        "case_id": str(case_id),
+        "task_id": str(task_id),
+    }
+
+
+def effective_task_state_for_case(
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+    resolutions_by_case: dict[str, dict[str, dict[str, Any]]],
+    *,
+    case_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    return task_resolution_for_case(
+        resolutions_by_case,
+        case_id=case_id,
+        task_id=task_id,
+    ) or task_decision_for_case(
+        decisions_by_case,
+        case_id=case_id,
+        task_id=task_id,
+    )
+
+
+def decision_count_by_case(decisions_by_case: dict[str, dict[str, Any]]) -> int:
+    return sum(len(dict(case_decisions)) for case_decisions in decisions_by_case.values())
+
+
+def manual_task_key(case_id: str, task_id: str) -> tuple[str, str]:
+    return (str(case_id), str(task_id))
+
+
+def case_scoped_task_id(task: dict[str, Any], fallback_case_id: str = "") -> tuple[str, str] | None:
+    task_id = str(task.get("review_task_id") or task.get("task_id") or "")
+    case_id = str(task.get("case_id") or fallback_case_id or "")
+    if not case_id or not task_id:
+        return None
+    return manual_task_key(case_id, task_id)
+
+
+def non_durable_decisions_by_case(
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    filtered: dict[str, dict[str, dict[str, Any]]] = {}
+    for case_id, case_decisions in sorted(decisions_by_case.items()):
+        rows = {
+            task_id: dict(decision)
+            for task_id, decision in sorted(dict(case_decisions).items())
+            if not durable_edit_verification_task_id(str(task_id))
+        }
+        if rows:
+            filtered[str(case_id)] = rows
+    return filtered
+
+
+def non_durable_resolutions_by_case(
+    resolutions_by_case: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    return non_durable_decisions_by_case(resolutions_by_case)
 
 
 def safe_case_manifest_path(package_root: Path, case_id: str) -> Path:
@@ -140,7 +272,12 @@ def latest_reviewed_publication_deferred_plan(
     }
 
 
-def derive_working_state(package_root: Path, session_dir: Path) -> dict[str, Any]:
+def derive_working_state(
+    package_root: Path,
+    session_dir: Path,
+    *,
+    write_snapshot: bool = True,
+) -> dict[str, Any]:
     """Return deterministic session working state plus any valid materialized versions."""
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
@@ -178,10 +315,12 @@ def derive_working_state(package_root: Path, session_dir: Path) -> dict[str, Any
         "current_event_chain_head": chain_head,
         "deterministic_state_inputs": {
             "correction_hashes": sorted(correction.correction_hash() for correction in corrections),
-            "decision_hash": stable_hash(projection["task_decisions"]),
+            "decision_hash": stable_hash(projection["task_decisions_by_case"]),
+            "decision_identity": "case_id_task_id.v1",
             "object_policy_hash": stable_hash(projection["object_policy_overrides"]),
             "projection_hash": projection_hash,
             "projection_hash_schema_version": ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
+            "task_resolution_hash": stable_hash(projection["task_resolutions_by_case"]),
         },
         "manual_corrections": [
             correction.to_dict() | {"correction_hash": correction.correction_hash()}
@@ -193,9 +332,13 @@ def derive_working_state(package_root: Path, session_dir: Path) -> dict[str, Any
         "suppressions": policy_suppressions_from_overrides(projection["object_policy_overrides"]),
         "sweep_acknowledgements": projection["sweep_acknowledgements"],
         "task_decisions": projection["task_decisions"],
+        "task_decisions_by_case": projection["task_decisions_by_case"],
+        "task_resolutions": projection["task_resolutions"],
+        "task_resolutions_by_case": projection["task_resolutions_by_case"],
     }
     state["state_hash"] = state_hash(state)
-    write_state_snapshot(session_dir, state)
+    if write_snapshot:
+        write_state_snapshot(session_dir, state)
     return state
 
 
@@ -299,8 +442,9 @@ def derive_active_review_projection(
     overrides: dict[str, dict[str, Any]] = dict(baseline_overrides)
     active_correction_ids: set[str] = set()
     correction_case_by_id = correction_case_index(session_dir)
-    decisions: dict[str, dict[str, Any]] = {}
-    manual_tasks: dict[str, dict[str, Any]] = {}
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]] = {}
+    resolutions_by_case: dict[str, dict[str, dict[str, Any]]] = {}
+    manual_tasks: dict[tuple[str, str], dict[str, Any]] = {}
     materialized: dict[str, dict[str, Any]] = {}
     sweep_acknowledgements: dict[str, dict[str, Any]] = {}
     entity_case_by_id = entity_case_index(entities)
@@ -317,7 +461,7 @@ def derive_active_review_projection(
                 reset_case_ids = set(entities.keys())
             reset_review_workflow_from_active_projection(
                 reset_case_ids,
-                decisions=decisions,
+                decisions_by_case=decisions_by_case,
                 manual_tasks=manual_tasks,
                 sweep_acknowledgements=sweep_acknowledgements,
             )
@@ -336,11 +480,12 @@ def derive_active_review_projection(
                 reset_case_ids,
                 baseline_overrides=baseline_overrides,
                 corrections_case_by_id=correction_case_by_id,
-                decisions=decisions,
+                decisions_by_case=decisions_by_case,
                 entity_case_by_id=entity_case_by_id,
                 manual_tasks=manual_tasks,
                 materialized=materialized,
                 overrides=overrides,
+                resolutions_by_case=resolutions_by_case,
                 active_correction_ids=active_correction_ids,
                 sweep_acknowledgements=sweep_acknowledgements,
             )
@@ -362,14 +507,14 @@ def derive_active_review_projection(
             active_correction_ids = {
                 str(item) for item in list(snapshot.get("active_correction_ids") or [])
             }
-            decisions = {
-                str(task_id): dict(decision)
-                for task_id, decision in dict(snapshot.get("task_decisions") or {}).items()
-            }
+            decisions_by_case = task_decisions_by_case_from_payload(snapshot)
+            resolutions_by_case = task_resolutions_by_case_from_payload(snapshot)
             manual_tasks = {
-                str(task.get("review_task_id") or ""): dict(task)
+                key: dict(task)
                 for task in list(snapshot.get("active_manual_tasks") or [])
                 if isinstance(task, dict) and task.get("review_task_id")
+                for key in [case_scoped_task_id(task, str(task.get("case_id") or ""))]
+                if key is not None
             }
             sweep_acknowledgements = {
                 str(item_case): dict(value)
@@ -384,11 +529,36 @@ def derive_active_review_projection(
             continue
         if event_type == "decision_recorded":
             task_id = str(after.get("task_id") or event.get("task_id") or "")
-            if task_id:
-                decisions[task_id] = dict(after) | {
-                    "event_hash": event.get("event_hash"),
-                    "event_id": event.get("event_id"),
-                }
+            decision_case_id = str(after.get("case_id") or case_id or "")
+            if task_id and decision_case_id:
+                set_task_decision_for_case(
+                    decisions_by_case,
+                    case_id=decision_case_id,
+                    task_id=task_id,
+                    decision=dict(after)
+                    | {
+                        "event_hash": event.get("event_hash"),
+                        "event_id": event.get("event_id"),
+                    },
+                )
+                resolutions_by_case.get(decision_case_id, {}).pop(task_id, None)
+                if not resolutions_by_case.get(decision_case_id):
+                    resolutions_by_case.pop(decision_case_id, None)
+            continue
+        if event_type == EVENT_TASK_RESOLUTION_DERIVED:
+            task_id = str(after.get("task_id") or event.get("task_id") or "")
+            resolution_case_id = str(after.get("case_id") or case_id or "")
+            if task_id and resolution_case_id:
+                set_task_resolution_for_case(
+                    resolutions_by_case,
+                    case_id=resolution_case_id,
+                    task_id=task_id,
+                    resolution=dict(after)
+                    | {
+                        "event_hash": event.get("event_hash"),
+                        "event_id": event.get("event_id"),
+                    },
+                )
             continue
         if event_type == "full_video_sweep_acknowledged" and case_id:
             sweep_acknowledgements[case_id] = dict(after) | {
@@ -399,8 +569,10 @@ def derive_active_review_projection(
         if event_type == "manual_issue_created":
             task = dict(after.get("task") or {})
             task_id = str(task.get("review_task_id") or event.get("task_id") or "")
-            if task_id:
-                manual_tasks[task_id] = task
+            task_case_id = str(task.get("case_id") or case_id or "")
+            if task_id and task_case_id:
+                task.setdefault("case_id", task_case_id)
+                manual_tasks[manual_task_key(task_case_id, task_id)] = task
             continue
         if event_type in {EVENT_MANUAL_CORRECTION_SAVED, EVENT_CORRECTION_SAVED_LEGACY}:
             correction_id = str(after.get("correction_id") or "")
@@ -464,12 +636,22 @@ def derive_active_review_projection(
             )
             accepted_projection_schema = active_projection_pointer_schema(after)
             hash_manual_tasks = {key: dict(value) for key, value in manual_tasks.items()}
-            hash_decisions = {key: dict(value) for key, value in decisions.items()}
+            hash_decisions_by_case = {
+                item_case: {task_id: dict(decision) for task_id, decision in case_decisions.items()}
+                for item_case, case_decisions in decisions_by_case.items()
+            }
+            hash_resolutions_by_case = {
+                item_case: {
+                    task_id: dict(resolution)
+                    for task_id, resolution in case_resolutions.items()
+                }
+                for item_case, case_resolutions in resolutions_by_case.items()
+            }
             decorate_correction_verification_tasks(
                 package_root=package_root,
                 session_dir=session_dir,
                 manual_tasks=hash_manual_tasks,
-                decisions=hash_decisions,
+                decisions_by_case=hash_decisions_by_case,
                 materialized=materialized,
             )
             current_projection_hash = active_projection_hash(
@@ -485,7 +667,8 @@ def derive_active_review_projection(
                     ),
                     "object_policy_overrides": overrides,
                     "sweep_acknowledgements": sweep_acknowledgements,
-                    "task_decisions": hash_decisions,
+                    "task_decisions_by_case": hash_decisions_by_case,
+                    "task_resolutions_by_case": hash_resolutions_by_case,
                 },
                 schema_version=accepted_projection_schema,
             )
@@ -510,9 +693,11 @@ def derive_active_review_projection(
         package_root=package_root,
         session_dir=session_dir,
         manual_tasks=manual_tasks,
-        decisions=decisions,
+        decisions_by_case=decisions_by_case,
         materialized=materialized,
     )
+    task_decisions = flatten_decisions_by_case(decisions_by_case)
+    task_resolutions = flatten_decisions_by_case(resolutions_by_case)
     return {
         "active_correction_ids": sorted(active_correction_ids),
         "active_manual_tasks": sorted(
@@ -526,7 +711,10 @@ def derive_active_review_projection(
         "materialized_latest_reviewed": materialized,
         "object_policy_overrides": overrides,
         "sweep_acknowledgements": sweep_acknowledgements,
-        "task_decisions": decisions,
+        "task_decisions": task_decisions,
+        "task_decisions_by_case": decisions_by_case,
+        "task_resolutions": task_resolutions,
+        "task_resolutions_by_case": resolutions_by_case,
     }
 
 
@@ -565,11 +753,12 @@ def active_projection_payload(
         for task in list(projection.get("active_manual_tasks") or [])
         if not durable_edit_verification_task_id(str(dict(task).get("review_task_id") or ""))
     ]
-    render_decisions = {
-        str(task_id): dict(decision)
-        for task_id, decision in dict(projection.get("task_decisions") or {}).items()
-        if not durable_edit_verification_task_id(str(task_id))
-    }
+    render_decisions_by_case = non_durable_decisions_by_case(
+        task_decisions_by_case_from_payload(projection)
+    )
+    render_resolutions_by_case = non_durable_resolutions_by_case(
+        task_resolutions_by_case_from_payload(projection)
+    )
     payload = {
         "active_correction_ids": sorted(
             str(item) for item in list(projection.get("active_correction_ids") or [])
@@ -583,14 +772,17 @@ def active_projection_payload(
             ),
         ),
         "object_policy_overrides": dict(projection.get("object_policy_overrides") or {}),
-        "task_decisions": render_decisions,
     }
     if schema_version == LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION:
+        payload["task_decisions"] = flatten_decisions_by_case(render_decisions_by_case)
         payload["sweep_acknowledgements"] = (
             {}
             if normalize_legacy_non_media
             else dict(projection.get("sweep_acknowledgements") or {})
         )
+    else:
+        payload["task_decisions_by_case"] = render_decisions_by_case
+        payload["task_resolutions_by_case"] = render_resolutions_by_case
     return payload
 
 
@@ -703,20 +895,24 @@ def reset_cases_from_active_projection(
     *,
     baseline_overrides: dict[str, dict[str, Any]],
     corrections_case_by_id: dict[str, str],
-    decisions: dict[str, dict[str, Any]],
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
     entity_case_by_id: dict[str, str],
-    manual_tasks: dict[str, dict[str, Any]],
+    manual_tasks: dict[tuple[str, str], dict[str, Any]],
     materialized: dict[str, dict[str, Any]],
     overrides: dict[str, dict[str, Any]],
+    resolutions_by_case: dict[str, dict[str, dict[str, Any]]],
     active_correction_ids: set[str],
     sweep_acknowledgements: dict[str, dict[str, Any]],
 ) -> None:
-    for task_id, decision in list(decisions.items()):
-        if str(decision.get("case_id") or "") in case_ids:
-            decisions.pop(task_id, None)
-    for task_id, task in list(manual_tasks.items()):
+    for case_id in list(decisions_by_case):
+        if case_id in case_ids:
+            decisions_by_case.pop(case_id, None)
+    for case_id in list(resolutions_by_case):
+        if case_id in case_ids:
+            resolutions_by_case.pop(case_id, None)
+    for task_key, task in list(manual_tasks.items()):
         if str(task.get("case_id") or "") in case_ids:
-            manual_tasks.pop(task_id, None)
+            manual_tasks.pop(task_key, None)
     for correction_id in list(active_correction_ids):
         if corrections_case_by_id.get(correction_id) in case_ids:
             active_correction_ids.discard(correction_id)
@@ -753,22 +949,25 @@ def override_belongs_to_any_case(
 def reset_review_workflow_from_active_projection(
     case_ids: set[str],
     *,
-    decisions: dict[str, dict[str, Any]],
-    manual_tasks: dict[str, dict[str, Any]],
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+    manual_tasks: dict[tuple[str, str], dict[str, Any]],
     sweep_acknowledgements: dict[str, dict[str, Any]],
 ) -> None:
-    for task_id, decision in list(decisions.items()):
-        if str(decision.get("case_id") or "") not in case_ids:
+    for item_case_id, case_decisions in list(decisions_by_case.items()):
+        if item_case_id not in case_ids:
             continue
-        if durable_edit_verification_task_id(task_id):
-            continue
-        decisions.pop(task_id, None)
-    for task_id, task in list(manual_tasks.items()):
+        for task_id in list(case_decisions):
+            if durable_edit_verification_task_id(task_id):
+                continue
+            case_decisions.pop(task_id, None)
+        if not case_decisions:
+            decisions_by_case.pop(item_case_id, None)
+    for task_key, task in list(manual_tasks.items()):
         if str(task.get("case_id") or "") not in case_ids:
             continue
-        if durable_edit_verification_task_id(task_id):
+        if durable_edit_verification_task_id(str(task.get("review_task_id") or "")):
             continue
-        manual_tasks.pop(task_id, None)
+        manual_tasks.pop(task_key, None)
     for case_id in case_ids:
         sweep_acknowledgements.pop(case_id, None)
 
@@ -842,14 +1041,14 @@ def correction_verification_status(
             "actionable": False,
             "decision_state": "waiting_for_latest_reviewed",
             "publication_status": "waiting",
-            "reason": "Waiting for Latest reviewed media.",
+            "reason": "Latest reviewed media is not current yet.",
         }
     if not latest:
         return {
             "actionable": False,
             "decision_state": "waiting_for_latest_reviewed",
             "publication_status": "waiting",
-            "reason": "Waiting for Latest reviewed media.",
+            "reason": "Latest reviewed media is not current yet.",
         }
     if not media_exists:
         return {
@@ -871,7 +1070,7 @@ def correction_verification_status(
             "decision_state": "waiting_for_latest_reviewed",
             "publication_status": "superseded_or_rendering",
             "published_effective_regions_hash": published_hash or None,
-            "reason": "Waiting for Latest reviewed media.",
+            "reason": "Latest reviewed media is not current yet.",
         }
     if not decoded_verification_passed:
         return {
@@ -904,13 +1103,15 @@ def decorate_correction_verification_tasks(
     *,
     package_root: Path,
     session_dir: Path,
-    manual_tasks: dict[str, dict[str, Any]],
-    decisions: dict[str, dict[str, Any]],
+    manual_tasks: dict[tuple[str, str], dict[str, Any]],
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
     materialized: dict[str, dict[str, Any]],
 ) -> None:
-    for task_id, task in list(manual_tasks.items()):
+    for task_key, task in list(manual_tasks.items()):
         if dict(task).get("normal_task_class") != "correction_verification":
             continue
+        task_id = str(task.get("review_task_id") or task_key[1])
+        task_case_id = str(task.get("case_id") or task_key[0])
         status = correction_verification_status(
             package_root=package_root,
             task=task,
@@ -926,7 +1127,7 @@ def decorate_correction_verification_tasks(
             }
         )
         if status.get("actionable"):
-            task["allowed_actions"] = ["looks_correct", "privacy_leak", "uncertain_escalate"]
+            task["allowed_actions"] = list(CANONICAL_REVIEW_ACTIONS)
             task["decision_state"] = "pending"
             task["what_to_inspect"] = str(
                 status.get("reason")
@@ -938,16 +1139,19 @@ def decorate_correction_verification_tasks(
                 status.get("decision_state") or "waiting_for_latest_reviewed"
             )
             task["what_to_inspect"] = str(
-                status.get("reason") or "Waiting for Latest reviewed media."
+                status.get("reason") or "Latest reviewed media is not current yet."
             )
-            decisions.pop(task_id, None)
-        manual_tasks[task_id] = task
+            decisions_by_case.get(task_case_id, {}).pop(task_id, None)
+            if not decisions_by_case.get(task_case_id):
+                decisions_by_case.pop(task_case_id, None)
+        manual_tasks[task_key] = task
 
 
 def correction_verification_decision_gate(
     package_root: Path,
     session_dir: Path,
     *,
+    case_id: str,
     task_id: str,
 ) -> dict[str, Any]:
     state = derive_working_state(package_root, session_dir)
@@ -956,6 +1160,7 @@ def correction_verification_decision_gate(
             dict(item)
             for item in list(state.get("active_manual_tasks") or [])
             if dict(item).get("review_task_id") == task_id
+            and dict(item).get("case_id") == case_id
         ),
         None,
     )
@@ -964,7 +1169,7 @@ def correction_verification_decision_gate(
     if task.get("actionable") is True:
         return {"ok": True, "task": task}
     return {
-        "error": str(task.get("what_to_inspect") or "Waiting for Latest reviewed media."),
+        "error": str(task.get("what_to_inspect") or "Latest reviewed media is not current yet."),
         "ok": False,
         "task": task,
     }
@@ -1399,6 +1604,13 @@ def track_variants(track_id: str, *, category: str) -> set[str]:
     return variants
 
 
+def canonical_face_track_uid(track_id: str) -> str:
+    stripped = str(track_id)
+    if stripped.startswith("face_track_"):
+        stripped = stripped.removeprefix("face_track_")
+    return f"face_track_{stripped}"
+
+
 def region_identity_values(record: PrivacyRegionRecord) -> set[str]:
     values = {record.object_id or ""}
     source = dict(record.source_record)
@@ -1440,10 +1652,11 @@ def source_backed_entity_regions(
 ) -> list[PrivacyRegionRecord]:
     if entity.get("category") != CATEGORY_FACE:
         return []
-    track_ids = entity_track_ids(entity)
-    if not track_ids:
+    entity_variants = entity_track_variants(entity)
+    if not entity_variants:
         return []
     regions: list[PrivacyRegionRecord] = []
+    seen_source_boxes: set[tuple[int, str, tuple[int, int, int, int]]] = set()
     for source_dir in face_policy_source_dirs(package_root, manifest.case_id, manifest):
         tracks_path = source_dir / "tracking" / "tracks.jsonl"
         if not tracks_path.exists():
@@ -1452,19 +1665,26 @@ def source_backed_entity_regions(
             frame_index = int(frame_payload.get("frame_index") or 0)
             for box_index, box in enumerate(list(frame_payload.get("track_boxes") or [])):
                 track_id = str(box.get("track_id") or "")
-                if track_id not in track_ids:
+                source_track_variants = track_variants(track_id, category=CATEGORY_FACE)
+                if not (source_track_variants & entity_variants):
                     continue
                 if not bool(box.get("render_eligible", True)):
                     continue
                 bbox = box.get("bbox_xyxy")
                 if not bbox or len(bbox) != 4:
                     continue
+                bbox_xyxy = tuple(int(value) for value in bbox)
+                track_uid = canonical_face_track_uid(track_id)
+                source_key = (frame_index, track_uid, bbox_xyxy)
+                if source_key in seen_source_boxes:
+                    continue
+                seen_source_boxes.add(source_key)
                 regions.append(
                     PrivacyRegionRecord(
                         approval_state=APPROVAL_ACCEPTED,
-                        bbox_xyxy=tuple(int(value) for value in bbox),
+                        bbox_xyxy=bbox_xyxy,
                         category=CATEGORY_FACE,
-                        object_id=f"face_track_{track_id}",
+                        object_id=track_uid,
                         provenance="review_object_policy_source_track",
                         render_eligible=True,
                         source_frame=frame_index,
@@ -1472,9 +1692,9 @@ def source_backed_entity_regions(
                             "candidate_id": box.get("candidate_id"),
                             "entity_id": entity.get("entity_id"),
                             "policy_source": display_source_path(source_dir),
-                            "region_id": f"source_policy_face_{track_id}_{frame_index}_{box_index}",
+                            "region_id": f"source_policy_{track_uid}_{frame_index}_{box_index}",
                             "track_id": track_id,
-                            "track_uid": f"face_track_{track_id}",
+                            "track_uid": track_uid,
                         },
                     )
                 )
@@ -2036,9 +2256,7 @@ def create_correction_verification_task(
     return {
         "accepted_working_state_revision": accepted_working_state_revision,
         "actionable": deferred,
-        "allowed_actions": ["looks_correct", "privacy_leak", "uncertain_escalate"]
-        if deferred
-        else [],
+        "allowed_actions": list(CANONICAL_REVIEW_ACTIONS) if deferred else [],
         "blocking": True,
         "case_id": correction.case_id,
         "category": correction.category,
@@ -2066,7 +2284,7 @@ def create_correction_verification_task(
         "what_to_inspect": (
             "Correction saved; reviewed output publication is deferred."
             if deferred
-            else "Waiting for Latest reviewed media."
+            else "Latest reviewed media is not current yet."
         ),
     }
 
@@ -2117,6 +2335,9 @@ def create_checkpoint(
             "object_policy_overrides": dict(state.get("object_policy_overrides") or {}),
             "sweep_acknowledgements": dict(state.get("sweep_acknowledgements") or {}),
             "task_decisions": dict(state.get("task_decisions") or {}),
+            "task_decisions_by_case": dict(state.get("task_decisions_by_case") or {}),
+            "task_resolutions": dict(state.get("task_resolutions") or {}),
+            "task_resolutions_by_case": dict(state.get("task_resolutions_by_case") or {}),
         },
     }
     write_json(session_dir / "checkpoints" / f"{checkpoint_id}.json", checkpoint)
@@ -2385,6 +2606,9 @@ def baseline_case_active_state_summary(package_root: Path, case_id: str) -> dict
         "object_policy_overrides": baseline_policy_overrides(entities),
         "sweep_acknowledgements": {},
         "task_decisions": {},
+        "task_decisions_by_case": {},
+        "task_resolutions": {},
+        "task_resolutions_by_case": {},
     }
     return normalized_case_active_state_summary(package_root, baseline_state, case_id)
 
@@ -2429,11 +2653,7 @@ def normalized_case_active_state_summary(
         for row in entity_rows
         if str(row.get("label") or "").startswith("Merged ")
     )
-    task_decisions = {
-        task_id: dict(decision)
-        for task_id, decision in dict(state.get("task_decisions") or {}).items()
-        if str(dict(decision).get("case_id") or "") == case_id
-    }
+    task_decisions = dict(task_decisions_by_case_from_payload(state).get(case_id) or {})
     manual_tasks = [
         dict(task)
         for task in list(state.get("active_manual_tasks") or [])
@@ -2620,6 +2840,225 @@ def case_versions(package_root: Path, session_dir: Path | None, *, case_id: str)
         "schema_version": "case_versions.v1",
         "versions": roles,
     }
+
+
+DOWNLOADABLE_CASE_VERSION_ROLES = {
+    "automatic",
+    "final_reviewed",
+    "latest_reviewed",
+    "original",
+}
+
+
+def downloadable_case_version(
+    package_root: Path,
+    session_dir: Path | None,
+    *,
+    case_id: str,
+    role: str,
+) -> dict[str, Any]:
+    package_root = package_root.resolve()
+    requested_role = "final_reviewed" if role == "final" else str(role)
+    if requested_role not in DOWNLOADABLE_CASE_VERSION_ROLES:
+        raise ValueError(f"unsupported downloadable case media role: {role}")
+    versions = case_versions(package_root, session_dir, case_id=case_id)["versions"]
+    candidates = [dict(item) for item in versions if str(item.get("role") or "") == requested_role]
+    if not candidates:
+        raise FileNotFoundError(f"{case_id}: no current {requested_role} version is available")
+    selected = candidates[-1]
+    raw_path = str(selected.get("path") or "")
+    if not raw_path:
+        raise FileNotFoundError(f"{case_id}: {requested_role} version has no media path")
+    path = Path(raw_path)
+    if path.is_absolute():
+        raise ValueError(f"{case_id}: {requested_role} media path is not package-relative")
+    resolved = (package_root / path).resolve()
+    try:
+        resolved.relative_to(package_root)
+    except ValueError as exc:
+        raise ValueError(f"{case_id}: {requested_role} media path escapes package root") from exc
+    if not resolved.exists() or not resolved.is_file():
+        raise FileNotFoundError(f"{case_id}: {requested_role} media file is missing")
+    expected_sha = str(selected.get("sha256") or "")
+    actual_sha = media.sha256_file(resolved)
+    if expected_sha and actual_sha != expected_sha:
+        raise ValueError(f"{case_id}: {requested_role} media sha256 mismatch")
+    revision = (
+        str(selected.get("revision_id") or selected.get("latest_reviewed_revision_id") or "")
+        or actual_sha[:12]
+    )
+    filename = f"{case_id}_{requested_role}_{revision}.mp4"
+    safe_filename = "".join(ch if ch.isalnum() or ch in {"-", "_", "."} else "_" for ch in filename)
+    return {
+        "case_id": case_id,
+        "content_type": "video/mp4",
+        "filename": safe_filename,
+        "ok": True,
+        "path": resolved,
+        "role": selected,
+        "schema_version": "case_media_download.v1",
+        "sha256": actual_sha,
+    }
+
+
+def delivery_package_contract(
+    package_root: Path,
+    session_dir: Path | None,
+    *,
+    case_id: str,
+) -> dict[str, Any]:
+    package_root = package_root.resolve()
+    manifest = case_manifests.load_case_manifest(
+        require_safe_case_manifest_path(package_root, case_id)
+    )
+    roles: dict[str, dict[str, Any]] = {}
+    for role in DOWNLOADABLE_CASE_VERSION_ROLES:
+        try:
+            download = downloadable_case_version(
+                package_root,
+                session_dir,
+                case_id=case_id,
+                role=role,
+            )
+            media_path = Path(download["path"])
+            roles[role] = {
+                "available": True,
+                "filename": download["filename"],
+                "path": media_path.relative_to(package_root.resolve()).as_posix(),
+                "revision_id": dict(download.get("role") or {}).get("revision_id")
+                or dict(download.get("role") or {}).get("latest_reviewed_revision_id"),
+                "sha256": download["sha256"],
+            }
+        except (FileNotFoundError, ValueError) as exc:
+            roles[role] = {"available": False, "reason": str(exc)}
+    required = ("original", "automatic", "latest_reviewed", "final_reviewed")
+    ready = all(roles.get(role, {}).get("available") is True for role in required)
+    state = derive_working_state(package_root, session_dir) if session_dir is not None else {}
+    try:
+        region_digest = (
+            effective_privacy_region_digest(package_root, session_dir, case_id=case_id)
+            if session_dir is not None
+            else baseline_effective_privacy_region_digest(package_root, case_id=case_id)
+        )
+    except (FileNotFoundError, ValueError):
+        region_digest = {}
+    source_sha256 = manifest.source_video_hash
+    if not source_sha256:
+        source_path = package_root / manifest.source_path
+        if source_path.exists() and source_path.is_file():
+            source_sha256 = media.sha256_file(source_path)
+    media_sha256 = {
+        role: str(row.get("sha256") or "")
+        for role, row in sorted(roles.items())
+        if row.get("available") is True
+    }
+    latest_role = roles.get("latest_reviewed") or {}
+    final_role = roles.get("final_reviewed") or {}
+    manifest_payload = {
+        "available_media_roles": [
+            role for role in required if roles.get(role, {}).get("available") is True
+        ],
+        "case": case_id,
+        "created_at": media.utc_timestamp(),
+        "final_revision": str(final_role.get("revision_id") or "")
+        if final_role.get("available")
+        else None,
+        "latest_reviewed_revision": str(latest_role.get("revision_id") or "")
+        if latest_role.get("available")
+        else None,
+        "media_sha256": media_sha256,
+        "review_state_identity": {
+            "active_projection_hash": state.get("active_projection_hash"),
+            "decision_identity": REVIEW_DECISION_IDENTITY_V2,
+            "session_id": session_dir.name if session_dir is not None else None,
+            "state_hash": state.get("state_hash"),
+        },
+        "reviewed_region_set_sha256": region_digest.get("effective_regions_hash"),
+        "schema_version": "case_delivery_manifest.v1",
+        "source_sha256": source_sha256,
+        "status": "final" if final_role.get("available") else "non-final",
+        "validation_state": {
+            "final_current": final_role.get("available") is True,
+            "latest_reviewed_current": latest_role.get("available") is True,
+            "ready_for_delivery": ready,
+        },
+    }
+    return {
+        "case_id": case_id,
+        "manifest": manifest_payload,
+        "ok": True,
+        "ready_for_delivery": ready,
+        "required_roles": list(required),
+        "roles": roles,
+        "schema_version": "delivery_package_contract.v1",
+    }
+
+
+def delivery_package_zip(
+    package_root: Path,
+    session_dir: Path | None,
+    *,
+    case_id: str,
+) -> dict[str, Any]:
+    package_root = package_root.resolve()
+    contract = delivery_package_contract(package_root, session_dir, case_id=case_id)
+    output_root = session_dir / "packages" if session_dir is not None else package_root / "packages"
+    output_root.mkdir(parents=True, exist_ok=True)
+    status = str(dict(contract.get("manifest") or {}).get("status") or "non-final")
+    name_stem = f"{case_id}_{status}_review_package"
+    output_path = output_root / f"{name_stem}.zip"
+    case_folder = case_label_for_delivery(case_id)
+    media_names = {
+        "automatic": "Automatic.mp4",
+        "final_reviewed": "Final.mp4",
+        "latest_reviewed": "Latest_reviewed.mp4",
+        "original": "Original.mp4",
+    }
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            f"{case_folder}/manifest.json",
+            json.dumps(contract["manifest"], indent=2, sort_keys=True) + "\n",
+        )
+        archive.writestr(
+            f"{case_folder}/review_audit.json",
+            json.dumps(
+                {
+                    "case": case_id,
+                    "review_state_identity": contract["manifest"]["review_state_identity"],
+                    "schema_version": "case_delivery_review_audit.v1",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+        )
+        archive.writestr(
+            f"{case_folder}/validation.json",
+            json.dumps(contract["manifest"]["validation_state"], indent=2, sort_keys=True)
+            + "\n",
+        )
+        for role_name in ("original", "automatic", "latest_reviewed", "final_reviewed"):
+            row = dict(dict(contract.get("roles") or {}).get(role_name) or {})
+            if row.get("available") is not True:
+                continue
+            media_path = case_ids.contained_path(package_root, *Path(str(row["path"])).parts)
+            archive.write(media_path, arcname=f"{case_folder}/{media_names[role_name]}")
+    return {
+        "case_id": case_id,
+        "content_type": "application/zip",
+        "filename": output_path.name,
+        "ok": True,
+        "path": output_path,
+        "schema_version": "case_delivery_package_zip.v1",
+    }
+
+
+def case_label_for_delivery(case_id: str) -> str:
+    if case_id == "day":
+        return "Day"
+    if case_id == "night":
+        return "Night"
+    return "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in case_id) or "Case"
 
 
 def history_events(session_dir: Path) -> dict[str, Any]:

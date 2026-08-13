@@ -1077,6 +1077,15 @@
           },
           "type": "object"
         },
+        "decisions_by_case": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/definitions/TaskDecision"
+            },
+            "type": "object"
+          },
+          "type": "object"
+        },
         "events": {
           "items": {
             "$ref": "#/definitions/AuditEvent"
@@ -1093,6 +1102,21 @@
           "additionalProperties": true,
           "type": "object"
         },
+        "task_resolutions": {
+          "additionalProperties": {
+            "$ref": "#/definitions/TaskDecision"
+          },
+          "type": "object"
+        },
+        "task_resolutions_by_case": {
+          "additionalProperties": {
+            "additionalProperties": {
+              "$ref": "#/definitions/TaskDecision"
+            },
+            "type": "object"
+          },
+          "type": "object"
+        },
         "working_state": {
           "$ref": "#/definitions/WorkingState"
         }
@@ -1102,10 +1126,13 @@
         "chain",
         "corrections",
         "decisions",
+        "decisions_by_case",
         "events",
         "ok",
         "session",
         "summary",
+        "task_resolutions",
+        "task_resolutions_by_case",
         "working_state"
       ],
       "type": "object"
@@ -1426,6 +1453,18 @@
         "task_decisions": {
           "additionalProperties": true,
           "type": "object"
+        },
+        "task_decisions_by_case": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "task_resolutions": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "task_resolutions_by_case": {
+          "additionalProperties": true,
+          "type": "object"
         }
       },
       "required": [
@@ -1436,7 +1475,10 @@
         "object_policy_overrides",
         "schema_version",
         "state_hash",
-        "task_decisions"
+        "task_decisions",
+        "task_decisions_by_case",
+        "task_resolutions",
+        "task_resolutions_by_case"
       ],
       "type": "object"
     },
@@ -1503,6 +1545,12 @@
   "paths": {
     "GET /api/v1/cases/{case_id}": {
       "response": "#/definitions/Case"
+    },
+    "GET /api/v1/cases/{case_id}/delivery-package?session_id=...": {
+      "response": "delivery_package_contract.v1"
+    },
+    "GET /api/v1/cases/{case_id}/download?role=...&session_id=...": {
+      "response": "video/mp4"
     },
     "GET /api/v1/cases/{case_id}/versions?session_id=...": {
       "response": "#/definitions/MediaVersion"

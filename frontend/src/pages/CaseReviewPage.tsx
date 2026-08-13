@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  acknowledgeFullVideoSweep,
   createCheckpoint,
   deleteCheckpoint,
   loadMaterializationJob,
@@ -29,9 +30,14 @@ import { usePersistentState } from '../hooks/usePersistentState';
 import { useVideoController } from '../hooks/useVideoController';
 import {
   ACTIONS,
+  bucketCounts,
   policyVerificationTask,
   tasksForCase,
+  normalizeDecisionsByCase,
+  normalizeTaskResolutionsByCase,
+  withTaskDecision,
   withPolicyTaskId,
+  withoutTaskResolution,
 } from '../state/reviewState';
 import type {
   Attribution,
@@ -49,12 +55,14 @@ import type {
 import type {
   CaseId,
   CorrectionDraft,
+  DecisionsByCase,
   EffectiveEntity,
   EntityFilter,
   EntityPolicy,
   ManualRedactionCategory,
   QueueBucket,
   ReviewMode,
+  TaskResolutionsByCase,
   TaskWithDecision,
 } from '../types/domain';
 import { MANUAL_REDACTION_CATEGORIES } from '../types/domain';
@@ -64,19 +72,21 @@ interface Props {
   attribution: Attribution;
   caseId: CaseId;
   corrections: Record<string, unknown>[];
-  decisions: Record<string, TaskDecision>;
+  decisions: DecisionsByCase;
   entityOverrides: Record<string, EffectiveEntity>;
   events: AuditEvent[];
   manualTasks: Task[];
   session: Session | null;
+  taskResolutions: TaskResolutionsByCase;
   workingState?: WorkingState;
   workspace: WorkspaceSummary;
   onCorrectionsChange: (corrections: Record<string, unknown>[]) => void;
-  onDecisionsChange: (decisions: Record<string, TaskDecision>) => void;
+  onDecisionsChange: (decisions: DecisionsByCase) => void;
   onEntityOverridesChange: (overrides: Record<string, EffectiveEntity>) => void;
   onError: (message?: string) => void;
   onEventsChange: (events: AuditEvent[]) => void;
   onManualTasksChange: (tasks: Task[]) => void;
+  onTaskResolutionsChange: (resolutions: TaskResolutionsByCase) => void;
   onWorkingStateChange: (state?: WorkingState) => void;
 }
 
@@ -100,8 +110,10 @@ export function CaseReviewPage({
   onError,
   onEventsChange,
   onManualTasksChange,
+  onTaskResolutionsChange,
   onWorkingStateChange,
   session,
+  taskResolutions,
   workingState,
   workspace,
 }: Props) {
@@ -143,7 +155,11 @@ export function CaseReviewPage({
     () => [...baseTasks, ...manualTasks].filter((task) => task.case_id === caseId),
     [baseTasks, caseId, manualTasks],
   );
-  const tasks = useMemo(() => tasksForCase(allTasks, decisions, caseId), [allTasks, caseId, decisions]);
+  const tasks = useMemo(
+    () => tasksForCase(allTasks, decisions, caseId, taskResolutions),
+    [allTasks, caseId, decisions, taskResolutions],
+  );
+  const counts = useMemo(() => bucketCounts(tasks), [tasks]);
   const selectedTask = tasks.find((task) => task.review_task_id === selectedTaskId) || tasks[0] || null;
   const materializedLatestRole = workingState?.materialized_latest_reviewed?.[caseId] as MediaVersion | undefined;
 
@@ -171,7 +187,17 @@ export function CaseReviewPage({
   const materializationStatusText = activeMaterializationJobs[0]
     ? formatMaterializationStatus(activeMaterializationJobs[0].job)
     : undefined;
-  const openComplete = tasks.length > 0 && tasks.every((task) => task.bucket !== 'Open');
+  const reviewComplete = tasks.length > 0 && counts.Open === 0 && counts['Needs correction'] === 0;
+  const latestReviewedStatus = latestReviewedStatusText({
+    activeJobs: activeMaterializationJobs,
+    latestRole: materializedLatestRole,
+    materializationError,
+    reviewComplete,
+    workingState,
+  });
+  const latestReviewedCurrent = latestReviewedStatus === 'Latest reviewed current';
+  const sweepAcknowledged = Boolean((workingState?.sweep_acknowledgements as Record<string, unknown> | undefined)?.[caseId]);
+  const finalNextStep = sweepAcknowledged && latestReviewedCurrent ? 'Ready to finalize' : latestReviewedCurrent ? 'Ready for final full-video review' : 'Final full-video review waits for current Latest reviewed';
 
   useEffect(() => {
     eventsRef.current = events;
@@ -401,7 +427,18 @@ export function CaseReviewPage({
     if (!state) return;
     workingStateRef.current = state;
     onWorkingStateChange(state);
-    onDecisionsChange((state.task_decisions || {}) as Record<string, TaskDecision>);
+    onDecisionsChange(
+      normalizeDecisionsByCase(
+        state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+        state.task_decisions as Record<string, TaskDecision> | undefined,
+      ),
+    );
+    onTaskResolutionsChange(
+      normalizeTaskResolutionsByCase(
+        state.task_resolutions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+        state.task_resolutions as Record<string, TaskDecision> | undefined,
+      ),
+    );
     onManualTasksChange((Array.isArray(state.active_manual_tasks) ? state.active_manual_tasks : []) as Task[]);
     onEntityOverridesChange((state.object_policy_overrides || {}) as Record<string, EffectiveEntity>);
     onCorrectionsChange((Array.isArray(state.manual_corrections) ? state.manual_corrections : []) as Record<string, unknown>[]);
@@ -422,16 +459,27 @@ export function CaseReviewPage({
         case_id: caseId,
         task_id: task.review_task_id,
         action,
-        note: action === ACTIONS.looksCorrect ? 'Correct' : action === ACTIONS.unsure ? 'Unsure' : 'Needs correction',
+        note:
+          action === ACTIONS.looksCorrect
+            ? 'Correct'
+            : action === ACTIONS.notSensitive
+              ? 'Not sensitive'
+              : 'Needs correction',
       });
-      const nextDecisions = { ...decisions, [task.review_task_id]: decision };
+      const nextDecisions = withTaskDecision(decisions, caseId, task.review_task_id, decision);
       onDecisionsChange(nextDecisions);
+      onTaskResolutionsChange(withoutTaskResolution(taskResolutions, caseId, task.review_task_id));
       appendEvents([event]);
-      const nextOpenTask = tasksForCase(allTasks, nextDecisions, caseId)
+      if (action === ACTIONS.needsCorrection) {
+        openCorrectionEditor(task);
+        return;
+      }
+      const nextResolutions = withoutTaskResolution(taskResolutions, caseId, task.review_task_id);
+      const nextOpenTask = tasksForCase(allTasks, nextDecisions, caseId, nextResolutions)
         .filter((candidate) => candidate.bucket === 'Open')
         .sort((left, right) => left.source_frame_start - right.source_frame_start)
         .find((candidate) => candidate.source_frame_start >= task.source_frame_start)
-        || tasksForCase(allTasks, nextDecisions, caseId)
+        || tasksForCase(allTasks, nextDecisions, caseId, nextResolutions)
           .filter((candidate) => candidate.bucket === 'Open')
           .sort((left, right) => left.source_frame_start - right.source_frame_start)[0];
       if (nextOpenTask) {
@@ -439,13 +487,51 @@ export function CaseReviewPage({
         setSelectedTaskId(nextOpenTask.review_task_id);
         controller.seekToSourceFrame(nextOpenTask.source_frame_start);
       } else {
-        setBucket('Open');
+        setBucket(action === ACTIONS.notSensitive ? 'Not sensitive' : 'Correct');
         setSelectedTaskId(task.review_task_id);
       }
     } catch (err) {
       onError(`Decision was not saved: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setPendingTaskId(undefined);
+    }
+  };
+
+  const openCorrectionEditor = (task: TaskWithDecision) => {
+    setBucket('Needs correction');
+    setSelectedTaskId(task.review_task_id);
+    setSelectedRole('latest_reviewed');
+    setMode('edit');
+    setDraft(initialDraft(caseId, manifest, caseFrame, task));
+    controller.seekToSourceFrame(task.source_frame_start);
+  };
+
+  const acknowledgeSweep = async () => {
+    if (!session) {
+      onError('Start review before approving the full-video review.');
+      return;
+    }
+    if (!latestReviewedCurrent) {
+      onError('Latest reviewed must be current before approving the full-video review.');
+      return;
+    }
+    onError(undefined);
+    try {
+      const result = await acknowledgeFullVideoSweep({
+        session_id: session.session_id,
+        actor: attribution || { display_name: null },
+        case_id: caseId,
+        viewed_ranges: [
+          {
+            source_frame_end: manifest.source_frame_end,
+            source_frame_start: manifest.source_frame_start,
+          },
+        ],
+      });
+      appendEvents([result.event]);
+      if (result.working_state) applyWorkingStateProjection(result.working_state);
+    } catch (err) {
+      onError(`Full-video review was not approved: ${err instanceof Error ? err.message : String(err)}`);
     }
   };
 
@@ -853,12 +939,36 @@ export function CaseReviewPage({
           </button>
         </div>
       ) : null}
+      <section className={`next-step-panel ${reviewComplete ? 'complete' : 'progress'}`} aria-label={`${manifest.display_name} review progress`}>
+        <div>
+          <strong>{reviewComplete ? 'REVIEW COMPLETE' : 'REVIEW IN PROGRESS'}</strong>
+          <p className="muted">
+            Open {counts.Open} · Needs correction {counts['Needs correction']} · Correct {counts.Correct} · Not sensitive {counts['Not sensitive']}
+          </p>
+        </div>
+        <div>
+          <strong>{latestReviewedStatus}</strong>
+          <p className="muted">{finalNextStep}</p>
+        </div>
+        <div className="button-row">
+          <button
+            type="button"
+            className="primary"
+            disabled={!latestReviewedCurrent || sweepAcknowledged}
+            onClick={() => void acknowledgeSweep()}
+          >
+            Approve full-video review
+          </button>
+          {sweepAcknowledged ? <span className="badge done">Full-video review approved</span> : null}
+        </div>
+      </section>
       <div className="workspace-layout">
         <div className="review-main">
           <ReviewVideoPlayer
             controller={controller}
             manifest={manifest}
             selectedTaskId={selectedTaskId}
+            sessionId={session?.session_id}
             roles={roles}
             selectedRole={selectedVersion?.role || selectedRole}
             tasks={tasks}
@@ -891,9 +1001,10 @@ export function CaseReviewPage({
             pendingTaskId={pendingTaskId}
             selectedTaskId={selectedTaskId}
             tasks={tasks}
-            openComplete={openComplete}
+            reviewComplete={reviewComplete}
             onBucketChange={setBucket}
             onDecision={persistDecision}
+            onFixNow={openCorrectionEditor}
             onSelectTask={selectTask}
           />
         ) : (
@@ -1025,11 +1136,10 @@ function defaultRole(roles: MediaVersion[]): string {
 function publicVideoRoles(roles: MediaVersion[], latestRole?: MediaVersion): MediaVersion[] {
   const byRole = new Map(roles.map((role) => [role.role, role]));
   const automatic = byRole.get('automatic') || byRole.get('current_result');
-  const latest = latestRole || byRole.get('latest_reviewed') || automatic;
   return [
     byRole.get('original'),
     automatic ? { ...automatic, label: 'Automatic', role: 'automatic' as const } : undefined,
-    latest ? { ...latest, label: 'Latest reviewed', role: 'latest_reviewed' as const } : undefined,
+    latestRole ? { ...latestRole, label: 'Latest reviewed', role: 'latest_reviewed' as const } : undefined,
   ].filter((role): role is MediaVersion => Boolean(role));
 }
 
@@ -1041,6 +1151,37 @@ function materializationJobMatchesCurrentProjection(
   const currentRevision = currentState?.active_projection_hash;
   if (!jobRevision || !currentRevision) return true;
   return jobRevision === currentRevision;
+}
+
+function latestReviewedStatusText({
+  activeJobs,
+  latestRole,
+  materializationError,
+  reviewComplete,
+  workingState,
+}: {
+  activeJobs: TrackedMaterializationJob[];
+  latestRole?: MediaVersion;
+  materializationError?: string;
+  reviewComplete: boolean;
+  workingState?: WorkingState;
+}): 'Review incomplete' | 'Ready to build Latest reviewed' | 'Building Latest reviewed' | 'Latest reviewed current' | 'Latest reviewed stale — review changed' | 'Latest reviewed validation failed' {
+  if (materializationError) return 'Latest reviewed validation failed';
+  if (activeJobs.length) return 'Building Latest reviewed';
+  if (!reviewComplete) return 'Review incomplete';
+  if (!latestRole) return 'Ready to build Latest reviewed';
+  if (latestRole.media_validation_passed === false) return 'Latest reviewed validation failed';
+  const activeRevision = String(workingState?.active_projection_hash || '');
+  const publishedRevision = String(
+    latestRole.published_working_state_revision ||
+      latestRole.accepted_working_state_revision ||
+      latestRole.latest_reviewed_revision_id ||
+      '',
+  );
+  if (activeRevision && publishedRevision && activeRevision !== publishedRevision) {
+    return 'Latest reviewed stale — review changed';
+  }
+  return 'Latest reviewed current';
 }
 
 function formatMaterializationStatus(job: MaterializationJob): string {
@@ -1128,16 +1269,20 @@ function tupleBox(values: number[]): [number, number, number, number] {
 }
 
 function initialDraft(caseId: CaseId, manifest: WorkspaceSummary['cases'][string], caseFrame: number, task?: Task | null): CorrectionDraft {
-  const sourceFrame = caseToSourceFrame(manifest, caseFrame);
+  const sourceFrame =
+    typeof task?.source_frame_start === 'number'
+      ? task.source_frame_start
+      : caseToSourceFrame(manifest, caseFrame);
+  const endFrame = typeof task?.source_frame_end === 'number' ? task.source_frame_end : sourceFrame;
   return withDraftHash({
     caseId,
     case_id: caseId,
     category: manualRedactionCategory(task?.category),
     start: sourceFrame,
-    end: sourceFrame,
+    end: endFrame,
     start_source_frame: sourceFrame,
-    end_source_frame: sourceFrame,
-    mode: 'single_frame',
+    end_source_frame: endFrame,
+    mode: endFrame === sourceFrame ? 'single_frame' : 'fixed_box',
     keyframes: [],
     barriers: [],
     checkpoints: [],

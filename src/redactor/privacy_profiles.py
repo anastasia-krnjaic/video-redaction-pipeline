@@ -170,8 +170,8 @@ def plate_profile() -> CategoryProfile:
         },
         rendering=render_payload,
         review={
-            "accepted_track_actions": ["Looks correct", "Needs correction", "Not a license plate"],
-            "unresolved_gap_actions": ["Needs correction", "Not a license plate"],
+            "accepted_track_actions": ["Correct", "Needs correction", "Not sensitive"],
+            "unresolved_gap_actions": ["Correct", "Needs correction", "Not sensitive"],
         },
     )
 

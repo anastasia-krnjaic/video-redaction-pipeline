@@ -74,6 +74,18 @@ def post_json_error(url: str, payload: dict[str, object]) -> tuple[int, dict[str
     return error.code, json.loads(error.read().decode("utf-8"))
 
 
+def get_json(url: str) -> dict[str, object]:
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def get_json_error(url: str) -> tuple[int, dict[str, object]]:
+    with pytest.raises(urllib.error.HTTPError) as exc_info:
+        urllib.request.urlopen(url, timeout=5)
+    error = exc_info.value
+    return error.code, json.loads(error.read().decode("utf-8"))
+
+
 def synthetic_case_manifest_for(
     package_root: Path,
     case_id: str,
@@ -285,10 +297,16 @@ def write_test_category_run_manifest(
         "stage_outcomes": [{"stage": "test", "status": "succeeded"}],
     }
     run_manifest["category_run_content_sha256"] = stable_hash(run_manifest)
-    path = package_root / "category_runs" / category / "category_run_manifest.json"
+    path = (
+        package_root
+        / "category_runs"
+        / manifest.case_id
+        / category
+        / "category_run_manifest.json"
+    )
     write_json(path, run_manifest)
     return {
-        "artifact_id": f"{category}:category_run_manifest",
+        "artifact_id": f"{manifest.case_id}:{category}:category_run_manifest",
         "artifact_reference_schema_version": "artifact_reference.v1",
         "case_id": manifest.case_id,
         "category": category,
@@ -309,6 +327,116 @@ def media_sha(path: Path) -> str:
     from redactor import media
 
     return media.sha256_file(path)
+
+
+def write_supported_multi_case_workspace_manifest(
+    package_root: Path,
+    manifests: tuple[case_manifests.CaseManifest, ...],
+    *,
+    categories: tuple[str, ...],
+) -> None:
+    cases = {manifest.case_id: f"cases/{manifest.case_id}.json" for manifest in manifests}
+    automatic_preview_by_case: dict[str, dict[str, object]] = {}
+    category_identities_by_case: dict[str, dict[str, object]] = {}
+    category_identity_hash_by_case: dict[str, str] = {}
+    category_configuration_by_case: dict[str, dict[str, object]] = {}
+    content_identities_by_case: dict[str, dict[str, object]] = {}
+    source_identity_by_case: dict[str, dict[str, object]] = {}
+    source_metadata_by_case: dict[str, dict[str, object]] = {}
+    for manifest in manifests:
+        automatic_role = next(role for role in manifest.video_roles if role.role == "automatic")
+        baseline_path = package_root / "regions" / f"{manifest.case_id}_current_regions.jsonl"
+        region_count = sum(
+            1 for line in baseline_path.read_text(encoding="utf-8").splitlines() if line.strip()
+        )
+        category_identities = {
+            category: write_test_category_run_manifest(package_root, manifest, category)
+            for category in sorted(categories)
+        }
+        category_identities_by_case[manifest.case_id] = category_identities
+        category_identity_hash_by_case[manifest.case_id] = stable_hash(category_identities)
+        category_configuration_by_case[manifest.case_id] = {
+            category: {
+                "category": category,
+                "configuration_hash": identity["configuration_hash"],
+                "schema_version": "category_configuration_identity.v1",
+                "source_sha256": manifest.source_video_hash,
+            }
+            for category, identity in category_identities.items()
+        }
+        automatic_preview_by_case[manifest.case_id] = {
+            "automatic_preview_sha256": media_sha(package_root / automatic_role.path),
+            "region_count": region_count,
+            "source_sha256": manifest.source_video_hash,
+        }
+        content_identities_by_case[manifest.case_id] = {
+            "automatic_baseline_regions": {
+                "path": baseline_path.relative_to(package_root).as_posix(),
+                "role": "automatic_baseline_regions",
+                "schema_version": "artifact_reference.v1",
+                "sha256": media_sha(baseline_path),
+                "size_bytes": baseline_path.stat().st_size,
+            }
+        }
+        source_identity_by_case[manifest.case_id] = {"sha256": manifest.source_video_hash}
+        source_metadata_by_case[manifest.case_id] = {"sha256": manifest.source_video_hash}
+    configuration_freeze = {
+        "category_configuration_identities_by_case": category_configuration_by_case,
+        "category_run_manifest_identities_by_case": category_identities_by_case,
+        "schema_version": "mixed_review_configuration_freeze.v1",
+        "selected_categories": list(categories),
+    }
+    write_json(package_root / "configuration_freeze.json", configuration_freeze)
+    write_json(
+        package_root / "workspace_manifest.json",
+        {
+            "automatic_preview_by_case": automatic_preview_by_case,
+            "cases": cases,
+            "category_configuration_identities_by_case": category_configuration_by_case,
+            "category_run_manifest_identities_by_case": category_identities_by_case,
+            "category_run_manifest_identity_hash_by_case": category_identity_hash_by_case,
+            "configuration_freeze": "configuration_freeze.json",
+            "configuration_freeze_hash": stable_hash(configuration_freeze),
+            "content_identities_by_case": content_identities_by_case,
+            "latest_reviewed_publication": {
+                "publication_mode": "reviewed_region_compiler.v1",
+                "schema_version": "latest_reviewed_publication_capability.v1",
+                "status": "supported",
+            },
+            "schema_version": "final_review_workspace.v2.3.4",
+            "selected_categories": list(categories),
+            "source_identity_by_case": source_identity_by_case,
+            "source_metadata_by_case": source_metadata_by_case,
+            "workspace_kind": "unified_case_review_workspace",
+            "workspace_status": "ready",
+        },
+    )
+
+
+def write_multi_case_review_entity_shell(
+    package_root: Path,
+    case_ids_to_write: tuple[str, ...],
+) -> None:
+    shell = {
+        "cases": {case_id: [] for case_id in case_ids_to_write},
+        "schema_version": "review_entities.v2",
+        "unresolved_evidence_by_case": {
+            case_id: {
+                "fragment_count": 0,
+                "fragments": [],
+                "schema_version": "review_unresolved_evidence.v1",
+            }
+            for case_id in case_ids_to_write
+        },
+    }
+    write_json(package_root / "review_entities.json", shell)
+    write_json(package_root / "review_objects.json", shell)
+    write_json(package_root / "privacy_entities.json", shell)
+    for case_id in case_ids_to_write:
+        write_json(
+            package_root / "entities" / f"{case_id}_unresolved_evidence.json",
+            shell["unresolved_evidence_by_case"][case_id],
+        )
 
 
 def write_review_entity_shell(package_root: Path, case_id: str) -> None:
@@ -410,6 +538,73 @@ def create_session(package_root: Path, manifest: case_manifests.CaseManifest) ->
         workspace_identity_hashes=review_workspace.workspace_identity_hashes(package_root),
     )
     return review_sessions.session_directory(package_root, session.session_id)
+
+
+def create_multi_case_session(
+    package_root: Path,
+    manifests: tuple[case_manifests.CaseManifest, ...],
+) -> Path:
+    freeze = json.loads((package_root / "configuration_freeze.json").read_text(encoding="utf-8"))
+    session = review_sessions.create_review_session(
+        package_root=package_root,
+        reviewer=review_sessions.ReviewerIdentity("Analyst", "analyst@example.test"),
+        source_revision="test",
+        configuration_freeze_hash=stable_hash(freeze),
+        case_manifest_hashes={
+            manifest.case_id: manifest.manifest_hash() for manifest in manifests
+        },
+        source_hashes={
+            manifest.case_id: manifest.source_video_hash or "" for manifest in manifests
+        },
+        workspace_identity_hashes=review_workspace.workspace_identity_hashes(package_root),
+    )
+    return review_sessions.session_directory(package_root, session.session_id)
+
+
+def write_duplicate_task_case_package(
+    tmp_path: Path,
+) -> tuple[Path, case_manifests.CaseManifest, case_manifests.CaseManifest, Path]:
+    package = tmp_path / "package"
+    day = add_automatic_role(package, synthetic_case_manifest_for(package, "day"))
+    night = add_automatic_role(package, synthetic_case_manifest_for(package, "night"))
+    write_canonical_base_regions(package, "day", (CATEGORY_PLATE,))
+    write_canonical_base_regions(package, "night", (CATEGORY_PLATE,))
+    write_multi_case_review_entity_shell(package, ("day", "night"))
+    write_supported_multi_case_workspace_manifest(
+        package,
+        (day, night),
+        categories=(CATEGORY_PLATE,),
+    )
+    shared_task = {
+        "allowed_actions": list(review_sessions.CANONICAL_REVIEW_ACTIONS),
+        "blocking": True,
+        "category": CATEGORY_PLATE,
+        "correction_required": False,
+        "review_task_id": "shared_task_001",
+        "source_frame_end": 0,
+        "source_frame_start": 0,
+        "target_binding": {
+            "kind": "entity",
+            "technical_track_ids": ["plate_track_1"],
+        },
+        "technical_only": False,
+        "technical_track_ids": ["plate_track_1"],
+    }
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                dict(shared_task) | {"case_id": "day"},
+                dict(shared_task) | {"case_id": "night"},
+                dict(shared_task) | {
+                    "case_id": "night",
+                    "review_task_id": "night_only_task",
+                },
+            ]
+        },
+    )
+    session_dir = create_multi_case_session(package, (day, night))
+    return package, day, night, session_dir
 
 
 def test_case_manifest_and_workspace_media_url_validation(tmp_path: Path) -> None:
@@ -2071,7 +2266,7 @@ def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> N
                     "allowed_actions": [
                         review_sessions.ACTION_LOOKS_CORRECT,
                         review_sessions.ACTION_PRIVACY_LEAK,
-                        review_sessions.ACTION_ESCALATE,
+                        review_sessions.ACTION_NOT_SENSITIVE,
                     ],
                     "blocking": False,
                     "case_id": manifest.case_id,
@@ -2108,6 +2303,26 @@ def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> N
         server.server_close()
 
 
+def test_legacy_only_task_actions_remain_unresolved_for_compatibility() -> None:
+    task = {
+        "allowed_actions": [review_sessions.ACTION_ESCALATE],
+        "review_task_id": "legacy_task",
+    }
+
+    assert review_sessions.allowed_actions_for_task(task) == ()
+    assert (
+        review_sessions.invalid_task_action_reason(
+            task,
+            review_sessions.ACTION_LOOKS_CORRECT,
+        )
+        == "legacy_task: review task has no allowed decision actions"
+    )
+    assert review_sessions.invalid_task_decision_reason(
+        task,
+        {"action": review_sessions.ACTION_ESCALATE},
+    ) == "unsupported decision action: uncertain_escalate"
+
+
 def test_review_decision_api_enforces_authoritative_task_allowed_actions(
     tmp_path: Path,
 ) -> None:
@@ -2122,7 +2337,7 @@ def test_review_decision_api_enforces_authoritative_task_allowed_actions(
                 {
                     "allowed_actions": [
                         review_sessions.ACTION_PRIVACY_LEAK,
-                        review_sessions.ACTION_ESCALATE,
+                        review_sessions.ACTION_NOT_SENSITIVE,
                     ],
                     "blocking": True,
                     "case_id": manifest.case_id,
@@ -2141,7 +2356,7 @@ def test_review_decision_api_enforces_authoritative_task_allowed_actions(
                     "allowed_actions": [
                         review_sessions.ACTION_LOOKS_CORRECT,
                         review_sessions.ACTION_PRIVACY_LEAK,
-                        review_sessions.ACTION_ESCALATE,
+                        review_sessions.ACTION_NOT_SENSITIVE,
                     ],
                     "blocking": False,
                     "case_id": manifest.case_id,
@@ -2172,10 +2387,10 @@ def test_review_decision_api_enforces_authoritative_task_allowed_actions(
         status, body = post_json_error(
             f"{base_url}/api/v1/decisions",
             {
-                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "action": review_sessions.ACTION_ESCALATE,
                 "actor": {"reviewer_id": "analyst@example.test"},
                 "case_id": manifest.case_id,
-                "note": "incorrect green action",
+                "note": "legacy escalation action",
                 "session_id": session_id,
                 "task_id": "source_span_task",
             },
@@ -2194,13 +2409,13 @@ def test_review_decision_api_enforces_authoritative_task_allowed_actions(
                 "task_id": "source_span_task",
             },
         )
-        legal_escalate = post_json(
+        legal_not_sensitive = post_json(
             f"{base_url}/api/v1/decisions",
             {
-                "action": review_sessions.ACTION_ESCALATE,
+                "action": review_sessions.ACTION_NOT_SENSITIVE,
                 "actor": {"reviewer_id": "analyst@example.test"},
                 "case_id": manifest.case_id,
-                "note": "escalate",
+                "note": "not sensitive",
                 "session_id": session_id,
                 "task_id": "source_span_task",
             },
@@ -2218,10 +2433,10 @@ def test_review_decision_api_enforces_authoritative_task_allowed_actions(
         )
 
         assert status == 400
-        assert "not allowed" in str(body["error"])
+        assert "unsupported decision action" in str(body["error"])
         assert "source_span_task" not in restricted_current
         assert legal_privacy["ok"] is True
-        assert legal_escalate["ok"] is True
+        assert legal_not_sensitive["ok"] is True
         assert entity_green["ok"] is True
     finally:
         server.shutdown()
@@ -2239,7 +2454,7 @@ def test_region_compatible_job_publishes_after_non_media_decision(tmp_path: Path
                     "allowed_actions": [
                         review_sessions.ACTION_LOOKS_CORRECT,
                         review_sessions.ACTION_PRIVACY_LEAK,
-                        review_sessions.ACTION_ESCALATE,
+                        review_sessions.ACTION_NOT_SENSITIVE,
                     ],
                     "blocking": False,
                     "case_id": manifest.case_id,
@@ -3133,8 +3348,11 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     assert "reviewDelegated" in js
     assert "function refreshSidePanel" in js
     assert "function taskState" in js
+    assert "Correct" in js
     assert "Needs correction" in js
-    assert "Unsure / Escalated" in js
+    assert "Not sensitive" in js
+    assert "Completed" not in js
+    assert "Unsure / Escalated" not in js
     assert "Open Corrections" in js
     assert "openEntities(caseId)" in js
     assert "entitiesModal" in html
@@ -3148,7 +3366,7 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     assert "togglePlay(caseId)" in js
     assert ".decision-correct" in css
     assert ".decision-needs-correction" in css
-    assert ".decision-unsure" in css
+    assert ".decision-unsure" not in css
     assert "task.allowed_actions || []" in js
     assert "actionLabel(action)" in js
     assert "actionTone(action)" in js
@@ -3168,7 +3386,7 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     ]
     assert "task.allowed_actions || []" in decision_buttons
     assert "[ACTIONS.looks, ACTIONS.leak, ACTIONS.unsure]" not in decision_buttons
-    assert "Not sensitive" not in decision_buttons
+    assert "actionTone(action)" in decision_buttons
 
 
 def test_review_entity_registry_generates_thumbnails(tmp_path: Path) -> None:
@@ -3750,7 +3968,7 @@ def test_supported_canonical_unresolved_blocking_task_prevents_publication(
                     "allowed_actions": [
                         review_sessions.ACTION_LOOKS_CORRECT,
                         review_sessions.ACTION_PRIVACY_LEAK,
-                        review_sessions.ACTION_ESCALATE,
+                        review_sessions.ACTION_NOT_SENSITIVE,
                     ],
                     "blocking": True,
                     "case_id": manifest.case_id,
@@ -3802,6 +4020,314 @@ def test_supported_canonical_unresolved_blocking_task_prevents_publication(
     assert materialization["media_validation"]["passed"] is True
 
 
+def test_source_backed_face_entity_regions_match_normalized_track_variants(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_explicit_keep_face_policy(package, manifest, track_id=10)
+
+    regions = review_working_state.source_backed_entity_regions(
+        package_root=package,
+        manifest=manifest,
+        entity={
+            "case_id": manifest.case_id,
+            "category": CATEGORY_FACE,
+            "current_policy": privacy_entities.POLICY_REDACT,
+            "entity_id": "entity_face_10",
+            "member_detector_tracker_ids": ["face_track_10"],
+        },
+    )
+
+    assert [record.source_frame for record in regions] == [1, 2, 3]
+    assert {record.object_id for record in regions} == {"face_track_10"}
+    assert {record.source_record["track_id"] for record in regions} == {"10"}
+
+
+def test_not_sensitive_task_decision_suppresses_bound_reviewed_regions(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_FACE,))
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": list(review_sessions.CANONICAL_REVIEW_ACTIONS),
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_FACE,
+                    "correction_required": False,
+                    "review_task_id": "face_task_1",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "target_binding": {
+                        "kind": "entity",
+                        "technical_track_ids": ["face_track_1"],
+                    },
+                    "technical_only": False,
+                    "technical_track_ids": ["face_track_1"],
+                }
+            ]
+        },
+    )
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_FACE,),
+    )
+    session_dir = create_session(package, manifest)
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id="face_task_1",
+        action=review_sessions.ACTION_NOT_SENSITIVE,
+        note="not sensitive",
+    )
+
+    regions, provenance = reviewed_regions.compile_reviewed_regions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        require_blockers_resolved=True,
+    )
+
+    assert regions == []
+    assert provenance["task_not_sensitive_provenance"]["suppressed_region_count"] == 1
+    assert provenance["privacy_region_changes_by_cause"]["task_not_sensitive_removed"] == 1
+
+
+def test_duplicate_task_ids_are_case_scoped_for_api_persistence_and_blockers(
+    tmp_path: Path,
+) -> None:
+    package, _day, _night, session_dir = write_duplicate_task_case_package(tmp_path)
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        status, body = post_json_error(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": "day",
+                "note": "wrong case",
+                "session_id": session_dir.name,
+                "task_id": "night_only_task",
+            },
+        )
+        assert status == 404
+        assert body["ok"] is False
+
+        response = post_json(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": "day",
+                "note": "day correct",
+                "session_id": session_dir.name,
+                "task_id": "shared_task_001",
+            },
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert response["ok"] is True
+    decisions_by_case = review_sessions.load_current_decisions_by_case(session_dir)
+    assert decisions_by_case["day"]["shared_task_001"]["action"] == (
+        review_sessions.ACTION_LOOKS_CORRECT
+    )
+    assert decisions_by_case.get("night", {}) == {}
+
+    state = review_working_state.derive_working_state(package, session_dir)
+    assert state["task_decisions_by_case"]["day"]["shared_task_001"]["action"] == (
+        review_sessions.ACTION_LOOKS_CORRECT
+    )
+    assert state["task_decisions_by_case"].get("night", {}) == {}
+    assert not any(
+        "shared_task_001" in blocker
+        for blocker in reviewed_regions.publication_blockers(
+            package_root=package,
+            session_dir=session_dir,
+            case_id="day",
+            state=state,
+        )
+    )
+    night_blockers = reviewed_regions.publication_blockers(
+        package_root=package,
+        session_dir=session_dir,
+        case_id="night",
+        state=state,
+    )
+    assert any("shared_task_001: required task has no decision" in item for item in night_blockers)
+    assert any("night_only_task: required task has no decision" in item for item in night_blockers)
+
+
+def test_duplicate_task_id_not_sensitive_suppression_is_case_and_task_scoped(
+    tmp_path: Path,
+) -> None:
+    package, _day, _night, session_dir = write_duplicate_task_case_package(tmp_path)
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+        task_id="shared_task_001",
+        action=review_sessions.ACTION_NOT_SENSITIVE,
+        note="day not sensitive",
+    )
+
+    day_regions, day_provenance = reviewed_regions.compile_reviewed_regions(
+        package,
+        session_dir,
+        case_id="day",
+        require_blockers_resolved=True,
+    )
+    night_regions, night_provenance = reviewed_regions.compile_reviewed_regions(
+        package,
+        session_dir,
+        case_id="night",
+        require_blockers_resolved=False,
+    )
+
+    assert day_regions == []
+    assert day_provenance["task_not_sensitive_provenance"]["suppressed_region_count"] == 1
+    assert [record.category for record in night_regions] == [CATEGORY_PLATE]
+    assert night_provenance["task_not_sensitive_provenance"]["suppressed_region_count"] == 0
+    assert any(
+        "shared_task_001: required task has no decision" in item
+        for item in night_provenance["publication_blockers"]
+    )
+
+
+def test_duplicate_task_id_correction_resolution_is_case_scoped(
+    tmp_path: Path,
+) -> None:
+    package, day, _night, session_dir = write_duplicate_task_case_package(tmp_path)
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+        task_id="shared_task_001",
+        action=review_sessions.ACTION_PRIVACY_LEAK,
+        note="needs correction",
+    )
+    freeze_hash = stable_hash(json.loads((package / "configuration_freeze.json").read_text()))
+    correction = review_corrections.ReviewCorrection(
+        case_id="day",
+        task_id="shared_task_001",
+        category=CATEGORY_PLATE,
+        operation=review_corrections.OP_ADD,
+        source_frame_start=0,
+        source_frame_end=0,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (10, 10, 30, 20)),),
+        interpolation_method="none",
+        reviewer_identity={"reviewer_id": "analyst"},
+        reason="accepted correction",
+        source_video_hash=day.source_video_hash or "",
+        configuration_freeze_hash=freeze_hash,
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+    review_sessions.append_task_resolution_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+        task_id="shared_task_001",
+        resolved_by="accepted_correction",
+        note="correction accepted",
+        resolution_metadata={
+            "correction_id": correction.correction_id,
+            "correction_revision_id": correction.revision_id,
+        },
+    )
+
+    state = review_working_state.derive_working_state(package, session_dir)
+    assert state["task_decisions_by_case"]["day"]["shared_task_001"]["action"] == (
+        review_sessions.ACTION_PRIVACY_LEAK
+    )
+    assert state["task_resolutions_by_case"]["day"]["shared_task_001"]["resolved_by"] == (
+        "accepted_correction"
+    )
+    assert state["task_resolutions_by_case"].get("night", {}) == {}
+    assert review_sessions.refresh_session_summary(session_dir)["decision_count"] == 1
+    assert not any(
+        "shared_task_001" in blocker
+        for blocker in reviewed_regions.publication_blockers(
+            package_root=package,
+            session_dir=session_dir,
+            case_id="day",
+            state=state,
+        )
+    )
+    assert any(
+        "shared_task_001: required task has no decision" in blocker
+        for blocker in reviewed_regions.publication_blockers(
+            package_root=package,
+            session_dir=session_dir,
+            case_id="night",
+            state=state,
+        )
+    )
+
+
+def test_duplicate_task_id_checkpoint_and_reset_are_case_scoped(
+    tmp_path: Path,
+) -> None:
+    package, _day, _night, session_dir = write_duplicate_task_case_package(tmp_path)
+    for case_id, action in (
+        ("day", review_sessions.ACTION_LOOKS_CORRECT),
+        ("night", review_sessions.ACTION_NOT_SENSITIVE),
+    ):
+        review_sessions.append_decision_event(
+            session_dir,
+            actor={"reviewer_id": "analyst"},
+            case_id=case_id,
+            task_id="shared_task_001",
+            action=action,
+            note=f"{case_id} decision",
+        )
+    checkpoint, _checkpoint_event = review_working_state.create_checkpoint(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        name="Both cases",
+    )
+
+    _event, restarted = review_working_state.restart_review_workflow(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id="day",
+    )
+
+    assert "day" not in restarted["task_decisions_by_case"]
+    assert restarted["task_decisions_by_case"]["night"]["shared_task_001"]["action"] == (
+        review_sessions.ACTION_NOT_SENSITIVE
+    )
+
+    _checkpoint, _restore_event, restored = review_working_state.restore_checkpoint(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        checkpoint_uuid=checkpoint["checkpoint_uuid"],
+    )
+
+    assert restored["task_decisions_by_case"]["day"]["shared_task_001"]["action"] == (
+        review_sessions.ACTION_LOOKS_CORRECT
+    )
+    assert restored["task_decisions_by_case"]["night"]["shared_task_001"]["action"] == (
+        review_sessions.ACTION_NOT_SENSITIVE
+    )
+
+
 def test_invalid_stored_task_decision_cannot_satisfy_publication_or_finalization(
     tmp_path: Path,
 ) -> None:
@@ -3816,7 +4342,7 @@ def test_invalid_stored_task_decision_cannot_satisfy_publication_or_finalization
                 {
                     "allowed_actions": [
                         review_sessions.ACTION_PRIVACY_LEAK,
-                        review_sessions.ACTION_ESCALATE,
+                        review_sessions.ACTION_NOT_SENSITIVE,
                     ],
                     "blocking": True,
                     "case_id": manifest.case_id,
@@ -3840,13 +4366,22 @@ def test_invalid_stored_task_decision_cannot_satisfy_publication_or_finalization
         categories=(CATEGORY_FACE, CATEGORY_PLATE),
     )
     session_dir = create_session(package, manifest)
-    review_sessions.append_decision_event(
+    review_sessions.append_event(
         session_dir,
+        event_type="decision_recorded",
         actor={"reviewer_id": "analyst"},
         case_id=manifest.case_id,
         task_id="source_span_task",
-        action=review_sessions.ACTION_LOOKS_CORRECT,
+        before_state=None,
+        after_state={
+            "action": review_sessions.ACTION_ESCALATE,
+            "case_id": manifest.case_id,
+            "decision_status": "blocking",
+            "note": "forged historical legacy decision",
+            "task_id": "source_span_task",
+        },
         note="forged historical green decision",
+        application_hashes={},
     )
 
     with pytest.raises(
@@ -3887,7 +4422,6 @@ def test_supported_canonical_reviewed_region_hash_uses_semantic_decisions(
                         review_sessions.ACTION_LOOKS_CORRECT,
                         review_sessions.ACTION_PRIVACY_LEAK,
                         review_sessions.ACTION_NOT_SENSITIVE,
-                        review_sessions.ACTION_COSMETIC_ONLY,
                     ],
                     "blocking": False,
                     "case_id": manifest.case_id,
@@ -4726,6 +5260,68 @@ def test_supported_canonical_legacy_projection_pointer_survives_sweep_and_finali
     assert "final_reviewed" in {role["role"] for role in versions}
 
 
+def test_case_media_download_endpoint_enforces_role_and_delivery_readiness(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        download_url = (
+            f"{base_url}/api/v1/cases/{manifest.case_id}/download"
+            f"?role=automatic&session_id={session_dir.name}"
+        )
+        with urllib.request.urlopen(download_url, timeout=5) as response:
+            downloaded = response.read()
+            content_disposition = response.headers.get("Content-Disposition", "")
+            content_type = response.headers.get("Content-Type", "")
+        delivery = get_json(
+            f"{base_url}/api/v1/cases/{manifest.case_id}/delivery-package"
+            f"?session_id={session_dir.name}"
+        )
+        unsafe_status, unsafe_body = get_json_error(
+            f"{base_url}/api/v1/cases/{manifest.case_id}/download?role=../../etc/passwd"
+        )
+        final_status, final_body = get_json_error(
+            f"{base_url}/api/v1/cases/{manifest.case_id}/download"
+            f"?role=final&session_id={session_dir.name}"
+        )
+
+        automatic_path = package / "media" / manifest.case_id / "automatic_preview.mp4"
+        assert downloaded == automatic_path.read_bytes()
+        assert "attachment;" in content_disposition
+        assert "automatic" in content_disposition
+        assert content_type == "video/mp4"
+        assert delivery["ready_for_delivery"] is False
+        assert delivery["roles"]["automatic"]["available"] is True
+        assert delivery["roles"]["final_reviewed"]["available"] is False
+        assert delivery["manifest"]["case"] == manifest.case_id
+        assert delivery["manifest"]["available_media_roles"] == ["original", "automatic"]
+        assert delivery["manifest"]["media_sha256"]["automatic"]
+        assert delivery["manifest"]["review_state_identity"]["decision_identity"] == (
+            review_sessions.REVIEW_DECISION_IDENTITY_V2
+        )
+        assert delivery["manifest"]["status"] == "non-final"
+        assert delivery["manifest"]["validation_state"]["latest_reviewed_current"] is False
+        assert unsafe_status == 400
+        assert "unsupported downloadable" in str(unsafe_body["error"])
+        assert final_status == 404
+        assert "no current final_reviewed version" in str(final_body["error"])
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_supported_canonical_unknown_projection_schema_blocks_pointer(
     tmp_path: Path,
 ) -> None:
@@ -4816,7 +5412,7 @@ def test_supported_canonical_public_required_task_blocks_then_allows_publication
                     "allowed_actions": [
                         review_sessions.ACTION_LOOKS_CORRECT,
                         review_sessions.ACTION_PRIVACY_LEAK,
-                        review_sessions.ACTION_ESCALATE,
+                        review_sessions.ACTION_NOT_SENSITIVE,
                     ],
                     "blocking": True,
                     "case_id": manifest.case_id,
@@ -5108,7 +5704,7 @@ def test_supported_canonical_sweep_acknowledgement_is_revision_bound(
                 {
                     "allowed_actions": [
                         review_sessions.ACTION_LOOKS_CORRECT,
-                        review_sessions.ACTION_COSMETIC_ONLY,
+                        review_sessions.ACTION_NOT_SENSITIVE,
                     ],
                     "blocking": True,
                     "case_id": manifest.case_id,
@@ -5139,7 +5735,7 @@ def test_supported_canonical_sweep_acknowledgement_is_revision_bound(
         actor={"reviewer_id": "analyst@example.test"},
         case_id=manifest.case_id,
         task_id="task_plate_boundary",
-        action=review_sessions.ACTION_COSMETIC_ONLY,
+        action=review_sessions.ACTION_NOT_SENSITIVE,
         note="still resolved",
     )
     second_state = review_working_state.derive_working_state(package, session_dir)
@@ -5177,7 +5773,7 @@ def test_supported_canonical_review_change_invalidates_current_final(
                 {
                     "allowed_actions": [
                         review_sessions.ACTION_LOOKS_CORRECT,
-                        review_sessions.ACTION_COSMETIC_ONLY,
+                        review_sessions.ACTION_NOT_SENSITIVE,
                     ],
                     "blocking": True,
                     "case_id": manifest.case_id,
@@ -5219,7 +5815,7 @@ def test_supported_canonical_review_change_invalidates_current_final(
         actor={"reviewer_id": "analyst@example.test"},
         case_id=manifest.case_id,
         task_id="task_plate_boundary",
-        action=review_sessions.ACTION_COSMETIC_ONLY,
+        action=review_sessions.ACTION_NOT_SENSITIVE,
         note="changed after final",
     )
     stale_versions = review_working_state.case_versions(

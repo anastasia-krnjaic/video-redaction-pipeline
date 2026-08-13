@@ -243,7 +243,7 @@ def test_shared_review_task_record_keeps_category_and_actions() -> None:
         frame_end=20,
         issue_type=ISSUE_UNRESOLVED_GAP,
         blocking=True,
-        allowed_actions=("Needs correction", "Not a license plate"),
+        allowed_actions=("Correct", "Needs correction", "Not sensitive"),
         correction_required=True,
         reasons=("gap_exceeds_safe_interpolation_limit",),
     )
@@ -252,7 +252,7 @@ def test_shared_review_task_record_keeps_category_and_actions() -> None:
 
     assert payload["category"] == CATEGORY_PLATE
     assert payload["issue_type"] == ISSUE_UNRESOLVED_GAP
-    assert payload["allowed_actions"] == ["Needs correction", "Not a license plate"]
+    assert payload["allowed_actions"] == ["Correct", "Needs correction", "Not sensitive"]
 
 
 def test_shared_renderer_handles_face_and_plate_regions_together(tmp_path: Path) -> None:

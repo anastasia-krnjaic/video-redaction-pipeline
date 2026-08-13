@@ -67,17 +67,12 @@ DEFAULT_OIM_PLATE_MODEL_PATH = Path(
 )
 
 DECISION_LABELS = {
-    review_sessions.ACTION_COSMETIC_ONLY: "Cosmetic only",
-    review_sessions.ACTION_ESCALATE: "Uncertain / Escalate",
-    review_sessions.ACTION_FALSE_REDACTION: "False redaction",
-    review_sessions.ACTION_LOOKS_CORRECT: "Looks correct",
+    review_sessions.ACTION_LOOKS_CORRECT: "Correct",
     review_sessions.ACTION_NOT_SENSITIVE: "Not sensitive",
-    review_sessions.ACTION_PARTIAL_COVERAGE: "Partial coverage",
-    review_sessions.ACTION_PRIVACY_LEAK: "Privacy leak",
-    review_sessions.ACTION_WRONG_TARGET: "Wrong target",
+    review_sessions.ACTION_PRIVACY_LEAK: "Needs correction",
 }
 
-REQUIRED_ACTIONS = tuple(DECISION_LABELS)
+REQUIRED_ACTIONS = review_sessions.CANONICAL_REVIEW_ACTIONS
 
 
 @dataclass(frozen=True)
@@ -151,8 +146,8 @@ def build_workspace_package(
         package_root / "reviewer_tasks.json",
         {
             "actions": [
-                {"action": action, "label": label}
-                for action, label in sorted(DECISION_LABELS.items())
+                {"action": action, "label": DECISION_LABELS[action]}
+                for action in REQUIRED_ACTIONS
             ],
             "raw_signal_count": len(raw_signals),
             "schema_version": "case_reviewer_tasks.v1",
@@ -5821,6 +5816,85 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 return True
             self.send_json({"job": job, "ok": True})
             return True
+        if path.startswith("/api/v1/cases/") and path.endswith("/download"):
+            case_id = path.removeprefix("/api/v1/cases/").removesuffix("/download").strip("/")
+            try:
+                workspace_case_manifest_path(self.server.package_root, case_id)
+            except (ValueError, FileNotFoundError):
+                self.send_json(
+                    {"error": "case not found", "ok": False},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return True
+            query = parse_qs(parsed.query)
+            session_id = str((query.get("session_id") or [""])[0])
+            session_dir = (
+                review_sessions.session_directory(self.server.package_root, session_id)
+                if session_id
+                else None
+            )
+            try:
+                download = review_working_state.downloadable_case_version(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=case_id,
+                    role=str((query.get("role") or [""])[0]),
+                )
+            except FileNotFoundError as exc:
+                self.send_json({"error": str(exc), "ok": False}, status=HTTPStatus.NOT_FOUND)
+                return True
+            except ValueError as exc:
+                self.send_json({"error": str(exc), "ok": False}, status=HTTPStatus.BAD_REQUEST)
+                return True
+            self.send_binary_file(
+                Path(download["path"]),
+                content_type=str(download["content_type"]),
+                filename=str(download["filename"]),
+            )
+            return True
+        if path.startswith("/api/v1/cases/") and (
+            path.endswith("/delivery-package") or path.endswith("/delivery-package.zip")
+        ):
+            zip_requested = path.endswith("/delivery-package.zip")
+            suffix = "/delivery-package.zip" if zip_requested else "/delivery-package"
+            case_id = path.removeprefix("/api/v1/cases/").removesuffix(suffix).strip("/")
+            try:
+                workspace_case_manifest_path(self.server.package_root, case_id)
+            except (ValueError, FileNotFoundError):
+                self.send_json(
+                    {"error": "case not found", "ok": False},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return True
+            query = parse_qs(parsed.query)
+            session_id = str((query.get("session_id") or [""])[0])
+            session_dir = (
+                review_sessions.session_directory(self.server.package_root, session_id)
+                if session_id
+                else None
+            )
+            if not zip_requested and str((query.get("format") or [""])[0]) == "zip":
+                zip_requested = True
+            if zip_requested:
+                delivery = review_working_state.delivery_package_zip(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=case_id,
+                )
+                self.send_binary_file(
+                    Path(delivery["path"]),
+                    content_type=str(delivery["content_type"]),
+                    filename=str(delivery["filename"]),
+                )
+                return True
+            self.send_json(
+                review_working_state.delivery_package_contract(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=case_id,
+                )
+            )
+            return True
         if path.startswith("/api/v1/cases/") and path.endswith("/versions"):
             case_id = path.removeprefix("/api/v1/cases/").removesuffix("/versions").strip("/")
             try:
@@ -5905,10 +5979,17 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     "chain": review_sessions.validate_event_hash_chain(session_dir),
                     "corrections": list(working_state.get("manual_corrections") or []),
                     "decisions": dict(working_state.get("task_decisions") or {}),
+                    "decisions_by_case": dict(
+                        working_state.get("task_decisions_by_case") or {}
+                    ),
                     "events": review_sessions.load_events(session_dir),
                     "ok": True,
                     "session": read_json_file(session_dir / "review_session.json"),
                     "summary": read_json_file(session_dir / "review_summary.json"),
+                    "task_resolutions": dict(working_state.get("task_resolutions") or {}),
+                    "task_resolutions_by_case": dict(
+                        working_state.get("task_resolutions_by_case") or {}
+                    ),
                     "working_state": working_state,
                 }
             )
@@ -5997,6 +6078,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             task = decision_task_for_session(
                 self.server.package_root,
                 session_dir,
+                case_id=decision_case_id,
                 task_id=str(payload["task_id"]),
             )
             if task is None:
@@ -6008,6 +6090,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             gate = review_working_state.correction_verification_decision_gate(
                 self.server.package_root,
                 session_dir,
+                case_id=decision_case_id,
                 task_id=str(payload["task_id"]),
             )
             if not gate.get("ok"):
@@ -6220,6 +6303,27 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 correction=correction,
                 before_state={"active_projection_hash": before_state.get("active_projection_hash")},
             )
+            resolved_task_event = None
+            resolved_task = decision_task_for_session(
+                self.server.package_root,
+                session_dir,
+                case_id=correction.case_id,
+                task_id=correction.task_id,
+            )
+            if resolved_task is not None:
+                resolved_task_event = review_sessions.append_task_resolution_event(
+                    session_dir,
+                    actor=actor,
+                    case_id=correction.case_id,
+                    task_id=correction.task_id,
+                    resolved_by="accepted_correction",
+                    note="Correction saved and accepted; originating review task resolved.",
+                    task_before_state=resolved_task,
+                    resolution_metadata={
+                        "correction_id": correction.correction_id,
+                        "correction_revision_id": correction.revision_id,
+                    },
+                )
             state_after_correction = review_working_state.derive_working_state(
                 self.server.package_root,
                 session_dir,
@@ -6283,7 +6387,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                         ),
                     ),
                     "event": event,
-                    "events": [event, verification_event],
+                        "events": [
+                            item
+                            for item in [event, resolved_task_event, verification_event]
+                            if item is not None
+                        ],
                     "materialization_job": materialization_plan["job"],
                     "materialization_plan": materialization_plan["plan"],
                     "materialization_required": materialization_plan["plan"][
@@ -7046,6 +7154,21 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(encoded)
 
+    def send_binary_file(self, path: Path, *, content_type: str, filename: str) -> None:
+        size = path.stat().st_size
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        with path.open("rb") as file:
+            try:
+                shutil.copyfileobj(file, self.wfile)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                return
+
     def serve_range_request(self) -> None:
         file_path = Path(self.translate_path(self.path))
         if not file_path.exists() or not file_path.is_file():
@@ -7385,11 +7508,7 @@ def policy_verification_task(case_id: str, entity: dict[str, Any], task_id: str)
     policy = str(entity.get("current_policy") or entity.get("privacy_action") or "")
     label = "Keep visible" if policy == privacy_entities.POLICY_KEEP_VISIBLE else "Not sensitive"
     return {
-        "allowed_actions": [
-            review_sessions.ACTION_LOOKS_CORRECT,
-            review_sessions.ACTION_PRIVACY_LEAK,
-            review_sessions.ACTION_ESCALATE,
-        ],
+        "allowed_actions": list(review_sessions.CANONICAL_REVIEW_ACTIONS),
         "blocking": True,
         "case_id": case_id,
         "category": str(entity.get("category") or ""),
@@ -7510,7 +7629,7 @@ def task_sort_rank(task: dict[str, Any]) -> int:
 
 def audit_schema() -> dict[str, Any]:
     return {
-        "actions": sorted(DECISION_LABELS),
+        "actions": list(REQUIRED_ACTIONS),
         "issue_types": [
             "visible_face_leak",
             "visible_plate_leak",
@@ -7860,17 +7979,26 @@ def decision_task_for_session(
     package_root: Path,
     session_dir: Path,
     *,
+    case_id: str,
     task_id: str,
 ) -> dict[str, Any] | None:
+    case_id = case_ids.validate_case_id(case_id)
     for task in load_reviewer_tasks_for_decisions(package_root):
-        if str(task.get("review_task_id") or "") == task_id:
+        if (
+            str(task.get("review_task_id") or "") == task_id
+            and str(task.get("case_id") or "") == case_id
+        ):
             return task
     try:
         state = review_working_state.derive_working_state(package_root, session_dir)
     except Exception:
         state = {}
     for task in list(state.get("active_manual_tasks") or []):
-        if isinstance(task, dict) and str(task.get("review_task_id") or "") == task_id:
+        if (
+            isinstance(task, dict)
+            and str(task.get("review_task_id") or "") == task_id
+            and str(task.get("case_id") or "") == case_id
+        ):
             return dict(task)
     return None
 
@@ -8089,10 +8217,11 @@ main { padding: 16px 20px 44px; }
 .marker.info { background: #2563eb; }
 .marker.false { background: #7c3aed; }
 .marker.resolved { background: #16a34a; }
+.marker.neutral { background: #64748b; }
 .marker.active { outline: 2px solid #fff; height: 12px; top: -2px; }
 .legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; color: #d8dee8; font-size: 12px; }
 .legend span::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 999px; margin-right: 4px; vertical-align: 1px; }
-.legend .red::before { background: #dc2626; } .legend .orange::before { background: #f97316; } .legend .blue::before { background: #2563eb; } .legend .purple::before { background: #7c3aed; } .legend .green::before { background: #16a34a; }
+.legend .red::before { background: #dc2626; } .legend .orange::before { background: #f97316; } .legend .blue::before { background: #2563eb; } .legend .purple::before { background: #7c3aed; } .legend .green::before { background: #16a34a; } .legend .gray::before { background: #64748b; }
 .task-summary { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px; }
 .stat { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 7px; padding: 8px; }
 .stat strong { display: block; font-size: 19px; }
@@ -8109,7 +8238,7 @@ main { padding: 16px 20px 44px; }
 .decision-choice { border-width: 1px; font-weight: 700; min-width: 112px; }
 .decision-correct { background: #ecfdf3; border-color: #86efac; color: #166534; }
 .decision-needs-correction { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
-.decision-unsure { background: #f3f4f6; border-color: #cbd5e1; color: #374151; }
+.decision-not-sensitive { background: #f8fafc; border-color: #cbd5e1; color: #334155; }
 .decision-choice.selected { outline: 2px solid currentColor; outline-offset: 1px; box-shadow: 0 0 0 3px rgba(15,23,42,.08); }
 .decision-choice:disabled { opacity: .75; }
 .saved-note { color: #047857; font-size: 13px; margin-top: 6px; }
@@ -8130,7 +8259,7 @@ main { padding: 16px 20px 44px; }
 .merge-card.selected { border-color: #0f766e; box-shadow: 0 0 0 2px rgba(15,118,110,.14); }
 .merge-card img { width: 86px; height: 62px; object-fit: cover; border-radius: 5px; background: #e5e7eb; }
 .badge { display: inline-block; border-radius: 999px; padding: 2px 7px; font-size: 12px; background: #e2e8f0; color: #334155; }
-.badge.open { background: #fef2f2; color: #991b1b; } .badge.done { background: #ecfdf5; color: #047857; } .badge.warn { background: #fff7ed; color: #9a3412; }
+.badge.open { background: #eff6ff; color: #1d4ed8; } .badge.done { background: #ecfdf5; color: #047857; } .badge.warn { background: #fff7ed; color: #9a3412; } .badge.needs-correction { background: #fef2f2; color: #991b1b; } .badge.neutral { background: #f1f5f9; color: #475569; }
 .editor-canvas-wrap { position: relative; background: #020617; border-radius: 6px; overflow: hidden; }
 .editor-canvas-wrap canvas { width: 100%; min-height: 180px; display: block; }
 .keyframe-list { display: grid; gap: 6px; margin-top: 8px; }
@@ -8153,15 +8282,13 @@ def workspace_js() -> str:
     return r"""
 const APP_VERSION = 'final_review_workspace.v2.3.4';
 const ACTIONS = {
-  looks: 'looks_correct', leak: 'privacy_leak', partial: 'partial_coverage',
-  falseRedaction: 'false_redaction', wrong: 'wrong_target', notSensitive: 'not_sensitive',
-  cosmetic: 'cosmetic_only', unsure: 'uncertain_escalate'
+  looks: 'looks_correct', leak: 'privacy_leak', notSensitive: 'not_sensitive'
 };
 const DATA = { workspace: null, tasks: null, entities: null, rawSignals: null, alignment: null, cases: {} };
 const state = {
   tab: localStorage.getItem(storageKey('active_tab')) || '',
   mode: {}, frame: {}, version: {}, filter: {}, selectedTask: {},
-  session: null, attribution: null, decisions: {}, events: [], corrections: [], correctionPreview: {},
+  session: null, attribution: null, decisions: {}, taskResolutions: {}, events: [], corrections: [], correctionPreview: {},
   workingState: null,
   draft: { caseId: null, start: null, end: null, keyframes: [], selectedEntityId: null, selectedTaskId: null },
   savedFlash: {}, entityOverrides: {}, manualTasks: [],
@@ -8172,6 +8299,10 @@ function storageKey(name) { return `final-review-v2.3.4:${location.pathname}:${n
 async function loadJson(path) { const res = await fetch(path, { cache: 'no-store' }); if (!res.ok) throw new Error(`${path}: ${res.status}`); return res.json(); }
 async function postJson(path, payload) { const res = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }); const data = await res.json().catch(() => ({})); if (!res.ok || data.ok === false) throw new Error(data.error || `${path}: ${res.status}`); return data; }
 function esc(value) { return String(value ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function normalizeByCase(byCase, flat) { const next = {}; for (const [caseId, rows] of Object.entries(byCase || {})) next[caseId] = {...(rows || {})}; for (const [taskId, row] of Object.entries(flat || {})) { const caseId = String(row?.case_id || ''); const scopedTaskId = String(row?.task_id || taskId || ''); if (!caseId || !scopedTaskId || next[caseId]?.[scopedTaskId]) continue; next[caseId] = {...(next[caseId] || {}), [scopedTaskId]: row}; } return next; }
+function decisionFor(caseId, taskId) { return state.decisions?.[caseId]?.[taskId] || null; }
+function taskResolutionFor(caseId, taskId) { return state.taskResolutions?.[caseId]?.[taskId] || null; }
+function taskEffectiveState(task) { const caseId = String(task.case_id || ''); const taskId = String(task.review_task_id || ''); return taskResolutionFor(caseId, taskId) || decisionFor(caseId, taskId); }
 function clamp(n, min, max) { return Math.min(max, Math.max(min, n)); }
 function isSafeCaseId(value) { return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(String(value || '')); }
 function latestReviewedPublicationDeferred() { return DATA.workspace?.latest_reviewed_publication?.status === 'deferred'; }
@@ -8242,7 +8373,7 @@ function playerHtml(caseId) {
   return `<div class="version-row"><label>Version <select data-action="version">${options}</select></label><span class="badge ${selected.key === 'latest_reviewed' ? 'warn' : ''}">${esc(selected.note || 'Frame-aligned')}</span></div>
     <section id="player-${caseId}" class="player-wrapper" data-case="${caseId}">
       <div class="video-stage"><video data-case="${caseId}" preload="metadata" playsinline disablePictureInPicture controlslist="nodownload noremoteplayback"></video><div class="frame-hud" data-role="hud">${esc(hudText(caseId))}</div><div class="media-error" data-role="media-error"><span></span><button data-action="retry-media">Retry</button></div></div>
-      <div class="player-controls"><div class="controls-top"><button data-action="toggle-play">Play</button><div class="timeline-wrap"><input class="timeline-range" type="range" min="0" max="${caseFrameCount(caseId) - 1}" value="${state.frame[caseId] || 0}" step="1" data-action="scrub"><div class="timeline-markers" data-role="markers"></div></div><span class="time-readout" data-role="time">${esc(timeText(frameTime(caseId)))} / ${esc(timeText(caseData(caseId).duration_seconds || frameTime(caseId, caseFrameCount(caseId)-1)))}</span><input class="volume" type="range" min="0" max="1" step="0.05" value="1" data-action="volume"><button data-action="fullscreen">Fullscreen</button></div><div class="legend"><span class="red">blocking</span><span class="orange">uncertain</span><span class="blue">spot check</span><span class="purple">false redaction</span><span class="green">resolved</span></div></div>
+      <div class="player-controls"><div class="controls-top"><button data-action="toggle-play">Play</button><div class="timeline-wrap"><input class="timeline-range" type="range" min="0" max="${caseFrameCount(caseId) - 1}" value="${state.frame[caseId] || 0}" step="1" data-action="scrub"><div class="timeline-markers" data-role="markers"></div></div><span class="time-readout" data-role="time">${esc(timeText(frameTime(caseId)))} / ${esc(timeText(caseData(caseId).duration_seconds || frameTime(caseId, caseFrameCount(caseId)-1)))}</span><input class="volume" type="range" min="0" max="1" step="0.05" value="1" data-action="volume"><button data-action="fullscreen">Fullscreen</button></div><div class="legend"><span class="blue">Open</span><span class="red">Needs correction</span><span class="green">Correct</span><span class="gray">Not sensitive</span></div></div>
     </section>`;
 }
 function availableVersions(caseId) {
@@ -8302,8 +8433,8 @@ function bindTimeline(caseId) {
   }).join('');
   markerBox.querySelectorAll('.marker').forEach(btn => btn.addEventListener('click', () => { activeVideo(caseId)?.pause(); selectTask(caseId, btn.dataset.taskId, { jump: true, preserveScroll: true }); }));
 }
-function markerClass(task) { const stateName = taskState(task); if (stateName === 'correct' || stateName === 'resolved') return 'resolved'; if (stateName === 'needs_correction') return 'blocking'; if (stateName === 'unsure') return 'partial'; if (String(task.issue_type || '').includes('false') || String(task.issue_type || '').includes('wrong')) return 'false'; if (task.blocking) return 'blocking'; if (task.severity === 'low' || task.optional) return 'info'; return 'partial'; }
-function markerTooltip(caseId, task) { const startCase = task.source_frame_start - caseData(caseId).source_frame_start; const endCase = task.source_frame_end - caseData(caseId).source_frame_start; const sourceRange = task.source_frame_end !== task.source_frame_start ? `${task.source_frame_start}-${task.source_frame_end}` : `${task.source_frame_start}`; const timeRange = endCase !== startCase ? `${timeText(frameTime(caseId,startCase))}-${timeText(frameTime(caseId,endCase))}` : timeText(frameTime(caseId,startCase)); const decision = state.decisions[task.review_task_id]?.action ? actionLabel(state.decisions[task.review_task_id].action) : 'Open'; return `${cleanTaskTitle(task)}\\n${task.category}\\nSource frame ${sourceRange}\\nCase time ${timeRange}\\n${task.blocking ? 'Blocking' : task.optional ? 'Optional' : 'Review'}\\nDecision: ${decision}`; }
+function markerClass(task) { const stateName = taskState(task); if (stateName === 'correct' || stateName === 'resolved') return 'resolved'; if (stateName === 'not_sensitive') return 'neutral'; if (stateName === 'needs_correction') return 'blocking'; if (String(task.issue_type || '').includes('false') || String(task.issue_type || '').includes('wrong')) return 'false'; if (task.blocking) return 'blocking'; if (task.severity === 'low' || task.optional) return 'info'; return 'partial'; }
+function markerTooltip(caseId, task) { const startCase = task.source_frame_start - caseData(caseId).source_frame_start; const endCase = task.source_frame_end - caseData(caseId).source_frame_start; const sourceRange = task.source_frame_end !== task.source_frame_start ? `${task.source_frame_start}-${task.source_frame_end}` : `${task.source_frame_start}`; const timeRange = endCase !== startCase ? `${timeText(frameTime(caseId,startCase))}-${timeText(frameTime(caseId,endCase))}` : timeText(frameTime(caseId,startCase)); const decision = taskEffectiveState(task)?.action ? actionLabel(taskEffectiveState(task).action) : 'Open'; return `${cleanTaskTitle(task)}\\n${task.category}\\nSource frame ${sourceRange}\\nCase time ${timeRange}\\n${task.blocking ? 'Blocking' : task.optional ? 'Optional' : 'Review'}\\nDecision: ${decision}`; }
 function updateFrameFromTime(caseId, time) { const next = clamp(Math.round(time * fpsValue(caseId)), 0, caseFrameCount(caseId) - 1); if (next !== state.frame[caseId]) { state.frame[caseId] = next; persistFrame(caseId); updatePlayerUi(caseId); } }
 function persistFrame(caseId) { localStorage.setItem(storageKey(`frame_${caseId}`), String(state.frame[caseId] || 0)); }
 async function switchVersion(caseId, key) { const video = activeVideo(caseId); const wasPlaying = video && !video.paused; const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId) - 1); if (video) video.pause(); state.frame[caseId] = frame; state.version[caseId] = key; localStorage.setItem(storageKey(`version_${caseId}`), key); persistFrame(caseId); const version = selectedVersion(caseId); if (video) setPlayerSource(video, version.path); const select = document.querySelector(`${caseSelector(caseId)} [data-action="version"]`); if (select) select.value = key; await syncPlayerToState(caseId); if (wasPlaying) await togglePlay(caseId, true); }
@@ -8320,33 +8451,35 @@ function toggleFullscreen(wrapper) { if (!document.fullscreenElement) wrapper.re
 
 function reviewPanelHtml(caseId) {
   const tasks = filteredTasks(caseId); const counts = taskCounts(caseId); const selected = selectedTask(caseId);
-  const filters = ['Open','Needs correction','Unsure / Escalated','Completed','Resolved','All'];
-  return `<div class="workflow-stepper">${workflowStepperHtml(caseId)}</div>${workflowMessageHtml(caseId)}<div class="task-summary"><div class="stat"><span>Open</span><strong>${counts.open}</strong></div><div class="stat"><span>Needs correction</span><strong>${counts.needs_correction}</strong></div><div class="stat"><span>Unsure / Escalated</span><strong>${counts.unsure}</strong></div><div class="stat"><span>Completed</span><strong>${counts.correct}</strong></div><div class="stat"><span>Resolved</span><strong>${counts.resolved}</strong></div><div class="stat"><span>Current</span><strong>${currentTaskNumber(caseId)}</strong></div></div><div class="filter-row">${filters.map(f => `<button class="${state.filter[caseId] === f ? 'active' : ''}" data-action="filter" data-filter="${f}">${f}</button>`).join('')}</div><div class="task-list">${tasks.map(t => taskCardHtml(caseId, t)).join('') || '<p class="muted">No review items in this filter.</p>'}</div>${selected && requiresEditor(selected) ? '<button class="primary open-editor" data-action="open-editor">Open in editor</button>' : ''}`;
+  const filters = ['Open','Needs correction','Correct','Not sensitive'];
+  return `<div class="workflow-stepper">${workflowStepperHtml(caseId)}</div>${workflowMessageHtml(caseId)}<div class="task-summary"><div class="stat"><span>Open</span><strong>${counts.open}</strong></div><div class="stat"><span>Needs correction</span><strong>${counts.needs_correction}</strong></div><div class="stat"><span>Correct</span><strong>${counts.correct}</strong></div><div class="stat"><span>Not sensitive</span><strong>${counts.not_sensitive}</strong></div></div><div class="filter-row">${filters.map(f => `<button class="${state.filter[caseId] === f ? 'active' : ''}" data-action="filter" data-filter="${f}">${f}</button>`).join('')}</div><div class="task-list">${tasks.map(t => taskCardHtml(caseId, t)).join('') || '<p class="muted">No review items in this filter.</p>'}</div>${selected && requiresEditor(selected) ? '<button class="primary open-editor" data-action="open-editor">Fix this now</button>' : ''}`;
 }
-function allTasks(caseId) { return [...(DATA.tasks?.tasks || []), ...state.manualTasks].filter(t => t.case_id === caseId && !t.technical_only); }
-function filteredTasks(caseId) { const f = state.filter[caseId] || 'Open'; return allTasks(caseId).filter(t => f === 'All' || filterMatchesTask(f, t)); }
-function filterMatchesTask(filter, task) { const stateName = taskState(task); if (filter === 'Open') return stateName === 'open'; if (filter === 'Needs correction') return stateName === 'needs_correction' || stateName === 'correction_pending_verification'; if (filter === 'Unsure / Escalated') return stateName === 'unsure'; if (filter === 'Completed') return stateName === 'correct'; if (filter === 'Resolved') return stateName === 'resolved'; return true; }
+function allTasks(caseId) { return [...(DATA.tasks?.tasks || []), ...state.manualTasks].filter(t => t.case_id === caseId && !t.technical_only && !durableVerificationTask(t)); }
+function durableVerificationTask(task) { return task.normal_task_class === 'correction_verification' || String(task.review_task_id || '').startsWith('correction_verify_') || String(task.review_task_id || '').startsWith('object_policy_verify_'); }
+function filteredTasks(caseId) { const f = state.filter[caseId] || 'Open'; return allTasks(caseId).filter(t => filterMatchesTask(f, t)); }
+function filterMatchesTask(filter, task) { const stateName = taskState(task); if (filter === 'Open') return stateName === 'open'; if (filter === 'Needs correction') return stateName === 'needs_correction' || stateName === 'correction_pending_verification'; if (filter === 'Correct') return stateName === 'correct'; if (filter === 'Not sensitive') return stateName === 'not_sensitive'; return false; }
 function firstOpenTask(caseId) { return allTasks(caseId).find(t => taskState(t) === 'open'); }
 function currentTaskNumber(caseId) { const tasks = allTasks(caseId); const index = tasks.findIndex(t => t.review_task_id === state.selectedTask[caseId]); return index >= 0 ? `${index + 1}/${tasks.length}` : `0/${tasks.length}`; }
-function taskState(task) { const action = String(state.decisions[task.review_task_id]?.action || ''); if (!action) return 'open'; if (action === ACTIONS.looks) return 'correct'; if (action === ACTIONS.unsure) return 'unsure'; if ([ACTIONS.leak, ACTIONS.partial, ACTIONS.falseRedaction, ACTIONS.wrong].includes(action)) return 'needs_correction'; if ([ACTIONS.notSensitive, ACTIONS.cosmetic].includes(action)) return 'resolved'; return 'open'; }
-function taskCounts(caseId) { const counts = {open:0, needs_correction:0, unsure:0, correct:0, resolved:0}; for (const task of allTasks(caseId)) { const value = taskState(task); counts[value] = (counts[value] || 0) + 1; } return counts; }
-function decisionGreen(taskId) { const task = [...(DATA.tasks?.tasks || []), ...state.manualTasks].find(t => t.review_task_id === taskId); if (!task) return false; return ['correct','resolved'].includes(taskState(task)); }
-function taskCardHtml(caseId, task) { const selected = task.review_task_id === state.selectedTask[caseId]; const decision = state.decisions[task.review_task_id]; const stateName = taskState(task); return `<article class="task-card ${selected ? 'selected' : ''}" data-task-id="${esc(task.review_task_id)}" data-task-state="${esc(stateName)}"><div class="task-title">${esc(cleanTaskTitle(task))}</div><div class="task-meta">${task.category} · source ${task.source_frame_start}${task.source_frame_end !== task.source_frame_start ? `-${task.source_frame_end}` : ''} · ${timeText((task.source_frame_start - caseData(caseId).source_frame_start)/fpsValue(caseId))}</div><p>${esc(task.what_to_inspect || 'Check this interval in the video.')}</p><span class="badge ${badgeClassForTask(task)}">${decision ? esc(actionLabel(decision.action)) : task.optional ? 'Optional open' : task.blocking ? 'Open required' : 'Open'}</span><div class="task-actions">${decisionButtons(task).map(a => `<button data-action="decision" data-task-id="${esc(task.review_task_id)}" data-decision="${a.action}" aria-pressed="${decision?.action === a.action ? 'true' : 'false'}" class="decision-choice decision-${a.tone}${decision?.action === a.action ? ' selected' : ''}">${esc(a.label)}</button>`).join('')}</div><div class="saved-note" data-saved-for="${esc(task.review_task_id)}">${state.savedFlash[task.review_task_id] ? 'Saved' : ''}</div></article>`; }
-function badgeClassForTask(task) { const stateName = taskState(task); if (stateName === 'correct' || stateName === 'resolved') return 'done'; if (stateName === 'needs_correction' || stateName === 'unsure' || task.blocking) return 'open'; return 'warn'; }
+function taskState(task) { const action = String(taskEffectiveState(task)?.action || ''); if (!action) return 'open'; if (action === ACTIONS.looks) return 'correct'; if (action === ACTIONS.notSensitive) return 'not_sensitive'; if (action === ACTIONS.leak) return 'needs_correction'; return 'open'; }
+function taskCounts(caseId) { const counts = {open:0, needs_correction:0, correct:0, not_sensitive:0}; for (const task of allTasks(caseId)) { const value = taskState(task); counts[value] = (counts[value] || 0) + 1; } return counts; }
+function decisionGreen(caseId, taskId) { const task = allTasks(caseId).find(t => t.review_task_id === taskId); if (!task) return false; return taskState(task) === 'correct'; }
+function taskCardHtml(caseId, task) { const selected = task.review_task_id === state.selectedTask[caseId]; const decision = decisionFor(caseId, task.review_task_id); const effective = taskEffectiveState(task); const stateName = taskState(task); const guidance = taskGuidance(task); return `<article class="task-card ${selected ? 'selected' : ''}" data-case-id="${esc(caseId)}" data-task-id="${esc(task.review_task_id)}" data-task-state="${esc(stateName)}"><div class="task-title">${esc(cleanTaskTitle(task))}</div><div class="task-guidance"><p><strong>Why this was flagged</strong><br>${esc(guidance.why)}</p><p><strong>What to check</strong><br>${esc(guidance.what)}</p><p><strong>Correct means</strong><br>${esc(guidance.correct)}</p><p><strong>Needs correction when</strong><br>${esc(guidance.needs)}</p><p><strong>Not sensitive when</strong><br>${esc(guidance.notSensitive)}</p></div><div class="task-meta">${task.category} · source ${task.source_frame_start}${task.source_frame_end !== task.source_frame_start ? `-${task.source_frame_end}` : ''} · ${timeText((task.source_frame_start - caseData(caseId).source_frame_start)/fpsValue(caseId))}</div><span class="badge ${badgeClassForTask(task)}">${effective ? esc(actionLabel(effective.action)) : task.optional ? 'Optional open' : task.blocking ? 'Open required' : 'Open'}</span><div class="task-actions">${decisionButtons(task).map(a => `<button data-action="decision" data-task-id="${esc(task.review_task_id)}" data-decision="${a.action}" aria-pressed="${decision?.action === a.action ? 'true' : 'false'}" class="decision-choice decision-${a.tone}${decision?.action === a.action ? ' selected' : ''}">${esc(a.label)}</button>`).join('')}${stateName === 'needs_correction' ? `<button class="primary" data-action="open-editor">Fix this now</button>` : ''}</div><details class="technical"><summary>Technical details</summary><pre>${esc(JSON.stringify({review_task_id: task.review_task_id, issue_type: task.issue_type, normal_task_class: task.normal_task_class, raw_signal_ids: task.raw_signal_ids || [], allowed_actions: task.allowed_actions || []}, null, 2))}</pre></details><div class="saved-note" data-saved-for="${esc(task.review_task_id)}">${state.savedFlash[task.review_task_id] ? 'Saved' : ''}</div></article>`; }
+function badgeClassForTask(task) { const stateName = taskState(task); if (stateName === 'correct') return 'done'; if (stateName === 'not_sensitive') return 'neutral'; if (stateName === 'needs_correction') return 'needs-correction'; if (task.blocking) return 'open'; return 'warn'; }
 function cleanTaskTitle(task) { if (task.issue_type === 'spot_check' || task.issue_type === 'optional_spot_check') return 'Spot check this moment'; if (task.issue_type === 'possible_false_redaction' || String(task.issue_type || '').includes('false')) return 'Possible false redaction'; if (task.issue_type === 'possible_privacy_gap' && task.category === 'license_plate') return 'Possible plate privacy gap'; if (task.issue_type === 'possible_privacy_gap' && task.category === 'face') return 'Possible face privacy gap'; if (task.issue_type === 'manual_reviewer_issue' || task.issue_type === 'reviewer_created_issue') return 'Reviewer-created issue'; return task.title || 'Review this interval'; }
-function workflowStepperHtml(caseId) { const counts = taskCounts(caseId); const active = counts.open > 0 ? 'Review' : counts.needs_correction > 0 || counts.unsure > 0 ? 'Corrections' : 'Full-video sweep'; return ['Review','Corrections','Full-video sweep','Finalize','Final result'].map(step => `<span class="badge ${step === active ? 'warn' : 'done'}">${step}</span>`).join(' '); }
-function workflowMessageHtml(caseId) { const counts = taskCounts(caseId); if (counts.open === 0 && (counts.needs_correction > 0 || counts.unsure > 0)) return `<div class="stat"><strong>Review complete</strong><p>Corrections or escalations still require action.</p><button data-action="filter" data-filter="Needs correction">Open Corrections</button></div>`; if (counts.open === 0) return `<div class="stat"><strong>All review items are resolved</strong><p>Complete the full-video sweep before finalization.</p></div>`; return ''; }
+function taskGuidance(task) { const subject = task.category === 'license_plate' ? 'plate' : task.category === 'face' ? 'face or person' : 'sensitive region'; const shared = { correct: `Choose Correct when the current privacy result protects the ${subject} throughout the authoritative interval.`, needs: `Choose Needs correction when the ${subject} is visible, under-covered, on the wrong target, or otherwise needs a manual redaction adjustment.`, notSensitive: `Choose Not sensitive only when the marked object is not actually sensitive in this context.`, what: task.what_to_inspect || `Inspect the ${subject} through the marked source-frame interval.` }; const text = [task.issue_type, task.normal_task_class, task.review_task_id, task.title, task.what_happened, task.what_to_inspect].filter(Boolean).join(' ').toLowerCase(); let why = 'The automatic privacy result did not have enough confidence to close this interval without human review.'; if (text.includes('correction') || text.includes('corrected')) why = 'A saved correction changed the reviewed result and needs confirmation against the authoritative source span.'; else if (text.includes('false') || text.includes('wrong target') || text.includes('unnecessary')) why = 'This interval may be an unnecessary or wrong-target redaction.'; else if (text.includes('source_span') || text.includes('source span') || text.includes('authoritative')) why = 'This task is tied to an authoritative source-frame span that needs a case-scoped human decision.'; else if (text.includes('coverage_gap') || text.includes('coverage gap') || text.includes('privacy_gap') || text.includes('privacy gap')) why = 'Source-backed privacy geometry indicates a possible coverage gap in the reviewed result.'; else if (text.includes('insufficient_strong') || text.includes('strong hits')) why = 'The track had observations, but too few were strong enough for automatic closure.'; else if (text.includes('insufficient_observed') || text.includes('insufficient observation') || text.includes('observed hits')) why = 'The automatic system saw too few reliable observations to close this interval confidently.'; else if (text.includes('long') && text.includes('gap')) why = 'The track spans a long gap without direct detections.'; else if (text.includes('one-sided') || text.includes('one_sided')) why = 'The track recovered from only one side of a gap, which can indicate target drift.'; else if (text.includes('identity') || text.includes('competition') || text.includes('duplicate')) why = 'Nearby candidate identities overlap or compete, so the automatic assignment may have followed the wrong target.'; else if (text.includes('interpolation') || text.includes('scale-change') || text.includes('scale change') || text.includes('drift')) why = 'The redaction depends on interpolation, scale changes, or motion that can drift between observed frames.'; else if (text.includes('optional') || text.includes('spot_check') || text.includes('spot check')) why = 'This is a sampled spot check used to keep the reviewed result honest.'; else if (text.includes('track_review') || text.includes('requires review') || text.includes('needs review')) why = 'The object track still requires human review before the case can be finalized.'; return {...shared, why}; }
+function workflowStepperHtml(caseId) { const counts = taskCounts(caseId); const active = counts.open > 0 ? 'Review' : counts.needs_correction > 0 ? 'Corrections' : 'Full-video sweep'; return ['Review','Corrections','Full-video sweep','Finalize','Final result'].map(step => `<span class="badge ${step === active ? 'warn' : 'done'}">${step}</span>`).join(' '); }
+function workflowMessageHtml(caseId) { const counts = taskCounts(caseId); if (counts.open === 0 && counts.needs_correction > 0) return `<div class="stat"><strong>Review complete</strong><p>Corrections still require action.</p><button data-action="filter" data-filter="Needs correction">Open Corrections</button></div>`; if (counts.open === 0) return `<div class="stat"><strong>All review items are resolved</strong><p>Complete the full-video sweep before finalization.</p></div>`; return ''; }
 function decisionButtons(task) { const actions = task.allowed_actions || []; return actions.map(action => ({label: actionLabel(action), action, tone: actionTone(action)})); }
-function actionTone(action) { if (action === ACTIONS.looks || action === ACTIONS.cosmetic) return 'correct'; if (action === ACTIONS.unsure) return 'unsure'; return 'needs-correction'; }
+function actionTone(action) { if (action === ACTIONS.looks) return 'correct'; if (action === ACTIONS.notSensitive) return 'not-sensitive'; return 'needs-correction'; }
 function bindReviewPanel(caseId) { const panel = casePanel(caseId); if (panel.dataset.reviewDelegated === 'true') return; panel.dataset.reviewDelegated = 'true'; panel.addEventListener('click', e => { const actionEl = closestElement(e.target, '[data-action]'); if (actionEl) { const action = actionEl.dataset.action; if (action === 'filter') { state.filter[caseId] = actionEl.dataset.filter; refreshSidePanel(caseId, {preserveScroll:true}); return; } if (action === 'decision') { e.preventDefault(); e.stopPropagation(); recordDecision(caseId, actionEl.dataset.taskId, actionEl.dataset.decision, actionEl); return; } if (action === 'open-editor') { setMode(caseId, 'edit'); return; } } const card = closestElement(e.target, '.task-card'); if (card && !closestElement(e.target, 'button,input,select,textarea,a')) selectTask(caseId, card.dataset.taskId, {jump:true, preserveScroll:true}); }); }
 function refreshSidePanel(caseId, opts = {}) { const panel = casePanel(caseId); const side = panel?.querySelector('.side-panel'); if (!side) return; const scrollTop = side.scrollTop; side.innerHTML = state.mode[caseId] === 'edit' ? editPanelHtml(caseId) : reviewPanelHtml(caseId); if (state.mode[caseId] === 'edit') { bindEditPanel(caseId); bindEntityPanel(caseId); } bindTimeline(caseId); if (opts.preserveScroll) side.scrollTop = scrollTop; if (opts.scrollActive !== false) setTimeout(() => document.querySelector(`${caseSelector(caseId)} .side-panel [data-task-id="${CSS.escape(state.selectedTask[caseId] || '')}"]`)?.scrollIntoView({block:'nearest'}), 0); }
 async function selectTask(caseId, taskId, opts = {}) { state.selectedTask[caseId] = taskId; const task = selectedTask(caseId); if (task && opts.jump) { const targetFrame = clamp(task.source_frame_start - caseData(caseId).source_frame_start, 0, caseFrameCount(caseId) - 1); await seekToFrame(caseId, targetFrame, { keepPaused: true }); state.frame[caseId] = targetFrame; persistFrame(caseId); updatePlayerUi(caseId); assertActiveTaskFrame(caseId, task); } refreshSidePanel(caseId, {preserveScroll: Boolean(opts.preserveScroll)}); }
 function assertActiveTaskFrame(caseId, task) { const expected = task.source_frame_start - caseData(caseId).source_frame_start; if (state.frame[caseId] !== expected) showSessionError(`Frame navigation mismatch: expected case frame ${expected}, got ${state.frame[caseId]}.`); }
-async function recordDecision(caseId, taskId, action, button = null) { if (!state.session) return showSessionError('Start review before recording decisions.'); const task = allTasks(caseId).find(t => t.review_task_id === taskId); setDecisionPending(button); try { const event = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: decisionNote(action, task) }); state.decisions[taskId] = event.event.after_state; state.workingState = null; state.savedFlash[taskId] = true; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); if (action === ACTIONS.leak && task?.issue_type === 'spot_check') await createManualIssue(caseId, task.source_frame_start, task.source_frame_end, 'Privacy issue from spot check'); const next = firstOpenTask(caseId); if (next) { await selectTask(caseId, next.review_task_id, {jump:true, preserveScroll:true}); } else { refreshSidePanel(caseId, {preserveScroll:true}); } setTimeout(() => { delete state.savedFlash[taskId]; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); }, 1200); } catch (err) { setDecisionError(button, err.message); showSessionError(`Decision was not saved: ${err.message}`); } }
+async function recordDecision(caseId, taskId, action, button = null) { if (!state.session) return showSessionError('Start review before recording decisions.'); const task = allTasks(caseId).find(t => t.review_task_id === taskId); setDecisionPending(button); try { const event = await postJson('/api/decisions', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, task_id: taskId, action, note: decisionNote(action, task) }); state.decisions[caseId] = {...(state.decisions[caseId] || {}), [taskId]: event.event.after_state}; if (state.taskResolutions[caseId]) delete state.taskResolutions[caseId][taskId]; state.workingState = null; state.savedFlash[taskId] = true; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); if (action === ACTIONS.leak && task?.issue_type === 'spot_check') await createManualIssue(caseId, task.source_frame_start, task.source_frame_end, 'Privacy issue from spot check'); const next = firstOpenTask(caseId); if (next) { await selectTask(caseId, next.review_task_id, {jump:true, preserveScroll:true}); } else { refreshSidePanel(caseId, {preserveScroll:true}); } setTimeout(() => { delete state.savedFlash[taskId]; refreshSidePanel(caseId, {preserveScroll:true, scrollActive:false}); }, 1200); } catch (err) { setDecisionError(button, err.message); showSessionError(`Decision was not saved: ${err.message}`); } }
 function setDecisionPending(button) { const card = button?.closest('.task-card'); if (!card) return; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.classList.toggle('selected', choice === button); choice.setAttribute('aria-pressed', choice === button ? 'true' : 'false'); choice.disabled = true; }); const note = card.querySelector('.saved-note'); if (note) note.textContent = 'Saving...'; }
-function setDecisionError(button, message) { const card = button?.closest('.task-card'); if (!card) return; const savedAction = state.decisions[card.dataset.taskId]?.action || ''; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.disabled = false; choice.classList.toggle('selected', choice.dataset.decision === savedAction); choice.setAttribute('aria-pressed', choice.dataset.decision === savedAction ? 'true' : 'false'); }); const note = card.querySelector('.saved-note'); if (note) note.textContent = `Could not save: ${message}`; }
-function decisionNote(action, task) { if (action === ACTIONS.leak || action === ACTIONS.partial) return 'Reviewer marked this item for correction.'; if (action === ACTIONS.falseRedaction) return 'Reviewer requested bounded redaction removal.'; return `Reviewer selected ${actionLabel(action)} for ${task?.review_task_id || 'task'}.`; }
-function requiresEditor(task) { const d = state.decisions[task.review_task_id]; return d && [ACTIONS.leak, ACTIONS.partial, ACTIONS.falseRedaction, ACTIONS.wrong].includes(d.action); }
+function setDecisionError(button, message) { const card = button?.closest('.task-card'); if (!card) return; const savedAction = decisionFor(card.dataset.caseId, card.dataset.taskId)?.action || ''; card.querySelectorAll('[data-action="decision"]').forEach(choice => { choice.disabled = false; choice.classList.toggle('selected', choice.dataset.decision === savedAction); choice.setAttribute('aria-pressed', choice.dataset.decision === savedAction ? 'true' : 'false'); }); const note = card.querySelector('.saved-note'); if (note) note.textContent = `Could not save: ${message}`; }
+function decisionNote(action, task) { if (action === ACTIONS.leak) return 'Reviewer marked this item for correction.'; return `Reviewer selected ${actionLabel(action)} for ${task?.review_task_id || 'task'}.`; }
+function requiresEditor(task) { const d = decisionFor(task.case_id, task.review_task_id); return d && d.action === ACTIONS.leak && !taskResolutionFor(task.case_id, task.review_task_id); }
 
 function editPanelHtml(caseId) { const task = selectedTask(caseId); const draft = state.draft.caseId === caseId ? state.draft : {start:null,end:null,keyframes:[]}; return `<div class="edit-section"><section class="edit-card"><h3>Selected issue</h3><p class="task-title">${esc(task ? cleanTaskTitle(task) : 'No issue selected')}</p><p class="task-meta">${task ? `source ${task.source_frame_start}-${task.source_frame_end}` : 'Choose a review item or add an issue at the current frame.'}</p><div class="button-row"><button data-action="add-issue">Add issue at current frame</button><button data-action="back-review">Back to Review</button></div></section><section class="edit-card"><h3>Correction interval</h3><div class="button-row"><button data-action="set-start">Set start at current frame</button><button data-action="set-end">Set end at current frame</button></div><p class="muted">Start: ${draft.start ?? 'not set'} · End: ${draft.end ?? 'not set'} · ${draft.start !== null && draft.end !== null ? `${Math.abs(draft.end-draft.start)+1} frames` : 'set boundaries first'}</p></section><section class="edit-card"><h3>Keyframes</h3><div class="editor-canvas-wrap"><canvas id="editorCanvas-${caseId}" width="640" height="360"></canvas></div><div class="button-row"><button data-action="add-keyframe">Add keyframe at current frame</button><button data-action="barrier">Add not-visible / scene-cut barrier</button></div><div class="keyframe-list">${draft.keyframes.map(k => `<div class="keyframe-row"><span>Frame ${k.source_frame}</span><span>${k.bbox_xyxy.join(', ')}</span><button data-action="delete-keyframe" data-frame="${k.source_frame}">Delete</button></div>`).join('') || '<p class="muted">No keyframes yet.</p>'}</div></section><section class="edit-card"><h3>Preview and save</h3><div class="button-row"><button class="primary" data-action="preview-correction">Preview correction</button><button data-action="save-correction">Save correction revision</button><button data-action="verify-correction">Verify corrected interval</button><button data-action="discard-draft">Discard draft</button></div><p class="muted" id="correctionPreview-${caseId}">${state.correctionPreview[caseId] ? `Correction preview: ${esc(state.correctionPreview[caseId].path)}` : 'No correction preview yet.'}</p></section><section class="edit-card"><h3>Objects</h3><div class="entity-filter-row">${entityFilterButtons('all')}</div><div class="object-list">${entityCardsHtml(caseId)}</div>${unresolvedEvidenceHtml(caseId)}</section></div>`; }
 function bindEditPanel(caseId) { const panel = casePanel(caseId); panel.querySelector('[data-action="back-review"]')?.addEventListener('click', () => setMode(caseId, 'review')); panel.querySelector('[data-action="set-start"]')?.addEventListener('click', () => { ensureDraft(caseId); state.draft.start = sourceFrame(caseId); renderCase(caseId); }); panel.querySelector('[data-action="set-end"]')?.addEventListener('click', () => { ensureDraft(caseId); state.draft.end = sourceFrame(caseId); renderCase(caseId); }); panel.querySelector('[data-action="add-keyframe"]')?.addEventListener('click', () => addDraftKeyframe(caseId)); panel.querySelector('[data-action="barrier"]')?.addEventListener('click', () => addDraftBarrier(caseId)); panel.querySelector('[data-action="discard-draft"]')?.addEventListener('click', () => { state.draft = { caseId: null, start: null, end: null, keyframes: [], selectedEntityId: null, selectedTaskId: null }; renderCase(caseId); }); panel.querySelector('[data-action="preview-correction"]')?.addEventListener('click', () => saveCorrection(caseId, {previewOnly:true})); panel.querySelector('[data-action="save-correction"]')?.addEventListener('click', () => saveCorrection(caseId)); panel.querySelector('[data-action="verify-correction"]')?.addEventListener('click', () => verifyCorrection(caseId)); panel.querySelector('[data-action="add-issue"]')?.addEventListener('click', () => createManualIssue(caseId, sourceFrame(caseId), sourceFrame(caseId), 'Reviewer discovered issue')); panel.querySelectorAll('[data-action="delete-keyframe"]').forEach(btn => btn.addEventListener('click', () => { state.draft.keyframes = state.draft.keyframes.filter(k => String(k.source_frame) !== btn.dataset.frame); renderCase(caseId); })); drawEditorCanvas(caseId); }
@@ -8384,7 +8517,7 @@ async function saveCorrection(caseId, opts = {}) {
   }
 }
 async function verifyCorrection(caseId) { const task = selectedTask(caseId); if (!task) return; await recordDecision(caseId, task.review_task_id, ACTIONS.looks); }
-async function createManualIssue(caseId, startSource, endSource, reason) { const task = { allowed_actions: [ACTIONS.leak, ACTIONS.unsure], blocking: true, case_id: caseId, category: 'license_plate', correction_required: true, decision_state: 'pending', issue_type: 'reviewer_created_issue', normal_task_class: 'reviewer_created_issue', raw_signal_ids: [], review_task_id: `manual_${caseId}_${Date.now()}`, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: startSource, source_frame_end: endSource, technical_only: false, title: 'Reviewer-created issue', what_happened: 'A reviewer added this issue during full-video review.', what_to_inspect: 'Open in editor, add a reviewed correction if privacy protection is needed.' }; if (state.session) await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'manual_issue_created', case_id: caseId, entity_id: null, payload: { after: { task } } } }); state.manualTasks.push(task); state.selectedTask[caseId] = task.review_task_id; refreshSidePanel(caseId, {preserveScroll:true}); return task; }
+async function createManualIssue(caseId, startSource, endSource, reason) { const task = { allowed_actions: [ACTIONS.looks, ACTIONS.leak, ACTIONS.notSensitive], blocking: true, case_id: caseId, category: 'license_plate', correction_required: true, decision_state: 'pending', issue_type: 'reviewer_created_issue', normal_task_class: 'reviewer_created_issue', raw_signal_ids: [], review_task_id: `manual_${caseId}_${Date.now()}`, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: startSource, source_frame_end: endSource, technical_only: false, title: 'Reviewer-created issue', what_happened: 'A reviewer added this issue during full-video review.', what_to_inspect: 'Open in editor, add a reviewed correction if privacy protection is needed.' }; if (state.session) await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'manual_issue_created', case_id: caseId, entity_id: null, payload: { after: { task } } } }); state.manualTasks.push(task); state.selectedTask[caseId] = task.review_task_id; refreshSidePanel(caseId, {preserveScroll:true}); return task; }
 
 function entityFilterButtons(active) { const rows = [['all','All'], ['face','People'], ['license_plate','Plates'], ['needs_review','Needs review'], ['unresolved','Unresolved evidence']]; return rows.map(([value,label]) => `<button data-action="entity-filter" data-filter="${value}" class="${value === active ? 'active' : ''}">${label}</button>`).join(''); }
 function entityCardsHtml(caseId, filter = 'all') {
@@ -8409,7 +8542,7 @@ function possibleDuplicateSuggestions(caseId) { const entities = effectiveEntiti
 function findEntity(caseId, id) { return effectiveEntities(caseId).find(e => e.entity_id === id); }
 function policyLabel(policy) { return {redact:'Redact', keep_visible:'Keep visible', not_sensitive:'Invalid / not sensitive', review_required:'Needs review'}[policy] || policy; }
 async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; const reason = 'Reviewer object policy update.'; const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; state.workingState = null; if (verificationTaskId && !state.manualTasks.some(t => t.review_task_id === verificationTaskId)) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); const response = await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after, child_track_ids: entity.member_detector_tracker_ids || entity.automatic_source_track_ids || [] } }, reason }); state.workingState = response.working_state || state.workingState; renderCase(caseId); refreshSidePanel(caseId, {preserveScroll:true}); refreshOpenEntities(caseId); }
-function policyTask(caseId, entity, taskId) { return { allowed_actions: [ACTIONS.looks, ACTIONS.leak, ACTIONS.unsure], blocking: true, case_id: caseId, category: entity.category, correction_required: false, decision_state: 'pending', issue_type: 'entity_policy_verification', raw_signal_ids: [], review_task_id: taskId, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: entity.first_visible_source_frame || caseData(caseId).source_frame_start, source_frame_end: entity.first_visible_source_frame || caseData(caseId).source_frame_start, technical_only: false, title: `Verify ${policyLabel(entity.current_policy)} for ${entity.label}`, what_to_inspect: 'Confirm this object policy is correct before finalization.' }; }
+function policyTask(caseId, entity, taskId) { return { allowed_actions: [ACTIONS.looks, ACTIONS.leak, ACTIONS.notSensitive], blocking: true, case_id: caseId, category: entity.category, correction_required: false, decision_state: 'pending', issue_type: 'entity_policy_verification', raw_signal_ids: [], review_task_id: taskId, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: entity.first_visible_source_frame || caseData(caseId).source_frame_start, source_frame_end: entity.first_visible_source_frame || caseData(caseId).source_frame_start, technical_only: false, title: `Verify ${policyLabel(entity.current_policy)} for ${entity.label}`, what_to_inspect: 'Confirm this object policy is correct before finalization.' }; }
 function refreshOpenEntities(caseId) { const modal = document.getElementById('entitiesModal'); if (!modal?.classList.contains('open')) return; const content = document.getElementById('entitiesModalContent'); const filter = modal.dataset.filter || 'all'; content.innerHTML = `<div class="entity-filter-row">${entityFilterButtons(filter)}</div><div class="object-list">${entityCardsHtml(caseId, filter)}</div><details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; bindEntityPanel(caseId, content); }
 function openMergeModal(caseId, entityId) { if (!state.session) return showSessionError('Start review before merging objects.'); const source = findEntity(caseId, entityId); if (!source) return; const modal = document.getElementById('mergeModal'); const content = document.getElementById('mergeModalContent'); const candidates = mergeCandidates(caseId, source); state.mergeDraft = {caseId, sourceEntityId: entityId, targetEntityId: candidates[0]?.entity_id || null}; content.innerHTML = `<p class="task-title">Merge ${esc(source.label)} with...</p><p class="muted">Only same-category, non-overlapping candidates are shown.</p><div class="merge-candidates">${candidates.map((candidate, index) => mergeCandidateHtml(candidate, index === 0)).join('') || '<p class="muted">No safe merge candidates are available.</p>'}</div>`; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); content.querySelectorAll('.merge-card').forEach(card => card.addEventListener('click', () => { state.mergeDraft.targetEntityId = card.dataset.entityId; content.querySelectorAll('.merge-card').forEach(item => item.classList.toggle('selected', item === card)); })); }
 function mergeCandidateHtml(candidate, selected) { return `<article class="merge-card ${selected ? 'selected' : ''}" data-entity-id="${esc(candidate.entity_id)}"><img src="${esc(candidate.representative_thumbnail_path || '')}" alt="${esc(candidate.label)} thumbnail"><div><div class="task-title">${esc(candidate.label)}</div><p class="task-meta">source ${candidate.first_visible_source_frame ?? '?'}-${candidate.last_visible_source_frame ?? '?'} · ${esc(candidate.similarity_label || 'Medium')} similarity</p><p class="muted">${esc(candidate.merge_reason || 'Compatible review-object evidence')}</p></div><input type="radio" ${selected ? 'checked' : ''} aria-label="Select ${esc(candidate.label)}"></article>`; }
@@ -8420,7 +8553,7 @@ function entityGap(a,b) { const a1=a.first_visible_source_frame, a2=a.last_visib
 function entitiesOverlap(a,b) { const a1=a.first_visible_source_frame, a2=a.last_visible_source_frame, b1=b.first_visible_source_frame, b2=b.last_visible_source_frame; if ([a1,a2,b1,b2].some(v => v === null || v === undefined)) return false; return Math.max(a1,b1) <= Math.min(a2,b2); }
 
 async function restoreSession() { const sessionId = localStorage.getItem(storageKey('session_id')); if (!sessionId) return; try { await loadSessionState(sessionId); } catch { localStorage.removeItem(storageKey('session_id')); } }
-async function loadSessionState(sessionId) { const res = await fetch(`/api/session-state?session_id=${encodeURIComponent(sessionId)}`); if (!res.ok) throw new Error(await res.text()); const payload = await res.json(); state.session = payload.session; state.attribution = payload.attribution; state.decisions = payload.decisions || {}; state.events = payload.events || []; state.corrections = payload.corrections || []; state.workingState = payload.working_state || null; rebuildFromEvents(); }
+async function loadSessionState(sessionId) { const res = await fetch(`/api/session-state?session_id=${encodeURIComponent(sessionId)}`); if (!res.ok) throw new Error(await res.text()); const payload = await res.json(); state.session = payload.session; state.attribution = payload.attribution; state.decisions = normalizeByCase(payload.decisions_by_case, payload.decisions || {}); state.taskResolutions = normalizeByCase(payload.task_resolutions_by_case || payload.working_state?.task_resolutions_by_case, payload.task_resolutions || payload.working_state?.task_resolutions || {}); state.events = payload.events || []; state.corrections = payload.corrections || []; state.workingState = payload.working_state || null; rebuildFromEvents(); }
 function rebuildFromEvents() { state.manualTasks = []; state.entityOverrides = {}; for (const event of state.events) { if (event.event_type === 'manual_issue_created' && event.after_state?.task) state.manualTasks.push(event.after_state.task); if (event.event_type === 'entity_policy_changed' && event.after_state?.entity_id) { state.entityOverrides[event.after_state.entity_id] = event.after_state; if (event.after_state.verification_task_id) state.manualTasks.push(policyTask(event.case_id, event.after_state, event.after_state.verification_task_id)); } if (event.event_type === 'entities_merged' && event.after_state?.primary) { state.entityOverrides[event.after_state.primary.entity_id] = event.after_state.primary; for (const id of event.after_state.retired_entity_ids || []) state.entityOverrides[id] = { entity_id: id, current_status: 'merged' }; } } }
 function renderSessionBanner() { const banner = document.getElementById('sessionBanner'); const start = document.getElementById('startSession'); if (!state.session) { banner.className = 'session-banner'; banner.textContent = 'No local review session yet. Start review to enable decisions and corrections.'; start.disabled = false; return; } banner.className = 'session-banner ready'; banner.textContent = `Local session ${state.session.session_id}${state.attribution?.display_name ? ` · Reviewer ${state.attribution.display_name}` : ' · anonymous until export/finalization'}`; start.disabled = true; }
 function showSessionError(message) { const banner = document.getElementById('sessionBanner'); banner.className = 'session-banner error'; banner.textContent = message; }
@@ -8432,7 +8565,7 @@ function exportSession() { if (!state.session) return showSessionError('Start re
 function renderAudit() { const panel = document.getElementById('case-audit'); panel.innerHTML = `<h2>Audit Trail</h2><p class="case-subtitle">Append-only events with hash-chain validation.</p><div class="audit-list">${(state.events || []).map(e => `<article class="audit-card"><strong>${esc(e.event_type)}</strong><p class="task-meta">${esc(e.timestamp_utc)} · ${esc(e.case_id || 'workspace')}</p><p>${esc(e.note || '')}</p><details><summary>Technical JSON</summary><pre>${esc(JSON.stringify(e, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No events yet.</p>'}</div><details class="technical"><summary>Raw audit signals preserved outside the normal queue (${(DATA.rawSignals?.raw_signals || []).length})</summary><pre>${esc(JSON.stringify(DATA.rawSignals, null, 2))}</pre></details>`; }
 function renderFinal() { const panel = document.getElementById('case-final'); const buttons = caseIds().map(id => `<button data-finalize-case="${esc(id)}">Check ${esc(caseLabel(id))} finalization</button>`).join(''); panel.innerHTML = `<h2>Final Results</h2><p class="case-subtitle">Reviewed-final outputs remain unavailable until finalization gates pass.</p><div class="final-card"><p class="muted">Finalization is currently controlled by the same validated backend gates. Use Review/Edit to resolve blockers, then finalize from the supported workflow.</p><div class="button-row">${buttons}</div><pre id="finalizeStatus"></pre></div>`; panel.querySelectorAll('[data-finalize-case]').forEach(btn => btn.addEventListener('click', () => finalizeCase(btn.dataset.finalizeCase))); }
 async function finalizeCase(caseId) { if (!state.session) return showSessionError('Start review before finalizing.'); if (!state.attribution?.display_name) { openAttributionModal(); return; } const out = document.getElementById('finalizeStatus'); try { const res = await postJson('/api/finalize', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId }); out.textContent = JSON.stringify(res.result, null, 2); } catch (err) { out.textContent = `Finalization blocked: ${err.message}`; } }
-function actionLabel(action) { if (action === ACTIONS.looks) return 'Correct'; if ([ACTIONS.leak, ACTIONS.partial, ACTIONS.falseRedaction, ACTIONS.wrong].includes(action)) return 'Needs correction'; if (action === ACTIONS.unsure) return 'Unsure'; if (action === ACTIONS.notSensitive) return 'Not sensitive'; if (action === ACTIONS.cosmetic) return 'Cosmetic only'; const found = (DATA.tasks?.actions || []).find(a => a.action === action); return found ? found.label : action; }
+function actionLabel(action) { if (action === ACTIONS.looks) return 'Correct'; if (action === ACTIONS.leak) return 'Needs correction'; if (action === ACTIONS.notSensitive) return 'Not sensitive'; const found = (DATA.tasks?.actions || []).find(a => a.action === action); return found ? found.label : action; }
 function installGlobalHandlers() { document.body.tabIndex = -1; document.body.focus(); document.getElementById('startSession').addEventListener('click', startSession); document.getElementById('changeAttribution').addEventListener('click', openAttributionModal); document.getElementById('exportSession').addEventListener('click', exportSession); document.getElementById('submitAttribution').addEventListener('click', submitAttribution); document.getElementById('cancelAttribution').addEventListener('click', closeAttributionModal); document.getElementById('closeEntities')?.addEventListener('click', closeEntities); document.getElementById('cancelMerge')?.addEventListener('click', closeMergeModal); document.getElementById('confirmMerge')?.addEventListener('click', confirmMerge); window.addEventListener('keydown', onKeyDown, { capture: true }); document.addEventListener('fullscreenchange', () => { const caseId = visibleCaseId(); if (caseId) updatePlayerUi(caseId); }); }
 function isTextEntryTarget(element) { const tag = element?.tagName?.toLowerCase(); if (!tag) return false; if (element.isContentEditable) return true; if (tag === 'textarea' || tag === 'select') return true; if (tag !== 'input') return false; const type = String(element.type || 'text').toLowerCase(); return !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes(type); }
 function onKeyDown(event) { if (isTextEntryTarget(document.activeElement)) return; if (event.key === 'ArrowRight' || event.key === 'Right') { event.preventDefault(); stepFrame(event.shiftKey ? 10 : 1); } else if (event.key === 'ArrowLeft' || event.key === 'Left') { event.preventDefault(); stepFrame(event.shiftKey ? -10 : -1); } else if (event.key === ' ') { event.preventDefault(); togglePlay(visibleCaseId()); } else if (event.key.toLowerCase() === 'f') { const wrapper = document.querySelector(`${caseSelector(visibleCaseId())}.active .player-wrapper`); if (wrapper) toggleFullscreen(wrapper); } else if (event.key === 'Escape' && document.fullscreenElement) { document.exitFullscreen().catch(() => {}); } else if (event.key === 'Escape') { closeMergeModal(); closeEntities(); closeAttributionModal(); } }

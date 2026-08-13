@@ -62,7 +62,7 @@ TASK_CATEGORY_ORDER = {
 }
 USER_ACTIONS = {
     "looks_correct": {
-        "label": "Looks correct",
+        "label": "Correct",
         "review_status": "accepted_current",
     },
     "needs_correction": {
@@ -70,7 +70,7 @@ USER_ACTIONS = {
         "review_status": "correction_required",
     },
     "not_privacy_target": {
-        "label": "Not a privacy target",
+        "label": "Not sensitive",
         "review_status": "intentionally_unredacted",
     },
     "escalate": {
@@ -78,11 +78,11 @@ USER_ACTIONS = {
         "review_status": "escalated",
     },
     "no_issue_found": {
-        "label": "No issue found",
+        "label": "Correct",
         "review_status": "accepted_current",
     },
     "needs_review": {
-        "label": "Needs review",
+        "label": "Needs correction",
         "review_status": "escalated",
     },
 }
@@ -1654,7 +1654,7 @@ def task_title(category: str, reasons: list[str], has_corrected_final: bool) -> 
             else "Correction evidence is missing"
         )
     if category == "action_required":
-        return "Automatic redaction was uncertain"
+        return "Automatic redaction needs human confirmation"
     if category == "automatic_continuity_check":
         return "Check automatic continuity"
     if category == "optional_spot_check":
@@ -1727,15 +1727,15 @@ def task_checklist(category: str, has_corrected_final: bool) -> list[str]:
 
 def task_action_guidance(category: str, has_corrected_final: bool) -> str:
     if category == "corrected_result_check" and has_corrected_final:
-        return "Looks correct confirms the Corrected final result shown above. Needs correction keeps final export blocked until new privacy regions are supplied."
+        return "Correct confirms the corrected final result shown above. Needs correction keeps final export blocked until new privacy regions are supplied."
     if category == "corrected_result_check":
         return "This interval cannot be approved from the bundle because no corrected final evidence is available."
     if category == "action_required":
         return "Final export remains blocked until corrected privacy regions are supplied."
     if category == "automatic_continuity_check":
-        return "Looks correct confirms that continuity was preserved despite the detector miss."
+        return "Correct confirms that continuity was preserved despite the detector miss."
     if category == "optional_spot_check":
-        return "No issue found records a clean audit sample. Needs review flags the sample for follow-up."
+        return "Correct records a clean audit sample. Needs correction flags the sample for follow-up."
     return "Technical audit items do not require a normal review action."
 
 
@@ -4141,7 +4141,7 @@ def checklist_markdown() -> str:
 1. Open `index.html`.
 2. Complete required tasks and corrected-result confirmations first.
 3. Compare the embedded Original, Automatic, and Corrected final clips when available.
-4. Use `Looks correct` only when the displayed result covers the privacy target for the whole interval.
+4. Use `Correct` only when the displayed result covers the privacy target for the whole interval.
 5. Use `Needs correction` when valid privacy regions are missing or the result is not acceptable.
 6. Complete optional spot checks after required tasks.
 7. Export decisions before closing the browser or moving to another computer.

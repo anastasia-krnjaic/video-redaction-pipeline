@@ -64,7 +64,7 @@ export function ReviewTimeline({ currentFrame, manifest, onSelectTask, selectedT
         <span className="legend-face">Face open</span>
         <span className="legend-correct">Correct</span>
         <span className="legend-needs">Needs correction</span>
-        <span className="legend-unsure">Unsure</span>
+        <span className="legend-not-sensitive">Not sensitive</span>
       </div>
     </section>
   );

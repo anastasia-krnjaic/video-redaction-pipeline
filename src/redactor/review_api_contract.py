@@ -238,10 +238,13 @@ def final_review_workspace_schema() -> dict[str, Any]:
                     "chain",
                     "corrections",
                     "decisions",
+                    "decisions_by_case",
                     "events",
                     "ok",
                     "session",
                     "summary",
+                    "task_resolutions",
+                    "task_resolutions_by_case",
                     "working_state",
                 ],
                 "properties": {
@@ -252,10 +255,28 @@ def final_review_workspace_schema() -> dict[str, Any]:
                         "type": "object",
                         "additionalProperties": {"$ref": "#/definitions/TaskDecision"},
                     },
+                    "decisions_by_case": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "additionalProperties": {"$ref": "#/definitions/TaskDecision"},
+                        },
+                    },
                     "events": {"type": "array", "items": {"$ref": "#/definitions/AuditEvent"}},
                     "ok": {"const": True},
                     "session": {"$ref": "#/definitions/Session"},
                     "summary": dict_value,
+                    "task_resolutions": {
+                        "type": "object",
+                        "additionalProperties": {"$ref": "#/definitions/TaskDecision"},
+                    },
+                    "task_resolutions_by_case": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "additionalProperties": {"$ref": "#/definitions/TaskDecision"},
+                        },
+                    },
                     "working_state": {"$ref": "#/definitions/WorkingState"},
                 },
             },
@@ -457,6 +478,9 @@ def final_review_workspace_schema() -> dict[str, Any]:
                     "schema_version",
                     "state_hash",
                     "task_decisions",
+                    "task_decisions_by_case",
+                    "task_resolutions",
+                    "task_resolutions_by_case",
                 ],
                 "properties": {
                     "active_correction_ids": {"type": "array", "items": {"type": "string"}},
@@ -482,6 +506,9 @@ def final_review_workspace_schema() -> dict[str, Any]:
                     "suppressions": array_value,
                     "sweep_acknowledgements": dict_value,
                     "task_decisions": dict_value,
+                    "task_decisions_by_case": dict_value,
+                    "task_resolutions": dict_value,
+                    "task_resolutions_by_case": dict_value,
                 },
             },
             "MaterializationStatus": {
@@ -638,6 +665,12 @@ def final_review_workspace_schema() -> dict[str, Any]:
             },
             "GET /api/v1/cases/{case_id}/versions?session_id=...": {
                 "response": "#/definitions/MediaVersion"
+            },
+            "GET /api/v1/cases/{case_id}/download?role=...&session_id=...": {
+                "response": "video/mp4"
+            },
+            "GET /api/v1/cases/{case_id}/delivery-package?session_id=...": {
+                "response": "delivery_package_contract.v1"
             },
             "POST /api/v1/sessions": {"response": "#/definitions/Session"},
             "POST /api/v1/decisions": {"request": "#/definitions/TaskDecision"},

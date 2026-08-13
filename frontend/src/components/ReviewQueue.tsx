@@ -4,7 +4,7 @@ import type { QueueBucket, TaskWithDecision } from '../types/domain';
 import { bucketCounts } from '../state/reviewState';
 import { ReviewTaskCard } from './ReviewTaskCard';
 
-const buckets: QueueBucket[] = ['Open', 'Waiting', 'Needs correction', 'Unsure / Escalated', 'Completed'];
+const buckets: QueueBucket[] = ['Open', 'Needs correction', 'Correct', 'Not sensitive'];
 
 interface Props {
   bucket: QueueBucket;
@@ -12,9 +12,10 @@ interface Props {
   pendingTaskId?: string;
   selectedTaskId?: string | null;
   tasks: TaskWithDecision[];
-  openComplete?: boolean;
+  reviewComplete?: boolean;
   onBucketChange: (bucket: QueueBucket) => void;
   onDecision: (task: TaskWithDecision, action: string) => void;
+  onFixNow: (task: TaskWithDecision) => void;
   onSelectTask: (task: TaskWithDecision) => void;
 }
 
@@ -23,8 +24,9 @@ export function ReviewQueue({
   manifest,
   onBucketChange,
   onDecision,
+  onFixNow,
   onSelectTask,
-  openComplete,
+  reviewComplete,
   pendingTaskId,
   selectedTaskId,
   tasks,
@@ -50,8 +52,8 @@ export function ReviewQueue({
             <span>Open</span>
           </div>
           <div className="stat">
-            <strong>{counts.Completed}</strong>
-            <span>Completed</span>
+            <strong>{counts['Needs correction']}</strong>
+            <span>Needs correction</span>
           </div>
         </div>
       </div>
@@ -77,13 +79,14 @@ export function ReviewQueue({
               selected={selectedTaskId === task.review_task_id}
               task={task}
               onDecision={onDecision}
+              onFixNow={onFixNow}
               onSelect={onSelectTask}
             />
           ))
-        ) : openComplete && bucket === 'Open' ? (
+        ) : reviewComplete && bucket === 'Open' ? (
           <div className="completion-state" role="status">
-            <strong>All open review items are complete.</strong>
-            <p className="muted">Next: review Needs correction, review Unsure / Escalated, complete the full-video sweep, or check finalization.</p>
+            <strong>REVIEW COMPLETE</strong>
+            <p className="muted">Ready to build Latest reviewed.</p>
           </div>
         ) : (
           <p className="muted empty-state">No tasks in this bucket.</p>

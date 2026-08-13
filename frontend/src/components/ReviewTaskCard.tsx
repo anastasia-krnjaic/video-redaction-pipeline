@@ -1,6 +1,6 @@
 import type { Case } from '../types/api';
 import type { TaskWithDecision } from '../types/domain';
-import { decisionLabel, taskDecisionActionOptions } from '../state/reviewState';
+import { decisionLabel, taskDecisionActionOptions, taskGuidance } from '../state/reviewState';
 import { sourceSpan, taskTimestamp } from '../utils/frame';
 
 interface Props {
@@ -9,14 +9,15 @@ interface Props {
   selected: boolean;
   task: TaskWithDecision;
   onDecision: (task: TaskWithDecision, action: string) => void;
+  onFixNow: (task: TaskWithDecision) => void;
   onSelect: (task: TaskWithDecision) => void;
 }
 
-export function ReviewTaskCard({ manifest, onDecision, onSelect, pending, selected, task }: Props) {
+export function ReviewTaskCard({ manifest, onDecision, onFixNow, onSelect, pending, selected, task }: Props) {
   const taskActionable = task.actionable !== false;
-  const waitingForMedia = task.normal_task_class === 'correction_verification' && !taskActionable;
   const actionsDisabled = pending || !taskActionable;
   const actionOptions = taskDecisionActionOptions(task);
+  const guidance = taskGuidance(task);
   return (
     <article
       className={`task-card ${selected ? 'selected' : ''}`}
@@ -24,15 +25,20 @@ export function ReviewTaskCard({ manifest, onDecision, onSelect, pending, select
       onClick={() => onSelect(task)}
     >
       <div className="task-title">{task.title}</div>
+      <div className="task-guidance">
+        <GuidanceRow label="Why this was flagged" value={guidance.whyFlagged} />
+        <GuidanceRow label="What to check" value={guidance.whatToCheck} />
+        <GuidanceRow label="Correct means" value={guidance.correctMeaning} />
+        <GuidanceRow label="Needs correction when" value={guidance.needsCorrectionMeaning} />
+        <GuidanceRow label="Not sensitive when" value={guidance.notSensitiveMeaning} />
+      </div>
       <div className="task-meta">
         {categoryLabel(task.category)} · source {sourceSpan(task)} · {taskTimestamp(manifest, task)}
       </div>
-      <p>{task.what_to_inspect}</p>
       <div className="task-state-row">
-        <span className={`badge ${task.bucket === 'Open' ? 'open' : task.bucket === 'Completed' ? 'done' : 'warn'}`}>
+        <span className={`badge ${badgeClass(task)}`}>
           {task.decision ? decisionLabel(task.decision.action) : task.bucket}
         </span>
-        {waitingForMedia ? <span className="badge warn">Waiting for Latest reviewed media</span> : null}
         {task.decision_state === 'resolved' ? <span className="badge done">Corrected</span> : null}
         {task.blocking ? <span className="badge warn">Blocking</span> : null}
       </div>
@@ -48,11 +54,47 @@ export function ReviewTaskCard({ manifest, onDecision, onSelect, pending, select
             {option.label}
           </button>
         ))}
+        {task.bucket === 'Needs correction' ? (
+          <button type="button" className="primary fix-now" disabled={pending} onClick={() => onFixNow(task)}>
+            Fix this now
+          </button>
+        ) : null}
       </div>
       {pending ? <p className="saved-note">Saving...</p> : null}
-      {waitingForMedia ? <p className="saved-note">Saved - updating Latest reviewed</p> : null}
+      <details className="technical task-technical" onClick={(event) => event.stopPropagation()}>
+        <summary>Technical details</summary>
+        <pre>{JSON.stringify(technicalDetails(task), null, 2)}</pre>
+      </details>
     </article>
   );
+}
+
+function GuidanceRow({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="guidance-row">
+      <strong>{label}</strong>
+      <span>{value}</span>
+    </div>
+  );
+}
+
+function badgeClass(task: TaskWithDecision): string {
+  if (task.bucket === 'Open') return 'open';
+  if (task.bucket === 'Correct') return 'done';
+  if (task.bucket === 'Not sensitive') return 'neutral';
+  return 'needs-correction';
+}
+
+function technicalDetails(task: TaskWithDecision): Record<string, unknown> {
+  return {
+    allowed_actions: task.allowed_actions || [],
+    blocking: task.blocking,
+    decision_state: task.decision_state,
+    issue_type: task.issue_type,
+    normal_task_class: task.normal_task_class,
+    raw_signal_ids: task.raw_signal_ids || [],
+    review_task_id: task.review_task_id,
+  };
 }
 
 function categoryLabel(category: string): string {

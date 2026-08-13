@@ -28,6 +28,7 @@ from redactor.review_corrections import (
     interpolate_correction_boxes,
 )
 from redactor.review_sessions import (
+    ACTION_NOT_SENSITIVE,
     BLOCKING_ACTIONS,
     GREEN_ACTIONS,
     append_event,
@@ -67,7 +68,10 @@ RUNTIME_REVIEW_STATE_KEYS = {
 SEMANTIC_DECISION_KEYS = {
     "action",
     "case_id",
+    "correction_id",
+    "correction_revision_id",
     "decision_status",
+    "resolved_by",
     "task_id",
 }
 SUPPRESSION_OPERATIONS = {
@@ -150,6 +154,12 @@ def compile_reviewed_regions(
         source_entities=source_entities,
         effective_entities=effective_entities,
     )
+    policy_regions, task_suppression_provenance = apply_not_sensitive_task_suppressions(
+        policy_regions,
+        package_root=package_root,
+        case_id=case_id,
+        decisions_by_case=review_working_state.task_decisions_by_case_from_payload(state),
+    )
     active_correction_ids = {
         str(item) for item in list(state.get("active_correction_ids") or [])
     }
@@ -206,12 +216,16 @@ def compile_reviewed_regions(
             "manual_correction_replaced": correction_provenance["replaced_region_count"],
             "object_override_added": policy_provenance["added_region_count"],
             "suppression_removed": policy_provenance["suppressed_region_count"],
+            "task_not_sensitive_removed": task_suppression_provenance[
+                "suppressed_region_count"
+            ],
         },
         "publication_blockers": blockers,
         "reviewed_region_identity": identity,
         "reviewed_region_set_sha256": reviewed_hash,
         "schema_version": "effective_privacy_regions.v2",
         "state_hash": state["state_hash"],
+        "task_not_sensitive_provenance": task_suppression_provenance,
     }
     return reviewed_regions, provenance
 
@@ -618,9 +632,15 @@ def validate_source_identity(
     source_hash = media.sha256_file(source_path)
     expected_hashes = {
         "case_manifest": manifest.source_video_hash,
-        "source_identity": dict(workspace.get("source_identity") or {}).get("sha256"),
-        "source_metadata": dict(workspace.get("source_metadata") or {}).get("sha256"),
-        "automatic_preview": dict(workspace.get("automatic_preview") or {}).get("source_sha256"),
+        "source_identity": dict(
+            case_scoped_workspace_value(workspace, "source_identity", manifest.case_id) or {}
+        ).get("sha256"),
+        "source_metadata": dict(
+            case_scoped_workspace_value(workspace, "source_metadata", manifest.case_id) or {}
+        ).get("sha256"),
+        "automatic_preview": dict(
+            case_scoped_workspace_value(workspace, "automatic_preview", manifest.case_id) or {}
+        ).get("source_sha256"),
     }
     for name, expected in expected_hashes.items():
         if expected and str(expected) != source_hash:
@@ -649,7 +669,9 @@ def load_authoritative_baseline(
         raise ReviewedRegionCompilationError(
             f"{manifest.case_id}: baseline contains categories outside selection: {category_errors}"
         )
-    content_identities = dict(workspace.get("content_identities") or {})
+    content_identities = dict(
+        case_scoped_workspace_value(workspace, "content_identities", manifest.case_id) or {}
+    )
     baseline_identity = dict(content_identities.get("automatic_baseline_regions") or {})
     if not baseline_identity:
         raise ReviewedRegionCompilationError(
@@ -668,7 +690,9 @@ def load_authoritative_baseline(
         raise ReviewedRegionCompilationError(
             f"{manifest.case_id}: baseline region hash identity mismatch"
         )
-    automatic = dict(workspace.get("automatic_preview") or {})
+    automatic = dict(
+        case_scoped_workspace_value(workspace, "automatic_preview", manifest.case_id) or {}
+    )
     if int(automatic.get("region_count") or 0) != len(regions):
         raise ReviewedRegionCompilationError(
             f"{manifest.case_id}: baseline region count does not match automatic preview identity"
@@ -688,7 +712,12 @@ def validate_baseline_category_run_binding(
     category_identities = {
         str(category): dict(identity or {})
         for category, identity in dict(
-            workspace.get("category_run_manifest_identities") or {}
+            case_scoped_workspace_value(
+                workspace,
+                "category_run_manifest_identities",
+                manifest.case_id,
+            )
+            or {}
         ).items()
     }
     missing = sorted(set(selected) - set(category_identities))
@@ -699,7 +728,11 @@ def validate_baseline_category_run_binding(
             f"(missing={missing}, extra={extra})"
         )
     expected_identity_hash = stable_hash(category_identities)
-    declared_identity_hash = workspace.get("category_run_manifest_identity_hash")
+    declared_identity_hash = case_scoped_workspace_value(
+        workspace,
+        "category_run_manifest_identity_hash",
+        manifest.case_id,
+    )
     if declared_identity_hash != expected_identity_hash:
         raise ReviewedRegionCompilationError(
             f"{manifest.case_id}: category run identity hash mismatch"
@@ -715,7 +748,15 @@ def validate_baseline_category_run_binding(
         raise ReviewedRegionCompilationError(
             f"{manifest.case_id}: configuration freeze hash mismatch"
         )
-    freeze_category_configs = dict(freeze.get("category_configuration_identities") or {})
+    freeze_category_configs = dict(
+        case_scoped_workspace_value(
+            workspace,
+            "category_configuration_identities",
+            manifest.case_id,
+        )
+        or freeze.get("category_configuration_identities")
+        or {}
+    )
 
     category_rows: dict[str, dict[str, Any]] = {}
     artifact_ids: set[str] = set()
@@ -875,6 +916,17 @@ def selected_categories(workspace: dict[str, Any]) -> list[str]:
     return sorted(str(item) for item in list(workspace.get("selected_categories") or []))
 
 
+def case_scoped_workspace_value(
+    workspace: dict[str, Any],
+    key: str,
+    case_id: str,
+) -> Any:
+    by_case = workspace.get(f"{key}_by_case")
+    if isinstance(by_case, dict) and case_id in by_case:
+        return by_case[case_id]
+    return workspace.get(key)
+
+
 def compile_object_policy_regions(
     *,
     package_root: Path,
@@ -963,6 +1015,149 @@ def compile_object_policy_regions(
         "suppressed_region_count": len(suppressed_rows),
         "suppressed_regions": suppressed_rows,
     }
+
+
+def apply_not_sensitive_task_suppressions(
+    regions: list[PrivacyRegionRecord],
+    *,
+    package_root: Path,
+    case_id: str,
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+) -> tuple[list[PrivacyRegionRecord], dict[str, Any]]:
+    suppressions = not_sensitive_task_suppressions(
+        package_root=package_root,
+        case_id=case_id,
+        decisions_by_case=decisions_by_case,
+    )
+    if not suppressions:
+        return regions, {
+            "schema_version": "task_not_sensitive_region_suppression.v1",
+            "suppressed_region_count": 0,
+            "suppressed_regions": [],
+            "suppression_count": 0,
+        }
+
+    kept: list[PrivacyRegionRecord] = []
+    suppressed_rows: list[dict[str, Any]] = []
+    for record in regions:
+        matched = next(
+            (
+                suppression
+                for suppression in suppressions
+                if record_matches_task_suppression(record, suppression)
+            ),
+            None,
+        )
+        if matched is None:
+            kept.append(record)
+            continue
+        suppressed_rows.append(
+            {
+                "baseline_region_id": baseline_region_id(record),
+                "category": record.category,
+                "reason": "review_task_not_sensitive",
+                "source_frame": record.source_frame,
+                "task_id": matched["task_id"],
+            }
+        )
+    return sorted_regions(kept), {
+        "schema_version": "task_not_sensitive_region_suppression.v1",
+        "suppressed_region_count": len(suppressed_rows),
+        "suppressed_regions": suppressed_rows,
+        "suppression_count": len(suppressions),
+    }
+
+
+def not_sensitive_task_suppressions(
+    *,
+    package_root: Path,
+    case_id: str,
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    from redactor import review_working_state
+
+    tasks = {
+        str(task.get("review_task_id") or ""): dict(task)
+        for task in load_review_tasks(package_root)
+        if isinstance(task, dict) and str(task.get("case_id") or "") == case_id
+    }
+    suppressions: list[dict[str, Any]] = []
+    for task_id, decision in sorted(dict(decisions_by_case.get(case_id) or {}).items()):
+        if str(decision.get("action") or "") != ACTION_NOT_SENSITIVE:
+            continue
+        task = tasks.get(str(task_id))
+        if not task or str(task.get("case_id") or "") != case_id or task.get("technical_only"):
+            continue
+        category = str(task.get("category") or "")
+        entity_ids = {str(item) for item in list(task.get("target_entity_ids") or []) if item}
+        binding = dict(task.get("target_binding") or {})
+        for key in ("target_entity_ids", "entity_ids", "source_entity_ids"):
+            entity_ids.update(str(item) for item in list(binding.get(key) or []) if item)
+        track_values: set[str] = set()
+        for key in (
+            "technical_track_ids",
+            "reviewed_region_track_ids",
+            "target_track_ids",
+            "automatic_source_track_ids",
+            "member_detector_tracker_ids",
+        ):
+            track_values.update(str(item) for item in list(task.get(key) or []) if item)
+            track_values.update(str(item) for item in list(binding.get(key) or []) if item)
+        track_variants: set[str] = set()
+        for track_id in track_values:
+            track_variants.update(review_working_state.track_variants(track_id, category=category))
+        start = int(task.get("source_frame_start") or binding.get("source_frame_start") or 0)
+        end = int(task.get("source_frame_end") or binding.get("source_frame_end") or start)
+        if end < start:
+            start, end = end, start
+        suppressions.append(
+            {
+                "broad_category_span": not entity_ids and not track_variants,
+                "category": category,
+                "entity_ids": entity_ids,
+                "source_frame_end": end,
+                "source_frame_start": start,
+                "task_id": str(task_id),
+                "track_variants": track_variants,
+            }
+        )
+    return suppressions
+
+
+def record_matches_task_suppression(
+    record: PrivacyRegionRecord,
+    suppression: dict[str, Any],
+) -> bool:
+    from redactor import review_working_state
+
+    if record.category != suppression["category"]:
+        return False
+    if not (
+        int(suppression["source_frame_start"])
+        <= record.source_frame
+        <= int(suppression["source_frame_end"])
+    ):
+        return False
+    if suppression.get("broad_category_span"):
+        return True
+
+    source = dict(record.source_record)
+    record_entity_values = {
+        str(source.get("reviewed_entity_id") or ""),
+        str(source.get("entity_id") or ""),
+        str(source.get("reviewed_entity_uuid") or ""),
+    }
+    entity_ids = {str(item) for item in suppression.get("entity_ids") or []}
+    if entity_ids and entity_ids & {value for value in record_entity_values if value}:
+        return True
+
+    track_variants = {str(item) for item in suppression.get("track_variants") or []}
+    if not track_variants:
+        return False
+    record_variants: set[str] = set()
+    for value in review_working_state.region_identity_values(record):
+        record_variants.update(review_working_state.track_variants(value, category=record.category))
+    return bool(record_variants & track_variants)
 
 
 def apply_review_corrections(
@@ -1240,7 +1435,8 @@ def publication_blockers(
     from redactor import review_working_state
 
     state = state or review_working_state.derive_working_state(package_root, session_dir)
-    decisions = dict(state.get("task_decisions") or {})
+    decisions_by_case = review_working_state.task_decisions_by_case_from_payload(state)
+    resolutions_by_case = review_working_state.task_resolutions_by_case_from_payload(state)
     blockers: list[str] = []
     for task in load_review_tasks(package_root):
         if str(task.get("case_id") or "") != case_id or task.get("technical_only"):
@@ -1248,7 +1444,12 @@ def publication_blockers(
         task_id = str(task.get("review_task_id") or "")
         if not task_id or review_working_state.durable_edit_verification_task_id(task_id):
             continue
-        decision = decisions.get(task_id)
+        decision = review_working_state.effective_task_state_for_case(
+            decisions_by_case,
+            resolutions_by_case,
+            case_id=case_id,
+            task_id=task_id,
+        )
         if task.get("blocking") and decision is None:
             blockers.append(f"{task_id}: required task has no decision")
             continue
@@ -1271,7 +1472,12 @@ def publication_blockers(
         task_id = str(task.get("review_task_id") or "")
         if not task_id or review_working_state.durable_edit_verification_task_id(task_id):
             continue
-        decision = decisions.get(task_id)
+        decision = review_working_state.effective_task_state_for_case(
+            decisions_by_case,
+            resolutions_by_case,
+            case_id=case_id,
+            task_id=task_id,
+        )
         if decision is None:
             blockers.append(f"{task_id}: reviewer-added issue has no decision")
             continue
@@ -1337,7 +1543,14 @@ def reviewed_region_identity(
         sorted(correction_semantic_sha256(correction) for correction in correction_records)
     )
     active_decisions_hash = stable_hash(
-        semantic_decision_payload(dict(state.get("task_decisions") or {}))
+        semantic_decision_payload(
+            review_working_state.task_decisions_by_case_from_payload(state)
+        )
+    )
+    active_task_resolutions_hash = stable_hash(
+        semantic_decision_payload(
+            review_working_state.task_resolutions_by_case_from_payload(state)
+        )
     )
     baseline_hash = semantic_region_set_hash(baseline_regions)
     object_policy_hash = stable_hash(object_policy_payload)
@@ -1353,6 +1566,7 @@ def reviewed_region_identity(
         "active_correction_semantic_sha256": active_correction_semantic_hash,
         "active_corrections_hash": active_correction_audit_hash,
         "active_decisions_hash": active_decisions_hash,
+        "active_task_resolutions_hash": active_task_resolutions_hash,
         "active_projection_hash_schema_version": state.get(
             "active_projection_hash_schema_version"
         ),
@@ -1362,8 +1576,10 @@ def reviewed_region_identity(
             case_manifest_path
         ),
         "case_id": manifest.case_id,
-        "category_run_manifest_identity_hash": workspace.get(
-            "category_run_manifest_identity_hash"
+        "category_run_manifest_identity_hash": case_scoped_workspace_value(
+            workspace,
+            "category_run_manifest_identity_hash",
+            manifest.case_id,
         ),
         "compiler_schema_version": COMPILER_SCHEMA_VERSION,
         "configuration_freeze_hash": workspace.get("configuration_freeze_hash"),
@@ -1399,6 +1615,28 @@ def reviewed_region_set_identity_hash(identity: dict[str, Any]) -> str:
 
 
 def semantic_decision_payload(decisions: dict[str, Any]) -> dict[str, Any]:
+    by_case = (
+        decisions
+        if all(isinstance(value, dict) for value in decisions.values())
+        and any(
+            isinstance(value, dict)
+            and all(isinstance(item, dict) for item in dict(value).values())
+            for value in decisions.values()
+        )
+        else {}
+    )
+    if by_case:
+        return {
+            str(case_id): {
+                str(task_id): {
+                    key: dict(decision).get(key)
+                    for key in sorted(SEMANTIC_DECISION_KEYS)
+                    if key in dict(decision)
+                }
+                for task_id, decision in sorted(dict(case_decisions).items())
+            }
+            for case_id, case_decisions in sorted(by_case.items())
+        }
     return {
         str(task_id): {
             key: dict(decision).get(key)

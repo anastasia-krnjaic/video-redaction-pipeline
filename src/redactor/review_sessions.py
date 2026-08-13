@@ -18,6 +18,7 @@ SESSION_LAYOUT_DIRS = ("state", "events", "corrections", "checkpoints", "media")
 EVENT_CORRECTION_PREVIEWED = "correction_previewed"
 EVENT_CORRECTION_SAVED_LEGACY = "correction_saved"
 EVENT_MANUAL_CORRECTION_SAVED = "manual_correction_saved"
+EVENT_TASK_RESOLUTION_DERIVED = "task_resolution_derived"
 
 ACTION_LOOKS_CORRECT = "looks_correct"
 ACTION_PRIVACY_LEAK = "privacy_leak"
@@ -28,7 +29,18 @@ ACTION_NOT_SENSITIVE = "not_sensitive"
 ACTION_COSMETIC_ONLY = "cosmetic_only"
 ACTION_ESCALATE = "uncertain_escalate"
 
-DECISION_ACTIONS = {
+REVIEW_CHOICE_POLICY_V2 = "review_choice_policy.v2"
+REVIEW_DECISION_IDENTITY_V2 = "case_id_task_id.v1"
+
+CANONICAL_REVIEW_ACTIONS = (
+    ACTION_LOOKS_CORRECT,
+    ACTION_PRIVACY_LEAK,
+    ACTION_NOT_SENSITIVE,
+)
+
+DECISION_ACTIONS = set(CANONICAL_REVIEW_ACTIONS)
+
+LEGACY_DECISION_ACTIONS = {
     ACTION_LOOKS_CORRECT,
     ACTION_PRIVACY_LEAK,
     ACTION_PARTIAL_COVERAGE,
@@ -42,27 +54,24 @@ DECISION_ACTIONS = {
 GREEN_ACTIONS = {
     ACTION_LOOKS_CORRECT,
     ACTION_NOT_SENSITIVE,
-    ACTION_COSMETIC_ONLY,
 }
 BLOCKING_ACTIONS = {
     ACTION_PRIVACY_LEAK,
-    ACTION_PARTIAL_COVERAGE,
-    ACTION_FALSE_REDACTION,
-    ACTION_WRONG_TARGET,
-    ACTION_ESCALATE,
 }
 
 
 def allowed_actions_for_task(task: dict[str, Any]) -> tuple[str, ...]:
     raw_actions = task.get("allowed_actions") or []
-    actions: list[str] = []
+    allowed: list[str] = []
     for raw_action in raw_actions:
         action = str(raw_action)
-        if action not in DECISION_ACTIONS:
+        if action in DECISION_ACTIONS:
+            if action not in allowed:
+                allowed.append(action)
+            continue
+        if action not in LEGACY_DECISION_ACTIONS:
             raise ValueError(f"task allows unsupported decision action: {action}")
-        if action not in actions:
-            actions.append(action)
-    return tuple(actions)
+    return tuple(allowed)
 
 
 def invalid_task_action_reason(task: dict[str, Any] | None, action: str) -> str | None:
@@ -90,6 +99,81 @@ def validate_task_action(task: dict[str, Any] | None, action: str) -> None:
     reason = invalid_task_action_reason(task, action)
     if reason is not None:
         raise ValueError(reason)
+
+
+def decision_case_id(decision: dict[str, Any], fallback_case_id: str = "") -> str:
+    return str(decision.get("case_id") or fallback_case_id or "")
+
+
+def decision_task_id(decision: dict[str, Any], fallback_task_id: str = "") -> str:
+    return str(decision.get("task_id") or fallback_task_id or "")
+
+
+def task_decision_key(case_id: str, task_id: str) -> dict[str, str]:
+    return {"case_id": str(case_id), "task_id": str(task_id)}
+
+
+def normalize_decisions_by_case(payload: dict[str, Any]) -> dict[str, dict[str, dict[str, Any]]]:
+    by_case: dict[str, dict[str, dict[str, Any]]] = {}
+    nested = payload.get("decisions_by_case")
+    if isinstance(nested, dict):
+        for raw_case_id, case_decisions in nested.items():
+            case_id = str(raw_case_id)
+            if not isinstance(case_decisions, dict):
+                continue
+            for raw_task_id, decision in case_decisions.items():
+                if not isinstance(decision, dict):
+                    continue
+                task_id = decision_task_id(decision, str(raw_task_id))
+                if not case_id or not task_id:
+                    continue
+                by_case.setdefault(case_id, {})[task_id] = dict(decision) | {
+                    "case_id": case_id,
+                    "task_id": task_id,
+                }
+    flat = payload.get("decisions")
+    if isinstance(flat, dict):
+        for raw_task_id, decision in flat.items():
+            if not isinstance(decision, dict):
+                continue
+            task_id = decision_task_id(decision, str(raw_task_id))
+            case_id = decision_case_id(decision)
+            if not case_id or not task_id:
+                continue
+            by_case.setdefault(case_id, {}).setdefault(
+                task_id,
+                dict(decision) | {"case_id": case_id, "task_id": task_id},
+            )
+    return {
+        case_id: dict(sorted(case_decisions.items()))
+        for case_id, case_decisions in sorted(by_case.items())
+    }
+
+
+def flatten_decisions_by_case(
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, Any]]:
+    flat: dict[str, dict[str, Any]] = {}
+    for case_id, case_decisions in sorted(decisions_by_case.items()):
+        for task_id, decision in sorted(case_decisions.items()):
+            row = dict(decision) | {"case_id": str(case_id), "task_id": str(task_id)}
+            # This is a compatibility view only. When duplicate task ids exist, the
+            # nested case-scoped map remains authoritative.
+            flat.setdefault(str(task_id), row)
+    return flat
+
+
+def count_decisions_by_case(decisions_by_case: dict[str, dict[str, Any]]) -> int:
+    return sum(len(dict(case_decisions)) for case_decisions in decisions_by_case.values())
+
+
+def current_decision_for_task(
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+    *,
+    case_id: str,
+    task_id: str,
+) -> dict[str, Any] | None:
+    return dict(decisions_by_case.get(str(case_id), {}).get(str(task_id)) or {}) or None
 
 
 def invalid_task_decision_reason(
@@ -196,13 +280,19 @@ def create_review_session(
     )
     write_json(
         session_dir / "decisions_current.json",
-        {"decisions": {}, "schema_version": "review_decisions_current.v1"},
+        {
+            "decision_identity": REVIEW_DECISION_IDENTITY_V2,
+            "decisions": {},
+            "decisions_by_case": {},
+            "schema_version": "review_decisions_current.v2",
+        },
     )
     write_json(
         session_dir / "review_summary.json",
         {
             "correction_count": 0,
             "decision_count": 0,
+            "decision_identity": REVIEW_DECISION_IDENTITY_V2,
             "schema_version": "review_summary.v1",
             "session_id": session.session_id,
             "status": "active",
@@ -276,8 +366,12 @@ def append_decision_event(
         raise ValueError(f"unsupported decision action: {action}")
     if task_before_state is not None:
         validate_task_action(task_before_state, action)
-    current = load_current_decisions(session_dir)
-    before = current.get(task_id)
+    current_by_case = load_current_decisions_by_case(session_dir)
+    before = current_decision_for_task(
+        current_by_case,
+        case_id=case_id,
+        task_id=task_id,
+    )
     status = decision_status_for_action(action)
     after = {
         "action": action,
@@ -298,13 +392,56 @@ def append_decision_event(
         note=note,
         application_hashes=application_hashes or {},
     )
-    current[task_id] = after | {"event_id": event["event_id"], "event_hash": event["event_hash"]}
+    current_by_case.setdefault(case_id, {})[task_id] = after | {
+        "event_id": event["event_id"],
+        "event_hash": event["event_hash"],
+    }
     write_json(
         session_dir / "decisions_current.json",
-        {"decisions": current, "schema_version": "review_decisions_current.v1"},
+        {
+            "decision_identity": REVIEW_DECISION_IDENTITY_V2,
+            "decisions": flatten_decisions_by_case(current_by_case),
+            "decisions_by_case": current_by_case,
+            "schema_version": "review_decisions_current.v2",
+        },
     )
     refresh_session_summary(session_dir)
     return event
+
+
+def append_task_resolution_event(
+    session_dir: Path,
+    *,
+    actor: dict[str, Any],
+    case_id: str,
+    task_id: str,
+    resolved_by: str,
+    note: str,
+    task_before_state: dict[str, Any] | None = None,
+    application_hashes: dict[str, str] | None = None,
+    resolution_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not resolved_by:
+        raise ValueError("resolved_by is required")
+    after = {
+        "action": ACTION_LOOKS_CORRECT,
+        "case_id": case_id,
+        "decision_status": "green",
+        "resolved_at_utc": media.utc_timestamp(),
+        "resolved_by": resolved_by,
+        "task_id": task_id,
+    } | dict(resolution_metadata or {})
+    return append_event(
+        session_dir,
+        event_type=EVENT_TASK_RESOLUTION_DERIVED,
+        actor=actor,
+        case_id=case_id,
+        task_id=task_id,
+        before_state=task_before_state,
+        after_state=after,
+        note=note,
+        application_hashes=application_hashes or {},
+    )
 
 
 def append_correction_event(
@@ -475,11 +612,15 @@ def last_event_hash(session_dir: Path) -> str | None:
 
 
 def load_current_decisions(session_dir: Path) -> dict[str, Any]:
+    return flatten_decisions_by_case(load_current_decisions_by_case(session_dir))
+
+
+def load_current_decisions_by_case(session_dir: Path) -> dict[str, dict[str, dict[str, Any]]]:
     path = session_dir / "decisions_current.json"
     if not path.exists():
         return {}
     payload = json.loads(path.read_text(encoding="utf-8"))
-    return dict(payload.get("decisions") or {})
+    return normalize_decisions_by_case(payload)
 
 
 def ensure_session_layout(session_dir: Path) -> None:
@@ -489,7 +630,7 @@ def ensure_session_layout(session_dir: Path) -> None:
 
 def refresh_session_summary(session_dir: Path) -> dict[str, Any]:
     events = load_events(session_dir)
-    decisions = load_current_decisions(session_dir)
+    decisions_by_case = load_current_decisions_by_case(session_dir)
     corrections_path = session_dir / "corrections.jsonl"
     correction_count = 0
     if corrections_path.exists():
@@ -498,7 +639,8 @@ def refresh_session_summary(session_dir: Path) -> dict[str, Any]:
         )
     summary = {
         "correction_count": correction_count,
-        "decision_count": len(decisions),
+        "decision_count": count_decisions_by_case(decisions_by_case),
+        "decision_identity": REVIEW_DECISION_IDENTITY_V2,
         "event_count": len(events),
         "last_event_hash": events[-1]["event_hash"] if events else None,
         "reviewer_attribution": load_reviewer_attribution(session_dir),

@@ -119,10 +119,13 @@ export interface SessionState {
   "chain": Record<string, unknown>;
   "corrections": Record<string, unknown>[];
   "decisions": Record<string, TaskDecision>;
+  "decisions_by_case": Record<string, Record<string, TaskDecision>>;
   "events": AuditEvent[];
   "ok": true;
   "session": Session;
   "summary": Record<string, unknown>;
+  "task_resolutions": Record<string, TaskDecision>;
+  "task_resolutions_by_case": Record<string, Record<string, TaskDecision>>;
   "working_state": WorkingState;
 }
 
@@ -254,6 +257,9 @@ export interface WorkingState {
   "suppressions"?: Record<string, unknown>[];
   "sweep_acknowledgements"?: Record<string, unknown>;
   "task_decisions": Record<string, unknown>;
+  "task_decisions_by_case": Record<string, unknown>;
+  "task_resolutions": Record<string, unknown>;
+  "task_resolutions_by_case": Record<string, unknown>;
   [key: string]: unknown;
 }
 

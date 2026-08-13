@@ -21,12 +21,15 @@ const task: Task = {
   what_to_inspect: 'Inspect',
 };
 
-function decision(action: string): TaskDecision {
+function decision(action: string, caseId = 'day', taskId = 'task_1'): TaskDecision {
   return {
     action,
-    case_id: 'day',
-    decision_status: action === ACTIONS.looksCorrect ? 'green' : 'blocking',
-    task_id: 'task_1',
+    case_id: caseId,
+    decision_status:
+      action === ACTIONS.looksCorrect || action === ACTIONS.notSensitive
+        ? 'green'
+        : 'blocking',
+    task_id: taskId,
   };
 }
 
@@ -56,11 +59,10 @@ const entityB: Entity = {
 describe('review state helpers', () => {
   it('maps persisted decisions to lifecycle buckets', () => {
     expect(taskBucket(task)).toBe('Open');
-    expect(taskBucket(task, decision(ACTIONS.looksCorrect))).toBe('Completed');
+    expect(taskBucket(task, decision(ACTIONS.looksCorrect))).toBe('Correct');
     expect(taskBucket(task, decision(ACTIONS.needsCorrection))).toBe('Needs correction');
-    expect(taskBucket(task, decision(ACTIONS.unsure))).toBe('Unsure / Escalated');
-    expect(taskBucket({ ...task, decision_state: 'resolved' })).toBe('Completed');
-    expect(taskBucket({ ...task, actionable: false, normal_task_class: 'correction_verification' })).toBe('Waiting');
+    expect(taskBucket(task, decision(ACTIONS.notSensitive))).toBe('Not sensitive');
+    expect(taskBucket({ ...task, decision_state: 'resolved' })).toBe('Correct');
   });
 
   it('keeps the normal review buckets to the simplified reviewer lifecycle', () => {
@@ -69,41 +71,95 @@ describe('review state helpers', () => {
       { ...task, review_task_id: 'task_2', decision_state: 'resolved' },
       { ...task, review_task_id: 'task_3' },
     ], {
-      task_1: decision(ACTIONS.needsCorrection),
-      task_3: { ...decision(ACTIONS.unsure), task_id: 'task_3' },
+      day: {
+        task_1: decision(ACTIONS.needsCorrection),
+        task_3: decision(ACTIONS.notSensitive, 'day', 'task_3'),
+      },
     }, 'day');
     const counts = bucketCounts(tasks);
     expect(counts).toEqual({
       Open: 0,
-      Waiting: 0,
       'Needs correction': 1,
-      'Unsure / Escalated': 1,
-      Completed: 1,
+      Correct: 1,
+      'Not sensitive': 1,
     });
     expect(Object.keys(counts)).not.toContain('Resolved');
+    expect(Object.keys(counts)).not.toContain('Unsure / Escalated');
+    expect(Object.keys(counts)).not.toContain('Completed');
   });
 
-  it('renders only source-span restricted task actions from the manifest allowlist', () => {
+  it('keeps duplicate task ids isolated across cases', () => {
+    const duplicateTasks: Task[] = [
+      { ...task, case_id: 'day', review_task_id: 'task_001' },
+      { ...task, case_id: 'night', review_task_id: 'task_001' },
+    ];
+    const decisions = {
+      day: {
+        task_001: decision(ACTIONS.looksCorrect, 'day', 'task_001'),
+      },
+    };
+
+    const dayTasks = tasksForCase(duplicateTasks, decisions, 'day');
+    const nightTasks = tasksForCase(duplicateTasks, decisions, 'night');
+    const refreshedDayTasks = tasksForCase(duplicateTasks, { ...decisions }, 'day');
+
+    expect(dayTasks[0].bucket).toBe('Correct');
+    expect(nightTasks[0].bucket).toBe('Open');
+    expect(refreshedDayTasks[0].bucket).toBe('Correct');
+  });
+
+  it('keeps duplicate not-sensitive decisions and derived resolutions case-scoped', () => {
+    const duplicateTasks: Task[] = [
+      { ...task, case_id: 'day', review_task_id: 'task_001' },
+      { ...task, case_id: 'night', review_task_id: 'task_001' },
+    ];
+
+    expect(
+      tasksForCase(
+        duplicateTasks,
+        { day: { task_001: decision(ACTIONS.notSensitive, 'day', 'task_001') } },
+        'night',
+      )[0].bucket,
+    ).toBe('Open');
+
+    expect(
+      tasksForCase(
+        duplicateTasks,
+        {},
+        'day',
+        { day: { task_001: decision(ACTIONS.looksCorrect, 'day', 'task_001') } },
+      )[0].bucket,
+    ).toBe('Correct');
+    expect(
+      tasksForCase(
+        duplicateTasks,
+        {},
+        'night',
+        { day: { task_001: decision(ACTIONS.looksCorrect, 'day', 'task_001') } },
+      )[0].bucket,
+    ).toBe('Open');
+  });
+
+  it('renders the three canonical task actions from the manifest allowlist', () => {
     const actions = taskDecisionActionOptions({
-      allowed_actions: [ACTIONS.needsCorrection, ACTIONS.unsure],
+      allowed_actions: [ACTIONS.looksCorrect, ACTIONS.needsCorrection, ACTIONS.notSensitive],
     });
 
     expect(actions.map((action) => action.action)).toEqual([
+      ACTIONS.looksCorrect,
       ACTIONS.needsCorrection,
-      ACTIONS.unsure,
+      ACTIONS.notSensitive,
     ]);
-    expect(actions.map((action) => action.label)).toEqual(['Needs correction', 'Unsure']);
-    expect(actions.some((action) => action.action === ACTIONS.looksCorrect)).toBe(false);
-    expect(actions.some((action) => action.action === ACTIONS.notSensitive)).toBe(false);
+    expect(actions.map((action) => action.label)).toEqual(['Correct', 'Needs correction', 'Not sensitive']);
   });
 
-  it('preserves normal entity task actions when the manifest allows Correct', () => {
+  it('ignores legacy actions that are not present in the canonical manifest allowlist', () => {
     const actions = taskDecisionActionOptions({
       allowed_actions: [
         ACTIONS.looksCorrect,
         ACTIONS.needsCorrection,
         ACTIONS.notSensitive,
-        ACTIONS.unsure,
+        'uncertain_escalate',
       ],
     });
 
@@ -111,7 +167,6 @@ describe('review state helpers', () => {
       ACTIONS.looksCorrect,
       ACTIONS.needsCorrection,
       ACTIONS.notSensitive,
-      ACTIONS.unsure,
     ]);
     expect(actions.map((action) => action.label)).toContain('Correct');
   });

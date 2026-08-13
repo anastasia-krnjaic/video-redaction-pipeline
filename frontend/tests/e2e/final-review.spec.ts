@@ -311,7 +311,7 @@ test.describe('Final Review React workspace', () => {
 
     await startReview(page);
     await expect(page.locator('#sessionBanner')).toContainText('Local session');
-    await page.locator(`.task-card[data-task-id="${taskId}"] .decision-correct`).click();
+    await page.locator(`.task-card[data-task-id="${taskId}"]`).getByRole('button', { name: /^Correct$/ }).click();
     await expect(page.locator(`.timeline-marker[data-task-id="${taskId}"]`)).toHaveClass(/marker-correct/);
     await expect.poll(async () => page.locator('video').evaluate((node) => (node as HTMLVideoElement & { __reviewTestId?: string }).__reviewTestId)).toBe('stable');
   });
@@ -326,21 +326,35 @@ test.describe('Final Review React workspace', () => {
       .evaluateAll((cards) => cards.slice(0, 3).map((card) => (card as HTMLElement).dataset.taskId || ''));
     if (initialTaskIds.length < 3 || initialTaskIds.some((id) => !id)) throw new Error('Expected at least three open tasks.');
 
-    await page.locator(`.task-card[data-task-id="${initialTaskIds[0]}"] .decision-correct`).click();
-    await page.locator('.filter-row').getByRole('button', { name: /^Completed/ }).click();
+    await Promise.all([
+      page.waitForResponse((response) => response.url().includes('/api/v1/decisions') && response.request().method() === 'POST'),
+      page.locator(`.task-card[data-task-id="${initialTaskIds[0]}"]`).getByRole('button', { name: /^Correct$/ }).click(),
+    ]);
+    await page.locator('.filter-row').getByRole('button', { name: /^Correct/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[0]}"]`)).toBeVisible();
 
     await page.locator('.filter-row').getByRole('button', { name: /^Open/ }).click();
-    await page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"] .decision-needs-correction`).click();
+    await Promise.all([
+      page.waitForResponse((response) => response.url().includes('/api/v1/decisions') && response.request().method() === 'POST'),
+      page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"] .decision-needs-correction`).click(),
+    ]);
     await expect(page.locator(`.timeline-marker[data-task-id="${initialTaskIds[1]}"]`)).toHaveClass(/marker-needs-correction/);
+    await expect(page.getByRole('button', { name: 'Manual redaction' })).toHaveClass(/active/);
+    await expect(page.getByLabel('Category')).toHaveValue(/face|license_plate|other_sensitive/);
+    await page.getByRole('button', { name: /^Review$/ }).click();
     await page.locator('.filter-row').getByRole('button', { name: /^Needs correction/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"]`)).toBeVisible();
     await page.locator('.filter-row').getByRole('button', { name: /^Open/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"]`)).toHaveCount(0);
 
-    await page.locator(`.task-card[data-task-id="${initialTaskIds[2]}"] .decision-unsure`).click();
-    await expect(page.locator(`.timeline-marker[data-task-id="${initialTaskIds[2]}"]`)).toHaveClass(/marker-unsure/);
-    await page.locator('.filter-row').getByRole('button', { name: /^Unsure \/ Escalated/ }).click();
+    await expect(page.locator('.filter-row')).not.toContainText('Unsure');
+    await expect(page.locator('.filter-row')).not.toContainText('Completed');
+    await Promise.all([
+      page.waitForResponse((response) => response.url().includes('/api/v1/decisions') && response.request().method() === 'POST'),
+      page.locator(`.task-card[data-task-id="${initialTaskIds[2]}"]`).getByRole('button', { name: 'Not sensitive' }).click(),
+    ]);
+    await expect(page.locator(`.timeline-marker[data-task-id="${initialTaskIds[2]}"]`)).toHaveClass(/marker-not-sensitive/);
+    await page.locator('.filter-row').getByRole('button', { name: /^Not sensitive/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[2]}"]`)).toBeVisible();
     await page.locator('.filter-row').getByRole('button', { name: /^Open/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[2]}"]`)).toHaveCount(0);
@@ -648,7 +662,7 @@ test.describe('Final Review React workspace', () => {
     await expect(page.getByRole('button', { name: /Restore Before policy work/ })).toBeVisible();
     const taskId = await page.locator('.task-card').first().getAttribute('data-task-id');
     if (!taskId) throw new Error('No task available for checkpoint test.');
-    await page.locator(`.task-card[data-task-id="${taskId}"] .decision-correct`).click();
+    await page.locator(`.task-card[data-task-id="${taskId}"]`).getByRole('button', { name: /^Correct$/ }).click();
     await page.getByRole('button', { name: /Restore Before policy work/ }).click();
     await expect(page.getByRole('button', { name: /Restore Before policy work/ })).toBeEnabled({ timeout: 120_000 });
     await page.getByRole('button', { name: /Delete checkpoint Before policy work/ }).click();

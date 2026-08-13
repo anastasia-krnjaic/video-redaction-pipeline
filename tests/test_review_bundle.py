@@ -1466,7 +1466,7 @@ def test_role_subtitles_warnings_and_corrected_action_text(tmp_path: Path) -> No
     assert roles["corrected_final"]["subtitle"] == (
         "Same rendering style with reviewed corrections applied"
     )
-    assert "Corrected final result shown above" in task["user_action_guidance"]
+    assert "Correct confirms the corrected final result shown above" in task["user_action_guidance"]
 
 
 def test_duplicate_semantic_corrected_media_is_suppressed(tmp_path: Path) -> None:

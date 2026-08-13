@@ -3,11 +3,13 @@ import type { Entity, ManualPrivacyCategory, MediaVersion, Task, TaskDecision, W
 export type CaseId = string;
 export type TopLevelRoute = CaseId | 'final' | 'audit';
 export type ReviewMode = 'review' | 'edit';
-export type QueueBucket = 'Open' | 'Waiting' | 'Needs correction' | 'Unsure / Escalated' | 'Completed';
+export type QueueBucket = 'Open' | 'Needs correction' | 'Correct' | 'Not sensitive';
 export type EntityFilter = 'all' | 'face' | 'license_plate' | 'needs_review' | 'unresolved';
 export type EntityPolicy = 'redact' | 'keep_visible' | 'not_sensitive' | 'review_required';
 export type CorrectionIntervalMode = 'single_frame' | 'fixed_box' | 'interpolate';
 export type ManualRedactionCategory = ManualPrivacyCategory;
+export type DecisionsByCase = Record<CaseId, Record<string, TaskDecision>>;
+export type TaskResolutionsByCase = Record<CaseId, Record<string, TaskDecision>>;
 
 export const MANUAL_REDACTION_CATEGORIES = ['face', 'license_plate', 'other_sensitive'] as const satisfies readonly ManualRedactionCategory[];
 export const MANUAL_REDACTION_CATEGORY_OPTIONS: readonly {
@@ -94,5 +96,6 @@ export interface MaterializationJob {
 
 export interface TaskWithDecision extends Task {
   decision?: TaskDecision;
+  resolution?: TaskDecision;
   bucket: QueueBucket;
 }

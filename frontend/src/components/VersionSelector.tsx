@@ -7,7 +7,7 @@ interface Props {
   onChange: (role: string) => void;
 }
 
-const preferredOrder = ['original', 'automatic', 'latest_reviewed'];
+const preferredOrder = ['original', 'automatic', 'latest_reviewed', 'final_reviewed'];
 
 export function VersionSelector({ onChange, roles, selectedRole }: Props) {
   const available = roles
@@ -32,5 +32,6 @@ export function roleLabel(role: MediaVersion): string {
   if (role.role === 'original') return 'Original';
   if (role.role === 'automatic') return 'Automatic';
   if (role.role === 'latest_reviewed') return 'Latest reviewed';
+  if (role.role === 'final_reviewed') return 'Final';
   return role.label;
 }

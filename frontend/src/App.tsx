@@ -53,6 +53,7 @@ export function App() {
           attribution={workspaceState.attribution}
           events={workspaceState.events}
           session={workspaceState.session}
+          workingState={workspaceState.workingState}
           workspace={workspaceState.workspace}
           onError={workspaceState.setError}
           onEventsChange={workspaceState.setEvents}
@@ -75,6 +76,7 @@ export function App() {
         events={workspaceState.events}
         manualTasks={manualTasks}
         session={workspaceState.session}
+        taskResolutions={workspaceState.taskResolutions}
         workingState={workspaceState.workingState}
         workspace={workspaceState.workspace}
         onCorrectionsChange={workspaceState.setCorrections}
@@ -83,6 +85,7 @@ export function App() {
         onError={workspaceState.setError}
         onEventsChange={workspaceState.setEvents}
         onManualTasksChange={setManualTasks}
+        onTaskResolutionsChange={workspaceState.setTaskResolutions}
         onWorkingStateChange={workspaceState.setWorkingState}
       />
     );
