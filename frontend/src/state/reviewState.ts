@@ -22,11 +22,9 @@ export interface DecisionActionOption {
 }
 
 export interface TaskGuidance {
-  correctMeaning: string;
-  needsCorrectionMeaning: string;
-  notSensitiveMeaning: string;
-  whatToCheck: string;
-  whyFlagged: string;
+  instruction: string;
+  queryClass: string;
+  title: string;
 }
 
 export function taskBucket(task: Task, decision?: TaskDecision, resolution?: TaskDecision): QueueBucket {
@@ -161,114 +159,196 @@ export function taskColorClass(task: TaskWithDecision): string {
   return 'marker-plate';
 }
 
-export function taskGuidance(task: Pick<Task, 'category' | 'issue_type' | 'normal_task_class' | 'review_task_id' | 'title' | 'what_happened' | 'what_to_inspect'>): TaskGuidance {
-  const family = guidanceFamily(task);
-  const subject = task.category === 'license_plate' ? 'plate' : task.category === 'face' ? 'face or person' : 'sensitive region';
-  const fallbackWhatToCheck = task.what_to_inspect || `Inspect the ${subject} through the marked source-frame interval.`;
-  const shared = {
-    correctMeaning: `Choose Correct when the current privacy result protects the ${subject} throughout the authoritative interval.`,
-    needsCorrectionMeaning: `Choose Needs correction when the ${subject} is visible, under-covered, on the wrong target, or otherwise needs a manual redaction adjustment.`,
-    notSensitiveMeaning: `Choose Not sensitive only when the marked object is not actually sensitive in this context, such as a non-person or non-plate false alarm.`,
-    whatToCheck: fallbackWhatToCheck,
+export function taskGuidance(
+  task: Pick<
+    Task,
+    | 'category'
+    | 'issue_type'
+    | 'normal_task_class'
+    | 'query_presentation_class'
+    | 'review_task_id'
+    | 'short_instruction'
+    | 'short_title'
+    | 'title'
+    | 'what_happened'
+    | 'what_to_inspect'
+  > & Record<string, unknown>,
+): TaskGuidance {
+  const queryClass = validQueryPresentationClass(task.query_presentation_class) || guidanceFamily(task);
+  const template = QUERY_PRESENTATION_TEMPLATES[queryClass] || QUERY_PRESENTATION_TEMPLATES.OTHER_REVIEW;
+  return {
+    instruction: task.short_instruction || template.instruction,
+    queryClass,
+    title: task.short_title || template.title,
   };
-  const mappings: Record<string, TaskGuidance> = {
-    automatic_uncertain: {
-      ...shared,
-      whyFlagged: 'The automatic privacy result did not have enough confidence to close this interval without human review.',
-      whatToCheck: `Check whether the ${subject} is safely hidden for the whole marked interval.`,
-    },
-    corrected_result_check: {
-      ...shared,
-      whyFlagged: 'A saved correction changed the reviewed result and needs confirmation against the authoritative source span.',
-      whatToCheck: 'Inspect the corrected interval and confirm the saved redaction covers the intended area without drifting or hiding the wrong target.',
-    },
-    false_redaction_check: {
-      ...shared,
-      correctMeaning: `Choose Correct when the visible redaction is appropriate for the marked ${subject}.`,
-      needsCorrectionMeaning: 'Choose Needs correction when the redaction covers the wrong place, misses the actual sensitive target, or needs a different manual region.',
-      notSensitiveMeaning: 'Choose Not sensitive when the automatic redaction is unnecessary because the marked object is not sensitive.',
-      whyFlagged: 'This interval may be an unnecessary or wrong-target redaction.',
-      whatToCheck: `Confirm whether the redacted target is really a ${subject} that should be protected.`,
-    },
-    identity_competition: {
-      ...shared,
-      whyFlagged: 'Nearby candidate identities overlap or compete, so the automatic assignment may have followed the wrong target.',
-      whatToCheck: `Follow the marked ${subject} across the interval and verify the redaction stays on the same real-world target.`,
-    },
-    insufficient_observations: {
-      ...shared,
-      whyFlagged: 'The automatic system saw too few reliable observations to close this interval confidently.',
-      whatToCheck: `Step through the interval and check whether the ${subject} remains protected in frames with weak or missing observations.`,
-    },
-    insufficient_strong_hits: {
-      ...shared,
-      whyFlagged: 'The track had observations, but too few were strong enough for automatic closure.',
-      whatToCheck: `Check the clearest and weakest frames in the interval to confirm the ${subject} is protected.`,
-    },
-    interpolation_risk: {
-      ...shared,
-      whyFlagged: 'The redaction depends on interpolation, scale changes, or motion that can drift between observed frames.',
-      whatToCheck: `Scrub through the interval and verify the redaction shape follows the ${subject} without shrinking, drifting, or lagging.`,
-    },
-    long_detection_gap: {
-      ...shared,
-      whyFlagged: 'The track spans a long gap without direct detections.',
-      whatToCheck: `Inspect the gap and both recovery ends to confirm the ${subject} is still covered when automatic detections are absent.`,
-    },
-    one_sided_recovery: {
-      ...shared,
-      whyFlagged: 'The track recovered from only one side of a gap, which can indicate that the target changed or drifted.',
-      whatToCheck: `Check both sides of the recovery and confirm the redaction follows the same ${subject}.`,
-    },
-    optional_spot_check: {
-      ...shared,
-      whyFlagged: 'This is a sampled spot check used to keep the reviewed result honest.',
-      whatToCheck: `Inspect the marked sample and confirm the ${subject} is handled correctly.`,
-    },
-    privacy_coverage_gap: {
-      ...shared,
-      whyFlagged: 'Source-backed privacy geometry indicates a possible coverage gap in the reviewed result.',
-      whatToCheck: `Inspect the marked frames and verify the expected ${subject} region is actually hidden.`,
-    },
-    source_span_review: {
-      ...shared,
-      whyFlagged: 'This task is tied to an authoritative source-frame span that needs a case-scoped human decision.',
-      whatToCheck: `Review exactly the marked source span for this ${subject}; do not apply the decision to other cases or unrelated intervals.`,
-    },
-    track_requires_review: {
-      ...shared,
-      whyFlagged: 'The object track still requires human review before the case can be finalized.',
-      whatToCheck: `Inspect the marked ${subject} track and confirm whether its current privacy treatment is safe.`,
-    },
-  };
-  return mappings[family] || mappings.automatic_uncertain;
 }
 
-function guidanceFamily(task: Pick<Task, 'issue_type' | 'normal_task_class' | 'review_task_id' | 'title' | 'what_happened' | 'what_to_inspect'>): string {
-  const text = [
-    task.issue_type,
+export const QUERY_PRESENTATION_TEMPLATES: Record<string, { instruction: string; title: string }> = {
+  FACE_COVERAGE_GAP: {
+    instruction: 'Check that the face is fully covered in this interval.',
+    title: 'Face may be visible',
+  },
+  PLATE_COVERAGE_GAP: {
+    instruction: 'Check that the plate is fully covered in this interval.',
+    title: 'Plate may be visible',
+  },
+  TRACKING_UNCERTAIN: {
+    instruction: 'Check that the redaction stays on the intended target.',
+    title: 'Tracking needs review',
+  },
+  IDENTITY_UNCERTAIN: {
+    instruction: 'Check that the redaction follows the intended person or plate.',
+    title: 'Wrong target possible',
+  },
+  INTERPOLATION_OR_SCALE_RISK: {
+    instruction: 'Check that the redaction follows the target through this interval.',
+    title: 'Redaction may drift',
+  },
+  POSSIBLE_FALSE_POSITIVE: {
+    instruction: 'Check whether the marked content actually needs redaction.',
+    title: 'Possible false positive',
+  },
+  VERIFY_SAVED_CORRECTION: {
+    instruction: 'Check that the saved correction covers the intended target.',
+    title: 'Verify saved correction',
+  },
+  OPTIONAL_SPOT_CHECK: {
+    instruction: 'Confirm the current redaction is acceptable.',
+    title: 'Quick spot check',
+  },
+  OTHER_REVIEW: {
+    instruction: 'Compare Original and the current result for this interval.',
+    title: 'Review this interval',
+  },
+};
+
+function validQueryPresentationClass(value?: string): string | undefined {
+  return value && QUERY_PRESENTATION_TEMPLATES[value] ? value : undefined;
+}
+
+export function guidanceFamily(task: Pick<Task, 'category' | 'issue_type' | 'normal_task_class'> & Record<string, unknown>): string {
+  const semanticText = taskSemanticValues(task).join(' ').toLowerCase();
+  const reasonCodes = taskReasonCodes(task);
+  if (isCorrectionVerificationTask(task, semanticText)) return 'VERIFY_SAVED_CORRECTION';
+  if (
+    includesAny(semanticText, 'optional_spot_check', 'spot_check', 'spot check') ||
+    reasonIncludesAny(reasonCodes, 'spot_check', 'spot check', 'audit_sample')
+  ) {
+    return 'OPTIONAL_SPOT_CHECK';
+  }
+  if (
+    includesAny(semanticText, 'false_positive', 'false_redaction', 'possible_false_redaction') ||
+    reasonIncludesAny(reasonCodes, 'false_positive', 'false_redaction', 'possible_false')
+  ) {
+    return 'POSSIBLE_FALSE_POSITIVE';
+  }
+  if (includesAny(semanticText, 'plate_coverage_gap')) return 'PLATE_COVERAGE_GAP';
+  if (includesAny(semanticText, 'face_coverage_gap')) return 'FACE_COVERAGE_GAP';
+  if (
+    includesAny(semanticText, 'competition', 'duplicate', 'identity') ||
+    reasonIncludesAny(reasonCodes, 'competition', 'duplicate', 'identity')
+  ) {
+    return 'IDENTITY_UNCERTAIN';
+  }
+  if (
+    includesAny(semanticText, 'drift', 'interpolation', 'long_detection_gap', 'one-sided', 'one_sided', 'scale change', 'scale-change') ||
+    reasonIncludesAny(
+      reasonCodes,
+      'anchor_center_motion',
+      'anchor_scale_change',
+      'drift',
+      'gap_exceeds',
+      'interpolation',
+      'long_detection_gap',
+      'one_sided_recovery',
+      'scale',
+      'scene_cut_inside_gap',
+    )
+  ) {
+    return 'INTERPOLATION_OR_SCALE_RISK';
+  }
+  if (
+    includesAny(semanticText, 'plate_track_review_required', 'requires_review', 'track_review') ||
+    reasonIncludesAny(
+      reasonCodes,
+      'insufficient_detector_observations',
+      'insufficient_observations',
+      'insufficient_observed',
+      'insufficient_strong',
+      'internal_gap_penalty',
+      'low_confidence',
+      'low_mean_confidence',
+      'low_observation_density',
+      'observed_hits',
+      'quality_status',
+      'weak_only',
+    )
+  ) {
+    return 'TRACKING_UNCERTAIN';
+  }
+  if (
+    includesAny(semanticText, 'coverage gap', 'coverage_gap', 'privacy gap', 'privacy_gap') ||
+    reasonIncludesAny(reasonCodes, 'missing_box', 'render_validation_failure', 'unresolved_privacy')
+  ) {
+    return task.category === 'license_plate' ? 'PLATE_COVERAGE_GAP' : 'FACE_COVERAGE_GAP';
+  }
+  return 'OTHER_REVIEW';
+}
+
+function taskSemanticValues(task: Record<string, unknown>): string[] {
+  const sourceTask = isRecord(task.source_task) ? task.source_task : {};
+  return [
     task.normal_task_class,
-    task.review_task_id,
-    task.title,
-    task.what_happened,
-    task.what_to_inspect,
-  ]
-    .filter(Boolean)
-    .join(' ')
-    .toLowerCase();
-  if (text.includes('correction') || text.includes('corrected')) return 'corrected_result_check';
-  if (text.includes('false') || text.includes('wrong target') || text.includes('unnecessary')) return 'false_redaction_check';
-  if (text.includes('source_span') || text.includes('source span') || text.includes('authoritative')) return 'source_span_review';
-  if (text.includes('coverage_gap') || text.includes('coverage gap') || text.includes('privacy_gap') || text.includes('privacy gap')) return 'privacy_coverage_gap';
-  if (text.includes('insufficient_strong') || text.includes('strong hits')) return 'insufficient_strong_hits';
-  if (text.includes('insufficient_observed') || text.includes('insufficient observation') || text.includes('observed hits')) return 'insufficient_observations';
-  if (text.includes('long') && text.includes('gap')) return 'long_detection_gap';
-  if (text.includes('one-sided') || text.includes('one_sided')) return 'one_sided_recovery';
-  if (text.includes('identity') || text.includes('competition') || text.includes('duplicate')) return 'identity_competition';
-  if (text.includes('interpolation') || text.includes('scale-change') || text.includes('scale change') || text.includes('drift')) return 'interpolation_risk';
-  if (text.includes('optional') || text.includes('spot_check') || text.includes('spot check')) return 'optional_spot_check';
-  if (text.includes('track_review') || text.includes('requires review') || text.includes('needs review')) return 'track_requires_review';
-  return 'automatic_uncertain';
+    task.issue_type,
+    task.task_type,
+    sourceTask.category,
+    sourceTask.task_type,
+  ].filter((value): value is string => typeof value === 'string' && Boolean(value));
+}
+
+function taskReasonCodes(task: Record<string, unknown>): string[] {
+  const sourceTask = isRecord(task.source_task) ? sourceTaskRecord(task.source_task) : {};
+  const codes = new Set<string>();
+  for (const payload of [task, sourceTask]) {
+    for (const key of ['raw_reason_codes', 'reason_codes', 'reasons']) {
+      const values = payload[key];
+      if (Array.isArray(values)) {
+        values.forEach((value) => {
+          if (value) codes.add(String(value).toLowerCase());
+        });
+      }
+    }
+  }
+  return [...codes];
+}
+
+function sourceTaskRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function isCorrectionVerificationTask(task: Record<string, unknown>, semanticText: string): boolean {
+  if (includesAny(semanticText, 'corrected_result_check', 'corrected_result_verification', 'correction_verification', 'saved_correction_verification')) {
+    return true;
+  }
+  const hasCorrectionReference = [
+    task.accepted_correction_revision_id,
+    task.correction_id,
+    task.correction_revision_id,
+    task.revision_id,
+  ].some(Boolean);
+  return hasCorrectionReference && includesAny(semanticText, 'corrected', 'correction');
+}
+
+function includesAny(text: string, ...needles: string[]): boolean {
+  return needles.some((needle) => text.includes(needle));
+}
+
+function reasonIncludesAny(reasonCodes: string[], ...needles: string[]): boolean {
+  return reasonCodes.some((code) => needles.some((needle) => code.includes(needle)));
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
 }
 
 export function effectiveEntities(

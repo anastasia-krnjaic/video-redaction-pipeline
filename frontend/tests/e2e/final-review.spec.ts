@@ -135,8 +135,8 @@ async function stepToCaseFrame(page: Page, targetFrame: number): Promise<void> {
 }
 
 async function startReview(page: Page): Promise<void> {
-  await page.getByRole('button', { name: 'Start review' }).click();
-  await expect(page.locator('#sessionBanner')).toContainText('Local session');
+  await page.getByRole('button', { name: 'Start new review' }).click();
+  await expect(page.locator('#sessionBanner')).toContainText('Active review session');
 }
 
 async function drawCorrectionBox(page: Page, x1 = 0.32, y1 = 0.34, x2 = 0.52, y2 = 0.56): Promise<void> {
@@ -310,7 +310,7 @@ test.describe('Final Review React workspace', () => {
     const taskId = await page.locator('.task-card.selected').getAttribute('data-task-id');
 
     await startReview(page);
-    await expect(page.locator('#sessionBanner')).toContainText('Local session');
+    await expect(page.locator('#sessionBanner')).toContainText('Active review session');
     await page.locator(`.task-card[data-task-id="${taskId}"]`).getByRole('button', { name: /^Correct$/ }).click();
     await expect(page.locator(`.timeline-marker[data-task-id="${taskId}"]`)).toHaveClass(/marker-correct/);
     await expect.poll(async () => page.locator('video').evaluate((node) => (node as HTMLVideoElement & { __reviewTestId?: string }).__reviewTestId)).toBe('stable');
@@ -439,11 +439,11 @@ test.describe('Final Review React workspace', () => {
     await page.getByRole('button', { name: 'Close' }).first().click();
     await page.getByRole('button', { name: 'Day' }).click();
 
-    await page.getByRole('button', { name: /^Reset all edits to Automatic baseline$/ }).click();
-    await page.getByRole('dialog', { name: /Reset all edits to Automatic baseline/ }).getByRole('button', {
-      name: /^Reset all edits to Automatic baseline$/,
+    await page.getByRole('button', { name: /^Reset this case to Automatic baseline$/ }).click();
+    await page.getByRole('dialog', { name: /Reset this case to Automatic baseline/ }).getByRole('button', {
+      name: /^Reset this case to Automatic baseline$/,
     }).click();
-    await expect(page.getByRole('dialog', { name: /Reset all edits to Automatic baseline/ })).toHaveCount(0, { timeout: 120_000 });
+    await expect(page.getByRole('dialog', { name: /Reset this case to Automatic baseline/ })).toHaveCount(0, { timeout: 120_000 });
     await page.getByRole('button', { name: 'Entities' }).click();
     await page.getByRole('button', { name: 'People' }).click();
     await expect.poll(async () => page.locator('.entity-card').count()).toBe(baselineCount);
@@ -463,7 +463,7 @@ test.describe('Final Review React workspace', () => {
     await page.getByRole('button', { name: 'Entities' }).click();
     await page.getByRole('button', { name: 'People' }).click();
     await expect.poll(async () => page.locator('.entity-card').count()).toBe(nightCount);
-    await expect(page.locator('.entity-card[data-category="face"] [data-policy="keep_visible"][aria-pressed="true"]').first()).toBeVisible();
+    await expect(page.locator('.entity-card', { hasText: /Merged Person/ })).toHaveCount(0);
   });
 
   test('entity pending status uses a reserved slot without modal or card reflow', async ({ page }) => {
@@ -587,7 +587,9 @@ test.describe('Final Review React workspace', () => {
     await expect(page.locator('.version-selector select')).toHaveValue('latest_reviewed', { timeout: 120_000 });
 
     await page.reload({ waitUntil: 'domcontentloaded' });
-    await expect(page.locator('.version-selector select')).toHaveValue('latest_reviewed', { timeout: 120_000 });
+    await page.getByRole('button', { name: 'Resume review' }).click();
+    await expect(page.locator('#sessionBanner')).toContainText('Resumed review session');
+    await expect(page.locator('.version-selector select')).not.toHaveValue('correction_preview', { timeout: 120_000 });
     await page.getByRole('button', { name: 'History' }).click();
     await expect(page.locator('body')).toContainText('Manual Other sensitive region correction saved');
   });

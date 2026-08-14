@@ -42,7 +42,7 @@ describe('correction editor validation', () => {
     expect(patch).toMatchObject({
       end: 117,
       end_source_frame: 117,
-      interpolation_method: 'linear',
+      interpolation_method: 'none',
       keyframes: [],
       mode: 'single_frame',
       start: 117,

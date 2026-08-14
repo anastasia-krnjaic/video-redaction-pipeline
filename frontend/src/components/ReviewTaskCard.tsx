@@ -24,14 +24,8 @@ export function ReviewTaskCard({ manifest, onDecision, onFixNow, onSelect, pendi
       data-task-id={task.review_task_id}
       onClick={() => onSelect(task)}
     >
-      <div className="task-title">{task.title}</div>
-      <div className="task-guidance">
-        <GuidanceRow label="Why this was flagged" value={guidance.whyFlagged} />
-        <GuidanceRow label="What to check" value={guidance.whatToCheck} />
-        <GuidanceRow label="Correct means" value={guidance.correctMeaning} />
-        <GuidanceRow label="Needs correction when" value={guidance.needsCorrectionMeaning} />
-        <GuidanceRow label="Not sensitive when" value={guidance.notSensitiveMeaning} />
-      </div>
+      <div className="task-title">{guidance.title}</div>
+      <p className="task-instruction">{guidance.instruction}</p>
       <div className="task-meta">
         {categoryLabel(task.category)} · source {sourceSpan(task)} · {taskTimestamp(manifest, task)}
       </div>
@@ -69,15 +63,6 @@ export function ReviewTaskCard({ manifest, onDecision, onFixNow, onSelect, pendi
   );
 }
 
-function GuidanceRow({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="guidance-row">
-      <strong>{label}</strong>
-      <span>{value}</span>
-    </div>
-  );
-}
-
 function badgeClass(task: TaskWithDecision): string {
   if (task.bucket === 'Open') return 'open';
   if (task.bucket === 'Correct') return 'done';
@@ -92,8 +77,12 @@ function technicalDetails(task: TaskWithDecision): Record<string, unknown> {
     decision_state: task.decision_state,
     issue_type: task.issue_type,
     normal_task_class: task.normal_task_class,
+    query_presentation_class: task.query_presentation_class,
     raw_signal_ids: task.raw_signal_ids || [],
     review_task_id: task.review_task_id,
+    title: task.title,
+    what_happened: task.what_happened,
+    what_to_inspect: task.what_to_inspect,
   };
 }
 

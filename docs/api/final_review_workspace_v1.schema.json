@@ -1207,6 +1207,19 @@
             "null"
           ]
         },
+        "query_presentation_class": {
+          "enum": [
+            "FACE_COVERAGE_GAP",
+            "PLATE_COVERAGE_GAP",
+            "TRACKING_UNCERTAIN",
+            "IDENTITY_UNCERTAIN",
+            "INTERPOLATION_OR_SCALE_RISK",
+            "POSSIBLE_FALSE_POSITIVE",
+            "VERIFY_SAVED_CORRECTION",
+            "OPTIONAL_SPOT_CHECK",
+            "OTHER_REVIEW"
+          ]
+        },
         "raw_signal_ids": {
           "items": {
             "type": "string"
@@ -1217,6 +1230,12 @@
           "type": "string"
         },
         "severity": {
+          "type": "string"
+        },
+        "short_instruction": {
+          "type": "string"
+        },
+        "short_title": {
           "type": "string"
         },
         "source_frame_end": {

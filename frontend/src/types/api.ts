@@ -75,9 +75,12 @@ export interface Task {
   "normal_task_class"?: string;
   "optional"?: boolean;
   "publication_status"?: string | null;
+  "query_presentation_class"?: "FACE_COVERAGE_GAP" | "PLATE_COVERAGE_GAP" | "TRACKING_UNCERTAIN" | "IDENTITY_UNCERTAIN" | "INTERPOLATION_OR_SCALE_RISK" | "POSSIBLE_FALSE_POSITIVE" | "VERIFY_SAVED_CORRECTION" | "OPTIONAL_SPOT_CHECK" | "OTHER_REVIEW";
   "raw_signal_ids"?: string[];
   "review_task_id": string;
   "severity"?: string;
+  "short_instruction"?: string;
+  "short_title"?: string;
   "source_frame_end": number;
   "source_frame_start": number;
   "target_effective_region_count"?: number | null;

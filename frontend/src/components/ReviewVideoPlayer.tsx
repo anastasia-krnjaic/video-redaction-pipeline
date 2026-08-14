@@ -50,33 +50,6 @@ export function ReviewVideoPlayer({
         <div className="source-range">
           Source {manifest.source_frame_start}-{manifest.source_frame_end}
         </div>
-        <div className="download-menu" aria-label={`${manifest.display_name} downloads`}>
-          {downloadOptions.map((option) => (
-            <div key={option.role} className={`download-menu-row ${option.available ? 'available' : 'unavailable'}`}>
-              <span>
-                <strong>{option.label}</strong>
-                <small>{option.status}</small>
-              </span>
-              {option.available ? (
-                <a className="download-link" href={option.url}>
-                  <Download size={15} aria-hidden="true" /> Download
-                </a>
-              ) : (
-                <span className="download-unavailable">Not available yet</span>
-              )}
-            </div>
-          ))}
-          <a className="download-link package-link" href={deliveryPackageUrl(manifest.case_id, sessionId)}>
-            <Download size={15} aria-hidden="true" /> Current review package manifest
-          </a>
-          {finalDownloadAvailable ? (
-            <a className="download-link package-link" href={deliveryPackageZipUrl(manifest.case_id, sessionId)}>
-              <Download size={15} aria-hidden="true" /> Download final case package (.zip)
-            </a>
-          ) : (
-            <span className="download-package-status unavailable">Final case package not available yet</span>
-          )}
-        </div>
       </div>
       <div className="player-wrapper" ref={controller.wrapperRef}>
         <div className="video-stage">
@@ -110,6 +83,31 @@ export function ReviewVideoPlayer({
           tasks={tasks}
           onSelectTask={onSelectTask}
         />
+      </div>
+      <div className="download-row" aria-label={`${manifest.display_name} downloads`}>
+        {downloadOptions.map((option) => (
+          option.available ? (
+            <a key={option.role} className="download-pill available" href={option.url} title={option.status}>
+              <Download size={14} aria-hidden="true" /> {option.label}
+            </a>
+          ) : (
+            <span key={option.role} className="download-pill unavailable" aria-disabled="true" title={option.status}>
+              {option.label}
+            </span>
+          )
+        ))}
+      </div>
+      <div className="download-secondary-row">
+        <a className="download-link package-link" href={deliveryPackageUrl(manifest.case_id, sessionId)}>
+          <Download size={14} aria-hidden="true" /> Review package manifest
+        </a>
+        {finalDownloadAvailable ? (
+          <a className="download-link package-link" href={deliveryPackageZipUrl(manifest.case_id, sessionId)}>
+            <Download size={14} aria-hidden="true" /> Final package .zip
+          </a>
+        ) : (
+          <span className="download-package-status unavailable">Final package not available</span>
+        )}
       </div>
     </section>
   );

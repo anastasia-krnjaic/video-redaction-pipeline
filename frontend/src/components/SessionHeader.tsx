@@ -5,7 +5,10 @@ interface Props {
   attribution: Attribution;
   error?: string;
   session: Session | null;
+  sessionLoadKind?: 'new' | 'resumed';
+  resumableSessionId?: string;
   onStartSession: () => void;
+  onResumeSession: () => void;
   onOpenAttribution: () => void;
   onExport: () => void;
   busy?: boolean;
@@ -17,15 +20,21 @@ export function SessionHeader({
   error,
   onExport,
   onOpenAttribution,
+  onResumeSession,
   onStartSession,
+  resumableSessionId,
   session,
+  sessionLoadKind,
 }: Props) {
   const bannerClass = error ? 'session-banner error' : session ? 'session-banner ready' : 'session-banner';
+  const sessionPrefix = sessionLoadKind === 'resumed' ? 'Resumed review session' : 'Active review session';
   const text = error
     ? error
     : session
-      ? `Local session ${session.session_id}${attribution?.display_name ? ` · Reviewer ${attribution.display_name}` : ' · anonymous until export/finalization'}`
-      : 'No local review session yet. Start review to enable decisions and corrections.';
+      ? `${sessionPrefix} ${session.session_id}${attribution?.display_name ? ` · Reviewer ${attribution.display_name}` : ' · anonymous until export/finalization'}`
+      : resumableSessionId
+        ? `No session loaded. Resume ${resumableSessionId} explicitly or start a new clean review session.`
+        : 'No local review session loaded. Start a new review session to enable decisions and corrections.';
 
   return (
     <>
@@ -35,8 +44,13 @@ export function SessionHeader({
           <p>Source-frame accurate redaction review.</p>
         </div>
         <div className="header-actions">
-          <button type="button" className="primary" onClick={onStartSession} disabled={Boolean(session) || busy}>
-            Start review
+          {resumableSessionId && !session ? (
+            <button type="button" onClick={onResumeSession} disabled={busy}>
+              Resume review
+            </button>
+          ) : null}
+          <button type="button" className="primary" onClick={onStartSession} disabled={busy}>
+            {session ? 'New review session' : 'Start new review'}
           </button>
           <button type="button" onClick={onOpenAttribution} title="Reviewer attribution">
             <UserRound size={16} aria-hidden="true" />

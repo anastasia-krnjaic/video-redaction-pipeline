@@ -36,7 +36,7 @@ and finalization gates.
 
 The Day and Night cases each show Original, Automatic, and Latest reviewed. When there are no active reviewer changes, Latest reviewed resolves to the Automatic baseline. The Day case uses a canonical interval from `artifacts/day_primary.mp4`; its Automatic result is rendered from lineage-proven frozen face and plate evidence rather than concatenated old clips.
 
-Click **Start review** to create a local anonymous session. Reviewer name is
+Click **Start new review** to create a local anonymous session. Reviewer name is
 requested only when exporting or finalizing. Use the app's fullscreen controls,
 not raw MP4 fullscreen, so frame numbers and source-frame mapping remain
 visible.

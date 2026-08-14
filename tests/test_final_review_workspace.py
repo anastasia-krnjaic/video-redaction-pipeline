@@ -79,6 +79,108 @@ def get_json(url: str) -> dict[str, object]:
         return json.loads(response.read().decode("utf-8"))
 
 
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [
+        (
+            {
+                "allowed_actions": ["looks_correct", "privacy_leak", "not_sensitive"],
+                "category": "license_plate",
+                "issue_type": "plate_track_review_required",
+                "normal_task_class": "plate_track_review_required",
+                "title": "Check a low-confidence plate track",
+                "what_to_inspect": (
+                    "Check the plate-like target and choose Needs correction if any "
+                    "sensitive plate remains exposed."
+                ),
+                "source_task": {"raw_reason_codes": ["insufficient_observations"]},
+            },
+            "TRACKING_UNCERTAIN",
+        ),
+        (
+            {
+                "category": "license_plate",
+                "issue_type": "plate_coverage_gap",
+                "normal_task_class": "plate_coverage_gap",
+                "source_task": {"raw_reason_codes": ["gap_exceeds_safe_interpolation_limit"]},
+            },
+            "PLATE_COVERAGE_GAP",
+        ),
+        (
+            {
+                "category": "face",
+                "issue_type": "possible_privacy_gap",
+                "normal_task_class": "possible_privacy_gap",
+                "source_task": {"raw_reason_codes": ["identity_competition"]},
+            },
+            "IDENTITY_UNCERTAIN",
+        ),
+        (
+            {
+                "category": "face",
+                "issue_type": "possible_privacy_gap",
+                "normal_task_class": "possible_privacy_gap",
+                "source_task": {"raw_reason_codes": ["long_detection_gap"]},
+            },
+            "INTERPOLATION_OR_SCALE_RISK",
+        ),
+        (
+            {
+                "category": "license_plate",
+                "issue_type": "possible_false_redaction",
+                "normal_task_class": "possible_false_redaction",
+            },
+            "POSSIBLE_FALSE_POSITIVE",
+        ),
+        (
+            {
+                "category": "face",
+                "issue_type": "optional_spot_check",
+                "normal_task_class": "optional_spot_check",
+            },
+            "OPTIONAL_SPOT_CHECK",
+        ),
+        (
+            {
+                "category": "face",
+                "correction_id": "corr_123",
+                "issue_type": "correction_verification",
+                "normal_task_class": "correction_verification",
+            },
+            "VERIFY_SAVED_CORRECTION",
+        ),
+        (
+            {
+                "category": "face",
+                "issue_type": "legacy",
+                "normal_task_class": "legacy",
+                "query_presentation_class": "FACE_COVERAGE_GAP",
+            },
+            "FACE_COVERAGE_GAP",
+        ),
+    ],
+)
+def test_query_presentation_class_uses_authoritative_semantics(
+    task: dict[str, object], expected: str
+) -> None:
+    assert review_api_contract.query_presentation_class(task) == expected
+
+
+def test_query_presentation_class_does_not_use_needs_correction_copy() -> None:
+    task = {
+        "allowed_actions": ["privacy_leak"],
+        "category": "license_plate",
+        "issue_type": "plate_track_review_required",
+        "normal_task_class": "plate_track_review_required",
+        "title": "Check a low-confidence plate track",
+        "what_happened": "A reviewer can choose Needs correction from the buttons.",
+        "what_to_inspect": "Choose Needs correction if any plate remains exposed.",
+    }
+
+    assert review_api_contract.query_presentation_class(task) == "TRACKING_UNCERTAIN"
+    assert review_api_contract.query_presentation_class(task) != "VERIFY_SAVED_CORRECTION"
+
+
 def get_json_error(url: str) -> tuple[int, dict[str, object]]:
     with pytest.raises(urllib.error.HTTPError) as exc_info:
         urllib.request.urlopen(url, timeout=5)
@@ -3323,7 +3425,8 @@ def test_workspace_markup_uses_single_player_layout_and_disables_picture_in_pict
     css = review_workspace.workspace_css()
     js = review_workspace.workspace_js()
 
-    assert "Start review" in html
+    assert "Start new review" in html
+    assert "No local review session loaded" in html
     assert "reviewerId" not in html
     assert "reviewerRole" not in html
     assert "disablepictureinpicture" in js.lower()

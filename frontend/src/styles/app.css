@@ -190,9 +190,9 @@ main {
 .workspace-layout,
 .final-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(340px, 400px);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 14px;
-  align-items: stretch;
+  align-items: start;
   min-height: 560px;
 }
 
@@ -208,7 +208,7 @@ main {
 
 .side-panel {
   min-height: 0;
-  max-height: calc(100vh - 178px);
+  max-height: calc(100vh - 190px);
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -218,7 +218,7 @@ main {
 
 .version-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
   margin-bottom: var(--space-2);
@@ -243,43 +243,41 @@ main {
   white-space: nowrap;
 }
 
-.download-menu {
-  display: grid;
-  min-width: 320px;
-  max-width: 460px;
-  gap: 5px;
-}
-
-.download-menu-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: var(--space-2);
+.download-row,
+.download-secondary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
   align-items: center;
+  margin-top: var(--space-2);
+}
+
+.download-secondary-row {
+  font-size: 13px;
+}
+
+.download-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 30px;
   border: 1px solid var(--border);
-  border-radius: 7px;
-  background: var(--surface);
-  padding: 6px 8px;
+  border-radius: 999px;
+  padding: 5px 9px;
+  text-decoration: none;
+  white-space: nowrap;
 }
 
-.download-menu-row strong,
-.download-menu-row small {
-  display: block;
+.download-pill.available {
+  background: #eef6ff;
+  color: #1d4ed8;
 }
 
-.download-menu-row small {
-  color: var(--muted);
-}
-
-.download-menu-row.unavailable {
+.download-pill.unavailable,
+.download-package-status {
   background: var(--surface-muted);
   color: var(--muted);
-}
-
-.download-unavailable,
-.download-package-status {
-  color: var(--muted);
-  font-size: 13px;
-  white-space: nowrap;
 }
 
 .package-link {
@@ -639,27 +637,23 @@ main {
   font-weight: 700;
 }
 
-.task-guidance {
-  display: grid;
-  gap: 5px;
-  margin: 8px 0;
-}
-
-.guidance-row {
-  display: grid;
-  gap: 2px;
-}
-
-.guidance-row strong {
-  color: var(--text);
-  font-size: 12px;
-  text-transform: uppercase;
-}
-
-.guidance-row span {
+.task-instruction {
   color: #334155;
   font-size: 13px;
   line-height: 1.35;
+  margin-bottom: 5px;
+}
+
+.action-legend {
+  display: grid;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface-muted);
+  padding: 8px;
+  color: #334155;
+  font-size: 12px;
+  line-height: 1.3;
 }
 
 .task-state-row,
@@ -737,6 +731,35 @@ main {
 .badge.warn {
   background: #fff7ed;
   color: #9a3412;
+}
+
+.materialization-blockers {
+  max-width: min(920px, 100%);
+  margin-top: 8px;
+  border: 1px solid #fecaca;
+  border-radius: var(--radius);
+  background: #fff7f7;
+  color: #7f1d1d;
+  padding: 8px 10px;
+}
+
+.materialization-blockers summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  cursor: pointer;
+}
+
+.materialization-blockers summary span {
+  color: #991b1b;
+  font-size: 12px;
+}
+
+.materialization-blockers pre {
+  max-height: 220px;
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 .entity-card {
@@ -1216,11 +1239,6 @@ pre {
 
   .next-step-panel {
     grid-template-columns: 1fr;
-  }
-
-  .download-menu {
-    min-width: 0;
-    width: 100%;
   }
 
   .side-panel {

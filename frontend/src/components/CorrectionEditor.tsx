@@ -550,7 +550,7 @@ export function applyCorrectionDraftMode(
     patch.end = currentSourceFrame;
     patch.keyframes = draft.keyframes.filter((keyframe) => keyframe.source_frame === currentSourceFrame);
     patch.holdSameBox = false;
-    patch.interpolation_method = 'linear';
+    patch.interpolation_method = 'none';
   }
   if (mode === 'fixed_box') {
     patch.holdSameBox = true;

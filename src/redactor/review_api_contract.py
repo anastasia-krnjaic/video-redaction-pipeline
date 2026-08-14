@@ -9,6 +9,57 @@ from redactor.privacy_records import MANUAL_REDACTION_CATEGORIES, stable_hash
 API_SCHEMA_VERSION = "final_review_workspace_api.v1"
 API_PREFIX = "/api/v1"
 
+QUERY_PRESENTATION_CLASSES = (
+    "FACE_COVERAGE_GAP",
+    "PLATE_COVERAGE_GAP",
+    "TRACKING_UNCERTAIN",
+    "IDENTITY_UNCERTAIN",
+    "INTERPOLATION_OR_SCALE_RISK",
+    "POSSIBLE_FALSE_POSITIVE",
+    "VERIFY_SAVED_CORRECTION",
+    "OPTIONAL_SPOT_CHECK",
+    "OTHER_REVIEW",
+)
+
+QUERY_PRESENTATION_TEMPLATES = {
+    "FACE_COVERAGE_GAP": (
+        "Face may be visible",
+        "Check that the face is fully covered in this interval.",
+    ),
+    "PLATE_COVERAGE_GAP": (
+        "Plate may be visible",
+        "Check that the plate is fully covered in this interval.",
+    ),
+    "TRACKING_UNCERTAIN": (
+        "Tracking needs review",
+        "Check that the redaction stays on the intended target.",
+    ),
+    "IDENTITY_UNCERTAIN": (
+        "Wrong target possible",
+        "Check that the redaction follows the intended person or plate.",
+    ),
+    "INTERPOLATION_OR_SCALE_RISK": (
+        "Redaction may drift",
+        "Check that the redaction follows the target through this interval.",
+    ),
+    "POSSIBLE_FALSE_POSITIVE": (
+        "Possible false positive",
+        "Check whether the marked content actually needs redaction.",
+    ),
+    "VERIFY_SAVED_CORRECTION": (
+        "Verify saved correction",
+        "Check that the saved correction covers the intended target.",
+    ),
+    "OPTIONAL_SPOT_CHECK": (
+        "Quick spot check",
+        "Confirm the current redaction is acceptable.",
+    ),
+    "OTHER_REVIEW": (
+        "Review this interval",
+        "Compare Original and the current result for this interval.",
+    ),
+}
+
 
 def final_review_workspace_schema() -> dict[str, Any]:
     string_or_null = {"type": ["string", "null"]}
@@ -186,9 +237,12 @@ def final_review_workspace_schema() -> dict[str, Any]:
                     "normal_task_class": {"type": "string"},
                     "optional": {"type": "boolean"},
                     "publication_status": string_or_null,
+                    "query_presentation_class": {"enum": list(QUERY_PRESENTATION_CLASSES)},
                     "raw_signal_ids": {"type": "array", "items": {"type": "string"}},
                     "review_task_id": {"type": "string"},
                     "severity": {"type": "string"},
+                    "short_instruction": {"type": "string"},
+                    "short_title": {"type": "string"},
                     "source_frame_start": {"type": "integer"},
                     "source_frame_end": {"type": "integer"},
                     "target_effective_region_count": integer_or_null,
@@ -712,6 +766,18 @@ def workspace_summary(package_root: Path) -> dict[str, Any]:
     for case_id, relative_path in sorted((workspace.get("cases") or {}).items()):
         cases[str(case_id)] = load_json(package_root / str(relative_path))
     freeze_path = package_root / "configuration_freeze.json"
+    tasks = load_optional_json(
+        package_root / "reviewer_tasks.json",
+        {"actions": [], "task_count": 0, "tasks": []},
+    )
+    tasks = tasks | {
+        "tasks": [
+            task_with_query_presentation(dict(task))
+            for task in list(tasks.get("tasks") or [])
+            if isinstance(task, dict)
+        ],
+    }
+    tasks["task_count"] = len(tasks["tasks"])
     return {
         "alignment": load_optional_json(package_root / "version_alignment_audit.json", {}),
         "api_schema_version": API_SCHEMA_VERSION,
@@ -723,13 +789,169 @@ def workspace_summary(package_root: Path) -> dict[str, Any]:
         "entities": load_optional_json(package_root / "review_entities.json", {"cases": {}}),
         "frontend": load_optional_json(package_root / "frontend_build_manifest.json", {}),
         "raw_signals": load_optional_json(package_root / "raw_audit_signals.json", {}),
-        "tasks": load_optional_json(
-            package_root / "reviewer_tasks.json",
-            {"actions": [], "task_count": 0, "tasks": []},
-        ),
+        "tasks": tasks,
         "timeline": load_optional_json(package_root / "timeline_marker_audit.json", {}),
         "workspace": workspace,
     }
+
+
+def task_with_query_presentation(task: dict[str, Any]) -> dict[str, Any]:
+    query_class = query_presentation_class(task)
+    title, instruction = QUERY_PRESENTATION_TEMPLATES[query_class]
+    return task | {
+        "query_presentation_class": query_class,
+        "short_instruction": str(task.get("short_instruction") or instruction),
+        "short_title": str(task.get("short_title") or title),
+    }
+
+
+def query_presentation_class(task: dict[str, Any]) -> str:
+    explicit = str(task.get("query_presentation_class") or "")
+    if explicit in QUERY_PRESENTATION_CLASSES:
+        return explicit
+    semantic_text = " ".join(_task_semantic_values(task)).lower()
+    reason_codes = _task_reason_codes(task)
+    category = str(task.get("category") or "")
+    if _is_correction_verification_task(task, semantic_text):
+        return "VERIFY_SAVED_CORRECTION"
+    if (
+        _contains_any(semantic_text, "optional_spot_check", "spot_check", "spot check")
+        or _reason_contains_any(reason_codes, "spot_check", "spot check", "audit_sample")
+    ):
+        return "OPTIONAL_SPOT_CHECK"
+    if (
+        _contains_any(
+            semantic_text,
+            "false_positive",
+            "false_redaction",
+            "possible_false_redaction",
+        )
+        or _reason_contains_any(reason_codes, "false_positive", "false_redaction", "possible_false")
+    ):
+        return "POSSIBLE_FALSE_POSITIVE"
+    if _contains_any(semantic_text, "plate_coverage_gap"):
+        return "PLATE_COVERAGE_GAP"
+    if _contains_any(semantic_text, "face_coverage_gap"):
+        return "FACE_COVERAGE_GAP"
+    if (
+        _contains_any(semantic_text, "competition", "duplicate", "identity")
+        or _reason_contains_any(reason_codes, "competition", "duplicate", "identity")
+    ):
+        return "IDENTITY_UNCERTAIN"
+    if (
+        _contains_any(
+            semantic_text,
+            "drift",
+            "interpolation",
+            "long_detection_gap",
+            "one-sided",
+            "one_sided",
+            "scale change",
+            "scale-change",
+        )
+        or _reason_contains_any(
+            reason_codes,
+            "anchor_center_motion",
+            "anchor_scale_change",
+            "drift",
+            "gap_exceeds",
+            "interpolation",
+            "long_detection_gap",
+            "one_sided_recovery",
+            "scale",
+            "scene_cut_inside_gap",
+        )
+    ):
+        return "INTERPOLATION_OR_SCALE_RISK"
+    if (
+        _contains_any(
+            semantic_text,
+            "plate_track_review_required",
+            "requires_review",
+            "track_review",
+        )
+        or _reason_contains_any(
+            reason_codes,
+            "insufficient_detector_observations",
+            "insufficient_observations",
+            "insufficient_observed",
+            "insufficient_strong",
+            "internal_gap_penalty",
+            "low_confidence",
+            "low_mean_confidence",
+            "low_observation_density",
+            "observed_hits",
+            "quality_status",
+            "weak_only",
+        )
+    ):
+        return "TRACKING_UNCERTAIN"
+    if (
+        _contains_any(semantic_text, "coverage gap", "coverage_gap", "privacy gap", "privacy_gap")
+        or _reason_contains_any(
+            reason_codes,
+            "missing_box",
+            "render_validation_failure",
+            "unresolved_privacy",
+        )
+    ):
+        return "PLATE_COVERAGE_GAP" if category == "license_plate" else "FACE_COVERAGE_GAP"
+    return "OTHER_REVIEW"
+
+
+def _task_semantic_values(task: dict[str, Any]) -> list[str]:
+    source_task = task.get("source_task") if isinstance(task.get("source_task"), dict) else {}
+    values = [
+        task.get("normal_task_class"),
+        task.get("issue_type"),
+        task.get("task_type"),
+        source_task.get("category") if source_task else None,
+        source_task.get("task_type") if source_task else None,
+    ]
+    return [str(value) for value in values if value]
+
+
+def _task_reason_codes(task: dict[str, Any]) -> set[str]:
+    source_task = task.get("source_task") if isinstance(task.get("source_task"), dict) else {}
+    reason_codes: set[str] = set()
+    for payload in (task, source_task or {}):
+        for key in ("raw_reason_codes", "reason_codes", "reasons"):
+            values = payload.get(key)
+            if isinstance(values, list):
+                reason_codes.update(str(value).lower() for value in values if value)
+    return reason_codes
+
+
+def _is_correction_verification_task(task: dict[str, Any], semantic_text: str) -> bool:
+    if _contains_any(
+        semantic_text,
+        "corrected_result_check",
+        "corrected_result_verification",
+        "correction_verification",
+        "saved_correction_verification",
+    ):
+        return True
+    has_correction_reference = any(
+        task.get(key)
+        for key in (
+            "accepted_correction_revision_id",
+            "correction_id",
+            "correction_revision_id",
+            "revision_id",
+        )
+    )
+    return bool(
+        has_correction_reference
+        and _contains_any(semantic_text, "corrected", "correction")
+    )
+
+
+def _contains_any(text: str, *needles: str) -> bool:
+    return any(needle in text for needle in needles)
+
+
+def _reason_contains_any(reason_codes: set[str], *needles: str) -> bool:
+    return any(any(needle in code for needle in needles) for code in reason_codes)
 
 
 def load_json(path: Path) -> dict[str, Any]:

@@ -5,8 +5,10 @@ import {
   bucketCounts,
   effectiveEntities,
   filteredEntities,
+  guidanceFamily,
   taskBucket,
   taskDecisionActionOptions,
+  taskGuidance,
   tasksForCase,
 } from '../src/state/reviewState';
 
@@ -169,6 +171,88 @@ describe('review state helpers', () => {
       ACTIONS.notSensitive,
     ]);
     expect(actions.map((action) => action.label)).toContain('Correct');
+  });
+
+  it('uses compact query presentation copy instead of repeated reviewer instructions', () => {
+    expect(taskGuidance({
+      ...task,
+      category: 'license_plate',
+      query_presentation_class: 'PLATE_COVERAGE_GAP',
+    })).toEqual({
+      instruction: 'Check that the plate is fully covered in this interval.',
+      queryClass: 'PLATE_COVERAGE_GAP',
+      title: 'Plate may be visible',
+    });
+
+    const savedCorrection = taskGuidance({
+      ...task,
+      normal_task_class: 'correction_verification',
+      short_instruction: 'Verify this saved geometry.',
+      short_title: 'Saved edit check',
+    });
+    expect(savedCorrection).toEqual({
+      instruction: 'Verify this saved geometry.',
+      queryClass: 'VERIFY_SAVED_CORRECTION',
+      title: 'Saved edit check',
+    });
+    expect(savedCorrection.instruction).not.toContain('Correct means');
+    expect(savedCorrection.instruction).not.toContain('Needs correction when');
+  });
+
+  it('does not infer saved-correction cards from decision copy', () => {
+    const plateTrackReview = taskGuidance({
+      ...task,
+      allowed_actions: [ACTIONS.looksCorrect, ACTIONS.needsCorrection, ACTIONS.notSensitive],
+      category: 'license_plate',
+      issue_type: 'plate_track_review_required',
+      normal_task_class: 'plate_track_review_required',
+      title: 'Check a low-confidence plate track',
+      what_to_inspect: 'Check the plate-like target and choose Needs correction if any sensitive plate remains exposed.',
+      raw_reason_codes: ['insufficient_observations'],
+    });
+
+    expect(plateTrackReview).toEqual({
+      instruction: 'Check that the redaction stays on the intended target.',
+      queryClass: 'TRACKING_UNCERTAIN',
+      title: 'Tracking needs review',
+    });
+  });
+
+  it('keeps fallback query classification semantic and compact', () => {
+    expect(guidanceFamily({
+      category: 'face',
+      issue_type: 'possible_privacy_gap',
+      normal_task_class: 'possible_privacy_gap',
+      source_task: { raw_reason_codes: ['identity_competition'] },
+    })).toBe('IDENTITY_UNCERTAIN');
+    expect(guidanceFamily({
+      category: 'face',
+      issue_type: 'possible_privacy_gap',
+      normal_task_class: 'possible_privacy_gap',
+      source_task: { raw_reason_codes: ['long_detection_gap'] },
+    })).toBe('INTERPOLATION_OR_SCALE_RISK');
+    expect(guidanceFamily({
+      category: 'license_plate',
+      issue_type: 'plate_coverage_gap',
+      normal_task_class: 'plate_coverage_gap',
+      source_task: { raw_reason_codes: ['gap_exceeds_safe_interpolation_limit'] },
+    })).toBe('PLATE_COVERAGE_GAP');
+    expect(guidanceFamily({
+      category: 'face',
+      correction_id: 'corr_1',
+      issue_type: 'correction_verification',
+      normal_task_class: 'correction_verification',
+    })).toBe('VERIFY_SAVED_CORRECTION');
+    expect(guidanceFamily({
+      category: 'license_plate',
+      issue_type: 'possible_false_redaction',
+      normal_task_class: 'possible_false_redaction',
+    })).toBe('POSSIBLE_FALSE_POSITIVE');
+    expect(guidanceFamily({
+      category: 'face',
+      issue_type: 'optional_spot_check',
+      normal_task_class: 'optional_spot_check',
+    })).toBe('OPTIONAL_SPOT_CHECK');
   });
 
   it('filters effective entities and hides retired merge targets', () => {

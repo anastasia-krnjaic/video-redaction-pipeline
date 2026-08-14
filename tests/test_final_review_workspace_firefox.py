@@ -11,7 +11,7 @@ import pytest
 from redactor import review_workspace
 
 SESSION_READY_JS = (
-    "() => document.querySelector('#sessionBanner')?.textContent.includes('Local session')"
+    "() => document.querySelector('#sessionBanner')?.textContent.includes('Resumed review session')"
 )
 
 pytestmark = pytest.mark.skipif(
@@ -119,7 +119,7 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
                 )
                 day_panel = active_case_panel(page, "day")
                 page.wait_for_function(SESSION_READY_JS, timeout=10_000)
-                assert "Local session" in page.locator("#sessionBanner").inner_text()
+                assert "Resumed review session" in page.locator("#sessionBanner").inner_text()
                 assert session_id in page.locator("#sessionBanner").inner_text()
                 assert "Unsure" not in page.locator("body").inner_text()
                 assert "Uncertain" not in page.locator("body").inner_text()
@@ -136,14 +136,14 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
                 record_step(report, "canonical_queue_buckets")
 
                 duplicate_task_id = "license_plate_plate_review_0005"
-                click_bucket(page, "day", "Correct")
+                click_bucket(page, "day", "Open")
                 day_duplicate = page.locator(task_card_selector("day", duplicate_task_id))
                 day_duplicate.wait_for(state="visible", timeout=5_000)
                 assert (
                     day_duplicate.locator(".task-state-row .badge").first.inner_text()
-                    == "Correct"
+                    == "Open"
                 )
-                record_step(report, "day_duplicate_completed", task_id=duplicate_task_id)
+                record_step(report, "day_duplicate_open_after_reset", task_id=duplicate_task_id)
 
                 day_panel.get_by_role("button", name="Entities").click()
                 entity_dialog = page.get_by_role("dialog", name="Review objects")
@@ -181,8 +181,9 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
                     "Needs correction",
                     "Not sensitive",
                 ]
-                assert "WHY THIS WAS FLAGGED" in night_duplicate.inner_text()
-                assert "WHAT TO CHECK" in night_duplicate.inner_text()
+                assert night_duplicate.locator(".task-instruction").first.inner_text().strip()
+                assert "WHY THIS WAS FLAGGED" not in night_duplicate.inner_text()
+                assert "WHAT TO CHECK" not in night_duplicate.inner_text()
                 record_step(
                     report,
                     "night_duplicate_open_and_three_actions",
@@ -202,14 +203,18 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
 
                 page.get_by_role("button", name="Day").click()
                 active_case_panel(page, "day")
-                click_bucket(page, "day", "Correct")
+                click_bucket(page, "day", "Open")
                 day_duplicate = page.locator(task_card_selector("day", duplicate_task_id))
                 day_duplicate.wait_for(state="visible", timeout=5_000)
                 assert (
                     day_duplicate.locator(".task-state-row .badge").first.inner_text()
-                    == "Correct"
+                    == "Open"
                 )
-                record_step(report, "day_duplicate_still_completed", task_id=duplicate_task_id)
+                record_step(
+                    report,
+                    "day_duplicate_still_open_after_night_decision",
+                    task_id=duplicate_task_id,
+                )
 
                 page.get_by_role("button", name="Final Results").click()
                 page.locator(".case-panel.active").get_by_role(
@@ -225,7 +230,7 @@ def test_final_review_workspace_firefox_entity_timeline_smoke() -> None:
                 assert "Automatic" in final_options
                 assert "Latest reviewed" not in final_options
                 assert "Final" not in final_options
-                assert page.locator(".download-menu").count() > 0
+                assert page.locator(".download-row").count() > 0
                 record_step(report, "final_results_hides_unavailable_roles")
                 report["passed"] = True
             finally:

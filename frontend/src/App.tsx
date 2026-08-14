@@ -98,9 +98,21 @@ export function App() {
     try {
       const session = await startSessionRequest(workspaceState.workspace.workspace.source_revision);
       workspaceState.setSession(session);
-      await workspaceState.refreshSession(session.session_id);
+      await workspaceState.refreshSession(session.session_id, 'new');
     } catch (err) {
       workspaceState.setError(`Could not start local review session: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resumeSession = async () => {
+    setBusy(true);
+    workspaceState.setError(undefined);
+    try {
+      await workspaceState.resumeStoredSession();
+    } catch (err) {
+      workspaceState.setError(`Could not resume review session: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setBusy(false);
     }
@@ -154,9 +166,12 @@ export function App() {
         cases={caseTabs}
         error={workspaceState.error}
         route={route}
+        resumableSessionId={workspaceState.resumableSessionId}
         session={workspaceState.session}
+        sessionLoadKind={workspaceState.sessionLoadKind}
         onExport={exportSession}
         onOpenAttribution={() => setAttributionOpen(true)}
+        onResumeSession={resumeSession}
         onRouteChange={(nextRoute: TopLevelRoute) => {
           workspaceState.setError(undefined);
           setRoute(nextRoute);

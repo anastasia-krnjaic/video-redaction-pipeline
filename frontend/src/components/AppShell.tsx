@@ -11,9 +11,12 @@ interface Props {
   children: ReactNode;
   error?: string;
   route: TopLevelRoute;
+  resumableSessionId?: string;
   session: Session | null;
+  sessionLoadKind?: 'new' | 'resumed';
   onExport: () => void;
   onOpenAttribution: () => void;
+  onResumeSession: () => void;
   onRouteChange: (route: TopLevelRoute) => void;
   onStartSession: () => void;
 }
@@ -26,10 +29,13 @@ export function AppShell({
   error,
   onExport,
   onOpenAttribution,
+  onResumeSession,
   onRouteChange,
   onStartSession,
+  resumableSessionId,
   route,
   session,
+  sessionLoadKind,
 }: Props) {
   return (
     <>
@@ -39,8 +45,11 @@ export function AppShell({
         error={error}
         onExport={onExport}
         onOpenAttribution={onOpenAttribution}
+        onResumeSession={onResumeSession}
         onStartSession={onStartSession}
+        resumableSessionId={resumableSessionId}
         session={session}
+        sessionLoadKind={sessionLoadKind}
       />
       <CaseTabs active={route} cases={cases} onChange={onRouteChange} />
       <main>{children}</main>

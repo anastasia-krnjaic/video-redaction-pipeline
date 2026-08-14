@@ -85,7 +85,7 @@ The audit compares backend/privacy artifacts and ignores frontend DOM/design dif
 ## v1.3.2 Correctness Notes
 
 - `Restart review` is case-scoped and narrow. It clears active review decisions, task buckets, task selection, sweep acknowledgement, and transient review progress for the selected case while preserving entity policies, canonical merges, manual corrections, checkpoints, Latest reviewed, History, and the other case.
-- `Reset all edits to Automatic baseline` is the separate destructive action. It resets the selected case's active entity policies, merges, manual corrections, reviewer-created manual issues, review decisions, sweep acknowledgement, and Latest reviewed projection while preserving append-only History, checkpoints, inherited baseline source policies, and the other case.
+- `Reset this case to Automatic baseline` is the separate destructive action. It resets the selected case's active entity policies, merges, manual corrections, reviewer-created manual issues, review decisions, sweep acknowledgement, transient correction/editor state, and Latest reviewed projection while preserving append-only History, checkpoints, inherited baseline source policies, source media, Automatic baseline, and the other case.
 - Entity/checkpoint operations keep unrelated controls usable. Accepted mutations are projected immediately, and Latest reviewed rendering is debounced/coalesced in the Python materialization queue.
 - The normal version selector contains exactly Original, Automatic, and Latest reviewed. Correction previews are transient and never become a persistent selector option.
 - Interpolate between keyframes requires exact start and end source-frame rectangles; interval edits prune out-of-range keyframes.
@@ -95,7 +95,7 @@ The audit compares backend/privacy artifacts and ignores frontend DOM/design dif
 ## v1.3.3 Bug-Fix Notes
 
 - `Restart review` remains workflow-only.
-- `Reset all edits to Automatic baseline` now guards against stale materialization events and compares the active case projection against the immutable package baseline in `reset_baseline_state_audit.json`.
+- `Reset this case to Automatic baseline` now guards against stale materialization events and compares the active case projection against the immutable package baseline in `reset_baseline_state_audit.json`.
 - Entity cards reserve a fixed operation-status slot at the right edge, so pending spinners do not shift policy buttons, card width, modal width, or scroll position.
 
 ## v1.4 Hardening Notes

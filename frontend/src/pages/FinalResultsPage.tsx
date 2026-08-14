@@ -29,11 +29,12 @@ export function FinalResultsPage({
 }: Props) {
   const caseIds = Object.keys(workspace.cases);
   const defaultCaseId = caseIds.includes('day') ? 'day' : caseIds[0] || '';
-  const [persistedCaseId, setCaseId] = usePersistentState<CaseId>('final:case', defaultCaseId);
+  const finalUiScope = `${workspaceIdentityForUi(workspace)}:${session?.session_id || 'no-session'}:final`;
+  const [persistedCaseId, setCaseId] = usePersistentState<CaseId>(`${finalUiScope}:case`, defaultCaseId);
   const caseId = workspace.cases[persistedCaseId] ? persistedCaseId : defaultCaseId;
   const manifest = workspace.cases[caseId];
-  const [caseFrame, setCaseFrame] = usePersistentState<number>(`final:${caseId}:frame`, 0);
-  const [selectedRole, setSelectedRole] = usePersistentState<string>(`final:${caseId}:version`, 'latest_reviewed');
+  const [caseFrame, setCaseFrame] = usePersistentState<number>(`${finalUiScope}:${caseId}:frame`, 0);
+  const [selectedRole, setSelectedRole] = usePersistentState<string>(`${finalUiScope}:${caseId}:version`, 'latest_reviewed');
   const [finalStatus, setFinalStatus] = useState<Record<string, FinalizationStatus>>({});
   const [busy, setBusy] = useState(false);
   const status = finalStatus[caseId];
@@ -170,4 +171,13 @@ function publicVideoRoles(roles: MediaVersion[], latestRole?: MediaVersion, fina
     latestRole ? { ...latestRole, label: 'Latest reviewed', role: 'latest_reviewed' as const } : undefined,
     finalRole ? { ...finalRole, label: 'Final', role: 'final_reviewed' as const } : undefined,
   ].filter((role): role is MediaVersion => Boolean(role));
+}
+
+function workspaceIdentityForUi(workspace: WorkspaceSummary): string {
+  const identity = workspace.workspace?.workspace_manifest_sha256
+    || workspace.workspace?.workspace_identity_hash
+    || workspace.workspace?.source_sha256
+    || workspace.backend_workspace_schema_version
+    || 'unknown-workspace';
+  return String(identity).replace(/[^A-Za-z0-9_-]/g, '_');
 }

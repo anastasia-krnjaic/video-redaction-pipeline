@@ -39,6 +39,7 @@ import {
   withPolicyTaskId,
   withoutTaskResolution,
 } from '../state/reviewState';
+import { materializationJobMatchesCurrentProjection } from '../state/materialization';
 import type {
   Attribution,
   AuditEvent,
@@ -119,12 +120,13 @@ export function CaseReviewPage({
 }: Props) {
   const manifest = workspace.cases[caseId];
   const baseTasks = workspace.tasks.tasks || [];
-  const [mode, setMode] = usePersistentState<ReviewMode>(`${caseId}:mode`, 'review');
-  const [caseFrame, setCaseFrame] = usePersistentState<number>(`${caseId}:frame`, 0);
-  const [selectedRole, setSelectedRole] = usePersistentState<string>(`${caseId}:version`, defaultRole(manifest.video_roles));
-  const [selectedTaskId, setSelectedTaskId] = usePersistentState<string | null>(`${caseId}:task`, null);
-  const [bucket, setBucket] = usePersistentState<QueueBucket>(`${caseId}:bucket`, 'Open');
-  const [entityFilter, setEntityFilter] = usePersistentState<EntityFilter>(`${caseId}:entity_filter`, 'needs_review');
+  const uiScope = `${workspaceIdentityForUi(workspace)}:${session?.session_id || 'no-session'}:${caseId}`;
+  const [mode, setMode] = usePersistentState<ReviewMode>(`${uiScope}:mode`, 'review');
+  const [caseFrame, setCaseFrame] = usePersistentState<number>(`${uiScope}:frame`, 0);
+  const [selectedRole, setSelectedRole] = usePersistentState<string>(`${uiScope}:version`, defaultRole(manifest.video_roles));
+  const [selectedTaskId, setSelectedTaskId] = usePersistentState<string | null>(`${uiScope}:task`, null);
+  const [bucket, setBucket] = usePersistentState<QueueBucket>(`${uiScope}:bucket`, 'Open');
+  const [entityFilter, setEntityFilter] = usePersistentState<EntityFilter>(`${uiScope}:entity_filter`, 'needs_review');
   const [entitiesOpen, setEntitiesOpen] = useState(false);
   const [mergeSelection, setMergeSelection] = useState<EffectiveEntity[]>([]);
   const [pendingTaskId, setPendingTaskId] = useState<string>();
@@ -162,6 +164,13 @@ export function CaseReviewPage({
   const counts = useMemo(() => bucketCounts(tasks), [tasks]);
   const selectedTask = tasks.find((task) => task.review_task_id === selectedTaskId) || tasks[0] || null;
   const materializedLatestRole = workingState?.materialized_latest_reviewed?.[caseId] as MediaVersion | undefined;
+  const caseEntityIds = useMemo(() => {
+    const ids = new Set((workspace.entities.cases[caseId] || []).map((entity) => entity.entity_id));
+    for (const [entityId, entity] of Object.entries(entityOverrides)) {
+      if (entity.case_id === caseId) ids.add(entityId);
+    }
+    return ids;
+  }, [caseId, entityOverrides, workspace.entities.cases]);
 
   const roles = useMemo(() => {
     const sessionLatestRole = previewRole || latestRole || materializedLatestRole;
@@ -188,6 +197,11 @@ export function CaseReviewPage({
     ? formatMaterializationStatus(activeMaterializationJobs[0].job)
     : undefined;
   const reviewComplete = tasks.length > 0 && counts.Open === 0 && counts['Needs correction'] === 0;
+  const correctionAttentionCount = manualTasks
+    .filter((task) => task.case_id === caseId)
+    .filter((task) => task.normal_task_class === 'correction_verification')
+    .filter((task) => task.actionable === false || task.decision_state !== 'resolved')
+    .length + counts['Needs correction'];
   const latestReviewedStatus = latestReviewedStatusText({
     activeJobs: activeMaterializationJobs,
     latestRole: materializedLatestRole,
@@ -310,6 +324,10 @@ export function CaseReviewPage({
           const jobMatchesCurrentProjection = materializationJobMatchesCurrentProjection(
             tracked.job,
             workingStateRef.current,
+            {
+              caseId,
+              sessionId: session?.session_id,
+            },
           );
           if (jobMatchesCurrentProjection && tracked.job.working_state) {
             onWorkingStateChangeRef.current(tracked.job.working_state);
@@ -349,7 +367,7 @@ export function CaseReviewPage({
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [activeMaterializationJobKey, caseId]);
+  }, [activeMaterializationJobKey, caseId, session?.session_id]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -386,6 +404,28 @@ export function CaseReviewPage({
     setCorrectionSaveStatus(undefined);
     if (selectedRole === 'correction_preview') setSelectedRole('latest_reviewed');
     setDraft(withDraftHash({ ...nextDraft, preview_token: undefined }));
+  };
+
+  const resetLocalCorrectionState = (nextTask: TaskWithDecision | null = null) => {
+    setPreviewReady(false);
+    setPreviewInvalidated(false);
+    setPreviewToken(undefined);
+    setPreviewRole(undefined);
+    setCorrectionSaveStatus(undefined);
+    setDraft(initialDraft(caseId, manifest, caseFrame, nextTask));
+    setSelectedRole(defaultRole(publicVideoRoles(manifest.video_roles)));
+    editDraftContextRef.current = null;
+  };
+
+  const clearCaseTransientJobs = () => {
+    setMaterializationJobs((current) => Object.fromEntries(
+      Object.entries(current).filter(([, tracked]) => tracked.job.case_id !== caseId),
+    ));
+    setPendingEntityIds((current) => {
+      const next = new Set(current);
+      for (const id of caseEntityIds) next.delete(id);
+      return next;
+    });
   };
 
   const appendEvents = (nextEvents: AuditEvent[]) => {
@@ -502,7 +542,7 @@ export function CaseReviewPage({
     setSelectedTaskId(task.review_task_id);
     setSelectedRole('latest_reviewed');
     setMode('edit');
-    setDraft(initialDraft(caseId, manifest, caseFrame, task));
+    resetLocalCorrectionState(task);
     controller.seekToSourceFrame(task.source_frame_start);
   };
 
@@ -811,16 +851,12 @@ export function CaseReviewPage({
       applyWorkingStateProjection(result.working_state);
       setBucket('Open');
       setSelectedTaskId(null);
-      setPreviewReady(false);
-      setPreviewInvalidated(false);
-      setPreviewToken(undefined);
-      setPreviewRole(undefined);
-      setCorrectionSaveStatus(undefined);
+      setMode('review');
+      resetLocalCorrectionState(null);
       setMaterializationError(undefined);
+      clearCaseTransientJobs();
       setFocusTarget(null);
       onError(undefined);
-      setDraft(initialDraft(caseId, manifest, caseFrame, null));
-      setSelectedRole('latest_reviewed');
       for (const job of result.materialization_jobs || []) trackMaterializationJob(job);
       setResetEditsConfirmOpen(false);
     } catch (err) {
@@ -876,12 +912,18 @@ export function CaseReviewPage({
             {previewReady ? ' · Previewing unsaved correction' : ''}
           </p>
           {materializationError ? (
-            <p className="error-text">
-              {materializationError}{' '}
+            <details className="materialization-blockers">
+              <summary>
+                <strong>Latest reviewed not ready</strong>
+                <span>{counts.Open} Open queries remain</span>
+                <span>{correctionAttentionCount} corrections need attention</span>
+                <span>View technical blockers</span>
+              </summary>
+              <pre>{materializationError}</pre>
               <button type="button" onClick={() => void retryLatestMaterialization()}>
                 Retry
               </button>
-            </p>
+            </details>
           ) : null}
         </div>
         <div className="segmented" role="group" aria-label="Review mode">
@@ -935,7 +977,7 @@ export function CaseReviewPage({
             {checkpointBusy === 'restart' ? 'Restarting...' : 'Restart review'}
           </button>
           <button type="button" className="danger" onClick={() => setResetEditsConfirmOpen(true)} disabled={checkpointBusy === 'reset-edits'}>
-            {checkpointBusy === 'reset-edits' ? 'Resetting...' : 'Reset all edits to Automatic baseline'}
+            {checkpointBusy === 'reset-edits' ? 'Resetting...' : 'Reset this case to Automatic baseline'}
           </button>
         </div>
       ) : null}
@@ -1108,13 +1150,13 @@ export function CaseReviewPage({
       {resetEditsConfirmOpen ? (
         <section className="modal open" aria-modal="true" role="dialog" aria-labelledby="reset-edits-title">
           <div className="modal-card">
-            <h2 id="reset-edits-title">Reset all edits to Automatic baseline?</h2>
+            <h2 id="reset-edits-title">Reset this case to Automatic baseline?</h2>
             <p className="muted">
-              Return this case's active decisions, object policies, merges, corrections, and full-video sweep state to the Automatic baseline. History and checkpoints are preserved.
+              This clears only {manifest.display_name}'s active decisions, object policies, merges, manual corrections, correction drafts, preview state, Latest reviewed currentness, and full-video sweep readiness. Source media, Automatic baseline, the other case, checkpoints, and historical audit events are preserved.
             </p>
             <div className="button-row">
               <button type="button" className="danger" onClick={() => void resetReviewState()} disabled={checkpointBusy === 'reset-edits'}>
-                {checkpointBusy === 'reset-edits' ? 'Resetting...' : 'Reset all edits to Automatic baseline'}
+                {checkpointBusy === 'reset-edits' ? 'Resetting...' : 'Reset this case to Automatic baseline'}
               </button>
               <button type="button" onClick={() => setResetEditsConfirmOpen(false)} disabled={checkpointBusy === 'reset-edits'}>
                 Cancel
@@ -1143,14 +1185,13 @@ function publicVideoRoles(roles: MediaVersion[], latestRole?: MediaVersion): Med
   ].filter((role): role is MediaVersion => Boolean(role));
 }
 
-function materializationJobMatchesCurrentProjection(
-  job: MaterializationJob,
-  currentState?: WorkingState,
-): boolean {
-  const jobRevision = job.published_working_state_revision || job.working_state?.active_projection_hash || job.accepted_working_state_revision;
-  const currentRevision = currentState?.active_projection_hash;
-  if (!jobRevision || !currentRevision) return true;
-  return jobRevision === currentRevision;
+function workspaceIdentityForUi(workspace: WorkspaceSummary): string {
+  const identity = workspace.workspace?.workspace_manifest_sha256
+    || workspace.workspace?.workspace_identity_hash
+    || workspace.workspace?.source_sha256
+    || workspace.backend_workspace_schema_version
+    || 'unknown-workspace';
+  return String(identity).replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
 function latestReviewedStatusText({
@@ -1274,6 +1315,7 @@ function initialDraft(caseId: CaseId, manifest: WorkspaceSummary['cases'][string
       ? task.source_frame_start
       : caseToSourceFrame(manifest, caseFrame);
   const endFrame = typeof task?.source_frame_end === 'number' ? task.source_frame_end : sourceFrame;
+  const mode = endFrame === sourceFrame ? 'single_frame' : 'fixed_box';
   return withDraftHash({
     caseId,
     case_id: caseId,
@@ -1282,11 +1324,11 @@ function initialDraft(caseId: CaseId, manifest: WorkspaceSummary['cases'][string
     end: endFrame,
     start_source_frame: sourceFrame,
     end_source_frame: endFrame,
-    mode: endFrame === sourceFrame ? 'single_frame' : 'fixed_box',
+    mode,
     keyframes: [],
     barriers: [],
     checkpoints: [],
-    interpolation_method: 'linear',
+    interpolation_method: 'none',
     selectedTaskId: task?.review_task_id,
   });
 }

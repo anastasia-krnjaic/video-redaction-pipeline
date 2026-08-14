@@ -121,7 +121,7 @@ Queued materialization jobs capture the accepted render-state revision, session 
 
 Sweep acknowledgement and canonical finalization events affect approval eligibility and the session hash chain. They do not change active media projection identity unless they also carry a media-affecting review mutation; a stale pointer still stays hidden when decisions, policies, merges, correction geometry, or reset generation change the compiled reviewed regions.
 
-`Restart review` is a narrow case-scoped workflow action. It clears active review decisions, task buckets, task selection, sweep acknowledgement, and transient review progress for the selected case while preserving entity policy overrides, canonical merges, manual corrections, checkpoints, History, and immutable Latest reviewed artifacts; supported-canonical readers still hide any pointer that no longer matches the active render-state projection. `Reset all edits to Automatic baseline` is the separate destructive case-scoped action that removes active entity edits, merges, manual corrections, reviewer-created manual issues, review decisions, sweep acknowledgement, and the active Latest reviewed projection while preserving append-only History and checkpoints.
+`Restart review` is a narrow case-scoped workflow action. It clears active review decisions, task buckets, task selection, sweep acknowledgement, and transient review progress for the selected case while preserving entity policy overrides, canonical merges, manual corrections, checkpoints, History, and immutable Latest reviewed artifacts; supported-canonical readers still hide any pointer that no longer matches the active render-state projection. `Reset this case to Automatic baseline` is the separate destructive case-scoped action that removes the active case's entity edits, merges, manual corrections, reviewer-created manual issues, review decisions, sweep acknowledgement, transient correction/editor state, and active Latest reviewed projection while preserving append-only History, checkpoints, source media, Automatic baseline, and the other case.
 
 Review mode shows one large video player with explicit media roles:
 
@@ -188,7 +188,7 @@ simultaneously visible.
 
 ## Review Sessions
 
-Click **Start review** to create an anonymous server-backed local session. The server assigns a session UUID and UTC start time automatically. Reviewer name is required only when exporting or finalizing; the workspace appends a `reviewer_attribution_set` event and does not rewrite earlier events.
+Click **Start new review** to create an anonymous server-backed local session. A previous local session is not loaded silently from browser storage; resume by opening an explicit `?session_id=...` URL or using the resume control in the React app. The server assigns a session UUID and UTC start time automatically. Reviewer name is required only when exporting or finalizing; the workspace appends a `reviewer_attribution_set` event and does not rewrite earlier events.
 
 The reviewer identity is locally declared, not enterprise authentication. Changing attribution appends another event instead of editing history.
 

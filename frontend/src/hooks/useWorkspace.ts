@@ -24,6 +24,9 @@ export interface WorkspaceLoadState {
   events: AuditEvent[];
   corrections: Record<string, unknown>[];
   workingState?: WorkingState;
+  resumableSessionId?: string;
+  sessionLoadKind?: 'new' | 'resumed';
+  resumeStoredSession: () => Promise<void>;
   setSession: (session: Session | null) => void;
   setAttribution: (attribution: Attribution) => void;
   setDecisions: (decisions: DecisionsByCase) => void;
@@ -31,7 +34,7 @@ export interface WorkspaceLoadState {
   setEvents: (events: AuditEvent[]) => void;
   setCorrections: (corrections: Record<string, unknown>[]) => void;
   setWorkingState: (state?: WorkingState) => void;
-  refreshSession: (sessionId?: string) => Promise<void>;
+  refreshSession: (sessionId?: string, loadKind?: 'new' | 'resumed') => Promise<void>;
   setError: (error?: string) => void;
 }
 
@@ -46,35 +49,69 @@ export function useWorkspace(): WorkspaceLoadState {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [corrections, setCorrections] = useState<Record<string, unknown>[]>([]);
   const [workingState, setWorkingState] = useState<WorkingState>();
+  const [resumableSessionId, setResumableSessionId] = useState<string>();
+  const [workspaceStorageKey, setWorkspaceStorageKey] = useState<string>();
+  const [sessionLoadKind, setSessionLoadKind] = useState<'new' | 'resumed'>();
+
+  const storeLastSessionId = (loadedWorkspace: WorkspaceSummary | undefined, sessionId: string) => {
+    const key = loadedWorkspace ? lastSessionStorageKey(loadedWorkspace) : workspaceStorageKey;
+    if (!key) return;
+    writeStoredString(key, sessionId);
+    setResumableSessionId(sessionId);
+  };
+
+  const clearLastSessionId = (loadedWorkspace?: WorkspaceSummary) => {
+    const key = loadedWorkspace ? lastSessionStorageKey(loadedWorkspace) : workspaceStorageKey;
+    if (!key) return;
+    removeStoredValue(key);
+    setResumableSessionId(undefined);
+  };
+
+  const applySessionPayload = (
+    payload: Awaited<ReturnType<typeof loadSessionState>>,
+    loadKind: 'new' | 'resumed',
+    loadedWorkspace?: WorkspaceSummary,
+  ) => {
+    setSessionState(payload.session);
+    setSessionLoadKind(loadKind);
+    setAttribution(payload.attribution);
+    setDecisions(normalizeDecisionsByCase(payload.decisions_by_case, payload.decisions || {}));
+    setTaskResolutions(
+      normalizeTaskResolutionsByCase(
+        payload.working_state?.task_resolutions_by_case as
+          | Record<string, Record<string, TaskDecision>>
+          | undefined,
+        payload.working_state?.task_resolutions as Record<string, TaskDecision> | undefined,
+      ),
+    );
+    setEvents(payload.events || []);
+    setCorrections(payload.corrections || []);
+    setWorkingState(payload.working_state);
+    storeLastSessionId(loadedWorkspace, payload.session.session_id);
+  };
 
   const refreshSession = useMemo(
-    () => async (sessionId?: string) => {
-      const id = sessionId || session?.session_id || readStoredString('session_id');
+    () => async (sessionId?: string, loadKind?: 'new' | 'resumed') => {
+      const id = sessionId || session?.session_id;
       if (!id) return;
       const payload = await loadSessionState(id);
-      setSessionState(payload.session);
-      setAttribution(payload.attribution);
-      setDecisions(normalizeDecisionsByCase(payload.decisions_by_case, payload.decisions || {}));
-      setTaskResolutions(
-        normalizeTaskResolutionsByCase(
-          payload.working_state?.task_resolutions_by_case as
-            | Record<string, Record<string, TaskDecision>>
-            | undefined,
-          payload.working_state?.task_resolutions as Record<string, TaskDecision> | undefined,
-        ),
-      );
-      setEvents(payload.events || []);
-      setCorrections(payload.corrections || []);
-      setWorkingState(payload.working_state);
-      writeStoredString('session_id', payload.session.session_id);
+      applySessionPayload(payload, loadKind || sessionLoadKind || 'resumed', workspace);
     },
-    [session?.session_id],
+    [session?.session_id, sessionLoadKind, workspace],
   );
 
   const setSession = (nextSession: Session | null) => {
     setSessionState(nextSession);
-    if (nextSession) writeStoredString('session_id', nextSession.session_id);
-    else removeStoredValue('session_id');
+    setSessionLoadKind(nextSession ? 'new' : undefined);
+    if (nextSession) storeLastSessionId(workspace, nextSession.session_id);
+    else clearLastSessionId(workspace);
+  };
+
+  const resumeStoredSession = async () => {
+    const id = resumableSessionId;
+    if (!id) return;
+    const payload = await loadSessionState(id);
+    applySessionPayload(payload, 'resumed', workspace);
   };
 
   useEffect(() => {
@@ -86,28 +123,19 @@ export function useWorkspace(): WorkspaceLoadState {
         const loaded = await loadWorkspace();
         if (cancelled) return;
         setWorkspace(loaded);
-        const storedSessionId = readUrlSessionId() || readStoredString('session_id');
-        if (storedSessionId) {
+        const storageKey = lastSessionStorageKey(loaded);
+        setWorkspaceStorageKey(storageKey);
+        const urlSessionId = readUrlSessionId();
+        const storedSessionId = readStoredString(storageKey);
+        setResumableSessionId(storedSessionId || undefined);
+        if (urlSessionId) {
           try {
-            const payload = await loadSessionState(storedSessionId);
+            const payload = await loadSessionState(urlSessionId);
             if (cancelled) return;
-            setSessionState(payload.session);
-            setAttribution(payload.attribution);
-            setDecisions(normalizeDecisionsByCase(payload.decisions_by_case, payload.decisions || {}));
-            setTaskResolutions(
-              normalizeTaskResolutionsByCase(
-                payload.working_state?.task_resolutions_by_case as
-                  | Record<string, Record<string, TaskDecision>>
-                  | undefined,
-                payload.working_state?.task_resolutions as Record<string, TaskDecision> | undefined,
-              ),
-            );
-            setEvents(payload.events || []);
-            setCorrections(payload.corrections || []);
-            setWorkingState(payload.working_state);
-            writeStoredString('session_id', payload.session.session_id);
+            applySessionPayload(payload, 'resumed', loaded);
           } catch {
-            removeStoredValue('session_id');
+            removeStoredValue(storageKey);
+            setResumableSessionId(undefined);
           }
         }
       } catch (err) {
@@ -133,6 +161,9 @@ export function useWorkspace(): WorkspaceLoadState {
     events,
     corrections,
     workingState,
+    resumableSessionId,
+    sessionLoadKind,
+    resumeStoredSession,
     setSession,
     setAttribution,
     setDecisions,
@@ -143,4 +174,17 @@ export function useWorkspace(): WorkspaceLoadState {
     refreshSession,
     setError,
   };
+}
+
+function lastSessionStorageKey(workspace: WorkspaceSummary): string {
+  return `last_session_id:${workspaceIdentity(workspace)}`;
+}
+
+function workspaceIdentity(workspace: WorkspaceSummary): string {
+  const identity = workspace.workspace?.workspace_manifest_sha256
+    || workspace.workspace?.workspace_identity_hash
+    || workspace.workspace?.source_sha256
+    || workspace.backend_workspace_schema_version
+    || 'unknown-workspace';
+  return String(identity);
 }

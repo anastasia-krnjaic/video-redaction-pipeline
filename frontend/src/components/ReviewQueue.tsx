@@ -69,6 +69,11 @@ export function ReviewQueue({
           </button>
         ))}
       </div>
+      <div className="action-legend" aria-label="Review action meanings">
+        <span><strong>Correct</strong> current redaction is acceptable.</span>
+        <span><strong>Needs correction</strong> redaction geometry must be changed.</span>
+        <span><strong>Not sensitive</strong> this content does not require redaction.</span>
+      </div>
       <div className="task-list" ref={listRef}>
         {visibleTasks.length ? (
           visibleTasks.map((task) => (
