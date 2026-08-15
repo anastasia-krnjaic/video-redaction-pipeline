@@ -37,6 +37,7 @@ from redactor import (
     rendering,
     review_api_contract,
     review_finalization,
+    review_guidance_policy,
     review_sessions,
     review_working_state,
 )
@@ -4501,18 +4502,35 @@ def react_redirect_html() -> str:
 
 
 def frontend_build_manifest(*, frontend_root: Path, package_root: Path) -> dict[str, Any]:
+    frontend_git_tree = frontend_source_tree_hash(frontend_root)
+    dist_assets = frontend_dist_assets(frontend_root)
+    build_identity = {
+        "assets": dist_assets,
+        "frontend_git_tree_hash": frontend_git_tree,
+        "frontend_milestone_version": FRONTEND_MILESTONE_VERSION,
+        "selected_frontend": "react",
+    }
     return {
         "api_schema_version": review_api_contract.API_SCHEMA_VERSION,
         "backend_package_version": SCHEMA_VERSION,
+        "build_id": stable_hash(build_identity),
         "build_timestamp_utc": media.utc_timestamp(),
+        "cache_policy": {
+            "hashed_assets": "public, max-age=31536000, immutable",
+            "index_and_manifest": "no-store",
+            "schema_version": "final_review_frontend_cache_policy.v1",
+        },
+        "dist_assets": dist_assets,
+        "dist_asset_count": len(dist_assets),
         "frontend_milestone_version": FRONTEND_MILESTONE_VERSION,
-        "frontend_git_tree_hash": frontend_source_tree_hash(frontend_root),
+        "frontend_git_tree_hash": frontend_git_tree,
         "node_version": command_text(["node", "--version"], cwd=frontend_root),
         "npm_version": command_text(["npm", "--version"], cwd=frontend_root),
         "package_lock_sha256": media.sha256_file(frontend_root / "package-lock.json")
         if (frontend_root / "package-lock.json").exists()
         else None,
         "package_root": ".",
+        "review_guidance_policy_version": review_guidance_policy.POLICY_VERSION,
         "schema_version": "final_review_frontend_build_manifest.v1",
         "selected_frontend": "react",
         "served_app_path": "app/",
@@ -4543,6 +4561,24 @@ def frontend_source_tree_hash(frontend_root: Path) -> str:
         digest.update(path.read_bytes())
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def frontend_dist_assets(frontend_root: Path) -> list[dict[str, Any]]:
+    dist_root = frontend_root / "dist"
+    assets: list[dict[str, Any]] = []
+    if not dist_root.exists():
+        return assets
+    for path in sorted(dist_root.rglob("*")):
+        if not path.is_file():
+            continue
+        assets.append(
+            {
+                "bytes": path.stat().st_size,
+                "path": path.relative_to(dist_root).as_posix(),
+                "sha256": media.sha256_file(path),
+            }
+        )
+    return assets
 
 
 def write_version_alignment_audit(package_root: Path) -> dict[str, Any]:
@@ -5783,6 +5819,31 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         if "Broken pipe" not in format:
             super().log_message(format, *args)
 
+    def end_headers(self) -> None:
+        cache_control = self.cache_control_for_path(self.path)
+        if cache_control:
+            self.send_header("Cache-Control", cache_control)
+        super().end_headers()
+
+    @staticmethod
+    def cache_control_for_path(path: str) -> str | None:
+        parsed = urlparse(path)
+        if parsed.path.startswith("/api/"):
+            return "no-store"
+        if parsed.path in {
+            "/",
+            "/index.html",
+            "/app",
+            "/app/",
+            "/app/index.html",
+            "/frontend_build_manifest.json",
+            "/workspace_manifest.json",
+        }:
+            return "no-store"
+        if re.fullmatch(r"/app/assets/.+-[A-Za-z0-9_-]+\.(?:js|css)", parsed.path):
+            return "public, max-age=31536000, immutable"
+        return None
+
     def do_POST(self) -> None:
         try:
             self._do_post()
@@ -6018,7 +6079,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                         "case_id": case_id,
                         "finalized": False,
                         "ready": blockers["ready"],
+                        "review_guidance_policy_version": blockers.get(
+                            "review_guidance_policy_version"
+                        ),
                         "schema_version": "review_finalization_status.v1",
+                        "unreviewed_guidance": blockers.get("unreviewed_guidance"),
                     },
                 }
             )

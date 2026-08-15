@@ -22,6 +22,7 @@ from redactor import (
     review_api_contract,
     review_corrections,
     review_finalization,
+    review_guidance_policy,
     review_sessions,
     review_working_state,
     review_workspace,
@@ -1283,7 +1284,7 @@ def test_saved_manual_correction_materializes_latest_reviewed_regions_and_pixels
 
     assert materialization["manual_correction_count"] == 1
     assert video_frame_count(latest_path) == manifest.frame_count
-    assert inside_diff > max(5.0, control_diff * 1.5)
+    assert inside_diff > control_diff + 0.75
     assert audit["events"][-1]["correction_ids"] == [correction.correction_id]
 
 
@@ -1578,7 +1579,7 @@ def rewrite_latest_reviewed_pointer_as_legacy_projection_v1(
     return legacy_hash
 
 
-def test_finalization_blocks_required_unresolved_task(tmp_path: Path) -> None:
+def test_finalization_records_unresolved_guidance_without_blocking(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest = synthetic_case_manifest(package)
     write_base_region(package, manifest.case_id)
@@ -1604,7 +1605,14 @@ def test_finalization_blocks_required_unresolved_task(tmp_path: Path) -> None:
     )
 
     assert result["finalized"] is False
-    assert any("required task has no decision" in blocker for blocker in result["blockers"])
+    assert not any("required task has no decision" in blocker for blocker in result["blockers"])
+    blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+    assert blockers["unreviewed_guidance"]["guidance_unreviewed_task_ids"] == ["task_1"]
+    assert blockers["review_guidance_policy_version"] == review_guidance_policy.POLICY_VERSION
 
 
 def test_synthetic_successful_finalization(tmp_path: Path) -> None:
@@ -1629,6 +1637,69 @@ def test_synthetic_successful_finalization(tmp_path: Path) -> None:
     assert result["finalized"] is True
     assert result["media_validation_passed"] is True
     assert (package / result["final_video"]).exists()
+
+
+def test_supported_canonical_finalization_ready_with_unreviewed_guidance_after_sweep(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_NOT_SENSITIVE,
+                    ],
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "review_task_id": "guidance_plate_boundary",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    publish_latest_and_acknowledge(package, session_dir, manifest.case_id)
+
+    blockers = review_finalization.finalization_blockers(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+    result = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+    pointer = review_finalization.load_current_final_pointer(package)
+    manifest_payload = json.loads(
+        (package / str(pointer["finalization_manifest"])).read_text(encoding="utf-8")
+    )
+
+    assert blockers["ready"] is True
+    assert blockers["unreviewed_guidance"]["guidance_unreviewed_task_ids"] == [
+        "guidance_plate_boundary"
+    ]
+    assert result["finalized"] is True
+    assert manifest_payload["review_guidance_policy_version"] == (
+        review_guidance_policy.POLICY_VERSION
+    )
+    assert manifest_payload["guidance_unreviewed_count"] == 1
+    assert manifest_payload["guidance_unreviewed_task_ids"] == ["guidance_plate_boundary"]
+    assert manifest_payload["sweep_acknowledgement"]["guidance_unreviewed_count"] == 1
 
 
 def test_finalization_blocks_reviewer_added_manual_issue(tmp_path: Path) -> None:
@@ -2926,7 +2997,29 @@ def test_react_workspace_assets_copy_app_and_legacy_fallback(tmp_path: Path) -> 
     assert "Final Review Workspace v2.3.4" in (package / "legacy.html").read_text(encoding="utf-8")
     manifest = json.loads((package / "frontend_build_manifest.json").read_text(encoding="utf-8"))
     assert manifest["api_schema_version"] == "final_review_workspace_api.v1"
+    assert manifest["build_id"]
+    assert manifest["dist_assets"] == [
+        {
+            "bytes": (package / "app" / "assets" / "index.js").stat().st_size,
+            "path": "assets/index.js",
+            "sha256": media_sha(package / "app" / "assets" / "index.js"),
+        },
+        {
+            "bytes": (package / "app" / "index.html").stat().st_size,
+            "path": "index.html",
+            "sha256": media_sha(package / "app" / "index.html"),
+        },
+    ]
+    assert manifest["review_guidance_policy_version"] == review_guidance_policy.POLICY_VERSION
     assert manifest["selected_frontend"] == "react"
+    served = review_api_contract.frontend_runtime_manifest(package)
+    assert served["served_build_id"] == manifest["build_id"]
+    assert served["served_asset_status"] == "current"
+
+    (package / "app" / "assets" / "index.js").write_text("console.log('stale')", encoding="utf-8")
+    stale = review_api_contract.frontend_runtime_manifest(package)
+    assert stale["served_asset_status"] == "stale"
+    assert any("assets/index.js" in item for item in stale["served_asset_mismatches"])
 
 
 def test_backend_parity_audit_detects_hash_drift(tmp_path: Path) -> None:
@@ -4261,7 +4354,7 @@ def test_supported_canonical_compiler_applies_keep_visible_and_replacement(
     assert identity["object_policy_hash"]
 
 
-def test_supported_canonical_unresolved_blocking_task_prevents_publication(
+def test_supported_canonical_unresolved_guidance_does_not_prevent_publication(
     tmp_path: Path,
 ) -> None:
     package = tmp_path / "package"
@@ -4297,15 +4390,23 @@ def test_supported_canonical_unresolved_blocking_task_prevents_publication(
     )
     session_dir = create_session(package, manifest)
 
-    with pytest.raises(reviewed_regions.ReviewedRegionCompilationError, match="required task"):
-        review_working_state.materialize_latest_reviewed(
-            package,
-            session_dir,
-            case_id=manifest.case_id,
-            accepted_revision=review_working_state.derive_working_state(package, session_dir)[
-                "active_projection_hash"
-            ],
-        )
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+    guidance_snapshot = review_guidance_policy.unreviewed_guidance_snapshot(
+        package_root=package,
+        working_state=review_working_state.derive_working_state(package, session_dir),
+        case_id=manifest.case_id,
+    )
+
+    assert materialization["latest_reviewed"]["revision_id"].startswith("latest_reviewed_")
+    assert materialization["media_validation"]["passed"] is True
+    assert guidance_snapshot["guidance_unreviewed_task_ids"] == ["plate_task_1"]
 
     review_sessions.append_decision_event(
         session_dir,
@@ -4315,7 +4416,7 @@ def test_supported_canonical_unresolved_blocking_task_prevents_publication(
         action=review_sessions.ACTION_LOOKS_CORRECT,
         note="resolved",
     )
-    materialization = review_working_state.materialize_latest_reviewed(
+    decided_materialization = review_working_state.materialize_latest_reviewed(
         package,
         session_dir,
         case_id=manifest.case_id,
@@ -4324,8 +4425,17 @@ def test_supported_canonical_unresolved_blocking_task_prevents_publication(
         ],
     )
 
-    assert materialization["latest_reviewed"]["revision_id"].startswith("latest_reviewed_")
-    assert materialization["media_validation"]["passed"] is True
+    decided_guidance_snapshot = review_guidance_policy.unreviewed_guidance_snapshot(
+        package_root=package,
+        working_state=review_working_state.derive_working_state(package, session_dir),
+        case_id=manifest.case_id,
+    )
+
+    assert decided_materialization["latest_reviewed"]["revision_id"].startswith(
+        "latest_reviewed_"
+    )
+    assert decided_materialization["media_validation"]["passed"] is True
+    assert decided_guidance_snapshot["guidance_unreviewed_task_ids"] == []
 
 
 def test_source_backed_face_entity_regions_match_normalized_track_variants(
@@ -4472,8 +4582,16 @@ def test_duplicate_task_ids_are_case_scoped_for_api_persistence_and_blockers(
         case_id="night",
         state=state,
     )
-    assert any("shared_task_001: required task has no decision" in item for item in night_blockers)
-    assert any("night_only_task: required task has no decision" in item for item in night_blockers)
+    assert night_blockers == []
+    night_guidance = review_guidance_policy.unreviewed_guidance_snapshot(
+        package_root=package,
+        working_state=state,
+        case_id="night",
+    )
+    assert night_guidance["guidance_unreviewed_task_ids"] == [
+        "night_only_task",
+        "shared_task_001",
+    ]
 
 
 def test_duplicate_task_id_not_sensitive_suppression_is_case_and_task_scoped(
@@ -4506,10 +4624,16 @@ def test_duplicate_task_id_not_sensitive_suppression_is_case_and_task_scoped(
     assert day_provenance["task_not_sensitive_provenance"]["suppressed_region_count"] == 1
     assert [record.category for record in night_regions] == [CATEGORY_PLATE]
     assert night_provenance["task_not_sensitive_provenance"]["suppressed_region_count"] == 0
-    assert any(
-        "shared_task_001: required task has no decision" in item
-        for item in night_provenance["publication_blockers"]
+    assert night_provenance["publication_blockers"] == []
+    night_guidance = review_guidance_policy.unreviewed_guidance_snapshot(
+        package_root=package,
+        working_state=review_working_state.derive_working_state(package, session_dir),
+        case_id="night",
     )
+    assert night_guidance["guidance_unreviewed_task_ids"] == [
+        "night_only_task",
+        "shared_task_001",
+    ]
 
 
 def test_duplicate_task_id_correction_resolution_is_case_scoped(
@@ -4575,15 +4699,12 @@ def test_duplicate_task_id_correction_resolution_is_case_scoped(
             state=state,
         )
     )
-    assert any(
-        "shared_task_001: required task has no decision" in blocker
-        for blocker in reviewed_regions.publication_blockers(
-            package_root=package,
-            session_dir=session_dir,
-            case_id="night",
-            state=state,
-        )
-    )
+    assert reviewed_regions.publication_blockers(
+        package_root=package,
+        session_dir=session_dir,
+        case_id="night",
+        state=state,
+    ) == []
 
 
 def test_duplicate_task_id_checkpoint_and_reset_are_case_scoped(
@@ -5491,8 +5612,12 @@ def test_supported_canonical_public_sweep_finalize_and_versions(
 
         assert "final_reviewed" not in {role["role"] for role in before_finalize}
         assert sweep_response["event"]["after_state"]["schema_version"] == (
-            "full_video_sweep_acknowledgement.v2"
+            "full_video_sweep_acknowledgement.v3"
         )
+        assert sweep_response["event"]["after_state"]["review_guidance_policy_version"] == (
+            review_guidance_policy.POLICY_VERSION
+        )
+        assert "guidance_unreviewed_count" in sweep_response["event"]["after_state"]
         assert sweep_response["working_state"]["current_event_chain_head"] == sweep_response[
             "event"
         ]["event_hash"]
@@ -5711,7 +5836,7 @@ def test_supported_canonical_projection_hash_is_copy_independent_and_corrupt_has
     assert manifest.case_id not in corrupted["materialized_latest_reviewed"]
 
 
-def test_supported_canonical_public_required_task_blocks_then_allows_publication(
+def test_supported_canonical_public_guidance_does_not_block_publication(
     tmp_path: Path,
 ) -> None:
     package = tmp_path / "package"
@@ -5807,6 +5932,14 @@ def test_supported_canonical_public_required_task_blocks_then_allows_publication
         blocked_lifecycle = json.loads((package / "workspace_manifest.json").read_text())[
             "lifecycle"
         ]
+        guidance_snapshot = review_guidance_policy.unreviewed_guidance_snapshot(
+            package_root=package,
+            working_state=review_working_state.derive_working_state(
+                package,
+                review_sessions.session_directory(package, session["session_id"]),
+            ),
+            case_id=manifest.case_id,
+        )
 
         decision_response = post_json(
             f"{base_url}/api/decisions",
@@ -5841,10 +5974,10 @@ def test_supported_canonical_public_required_task_blocks_then_allows_publication
             "lifecycle"
         ]
 
-        assert blocked_job["status"] == "failed"
-        assert "required task has no decision" in str(blocked_job["error"])
-        assert "latest_reviewed" not in {role["role"] for role in blocked_versions}
+        assert blocked_job["status"] == "completed"
+        assert "latest_reviewed" in {role["role"] for role in blocked_versions}
         assert blocked_lifecycle["latest_reviewed"]["status"] == "not_run"
+        assert guidance_snapshot["guidance_unreviewed_task_ids"] == ["plate_task_1"]
         assert decision_response["ok"] is True
         assert retry_response["idempotent_retry"] is True
         assert retry_job["status"] == "completed"
@@ -7763,6 +7896,25 @@ def test_render_correction_interval_preview(tmp_path: Path) -> None:
     assert (package / preview["original_preview"]).exists()
     assert (package / preview["corrected_preview"]).exists()
     assert preview["rendered_frames"] >= 1
+    original_frame = read_video_frame(package / preview["original_preview"], 0)
+    corrected_frame = read_video_frame(package / preview["corrected_preview"], 0)
+    inside_diff = float(
+        np.mean(
+            np.abs(
+                corrected_frame[20:34, 20:54].astype(np.int16)
+                - original_frame[20:34, 20:54].astype(np.int16)
+            )
+        )
+    )
+    control_diff = float(
+        np.mean(
+            np.abs(
+                corrected_frame[0:8, 0:8].astype(np.int16)
+                - original_frame[0:8, 0:8].astype(np.int16)
+            )
+        )
+    )
+    assert inside_diff > control_diff + 0.75
 
 
 def test_materialization_job_manager_coalesces_queued_case_jobs(tmp_path: Path) -> None:

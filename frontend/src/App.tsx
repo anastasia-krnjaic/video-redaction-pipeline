@@ -164,6 +164,7 @@ export function App() {
         busy={busy}
         cases={caseTabs}
         error={workspaceState.error}
+        frontend={workspaceState.workspace.frontend}
         route={route}
         resumableSessionId={workspaceState.resumableSessionId}
         session={workspaceState.session}

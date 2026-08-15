@@ -60,8 +60,8 @@ export function ReviewTimeline({ currentFrame, manifest, onSelectTask, selectedT
         <line x1={playheadX} x2={playheadX} y1="4" y2="48" className="timeline-playhead" />
       </svg>
       <div className="legend">
-        <span className="legend-plate">Plate open</span>
-        <span className="legend-face">Face open</span>
+        <span className="legend-plate">Plate guidance</span>
+        <span className="legend-face">Face guidance</span>
         <span className="legend-correct">Correct</span>
         <span className="legend-needs">Needs correction</span>
         <span className="legend-not-sensitive">Not sensitive</span>

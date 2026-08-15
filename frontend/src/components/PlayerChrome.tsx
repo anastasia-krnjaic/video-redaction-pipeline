@@ -169,8 +169,8 @@ export function PlayerChrome({ controller, manifest, onSelectTask, selectedTaskI
         <div className="scrub-playhead" style={{ left: `${playheadPercent}%` }} />
       </div>
       <div className="legend">
-        <span className="legend-plate">Open plate</span>
-        <span className="legend-face">Open face</span>
+        <span className="legend-plate">Plate guidance</span>
+        <span className="legend-face">Face guidance</span>
         <span className="legend-correct">Correct</span>
         <span className="legend-needs">Needs correction</span>
         <span className="legend-not-sensitive">Not sensitive</span>

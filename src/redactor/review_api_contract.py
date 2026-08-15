@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -787,12 +788,57 @@ def workspace_summary(package_root: Path) -> dict[str, Any]:
         if freeze_path.exists()
         else None,
         "entities": load_optional_json(package_root / "review_entities.json", {"cases": {}}),
-        "frontend": load_optional_json(package_root / "frontend_build_manifest.json", {}),
+        "frontend": frontend_runtime_manifest(package_root),
         "raw_signals": load_optional_json(package_root / "raw_audit_signals.json", {}),
         "tasks": tasks,
         "timeline": load_optional_json(package_root / "timeline_marker_audit.json", {}),
         "workspace": workspace,
     }
+
+
+def frontend_runtime_manifest(package_root: Path) -> dict[str, Any]:
+    manifest = dict(load_optional_json(package_root / "frontend_build_manifest.json", {}))
+    assets = [dict(item) for item in list(manifest.get("dist_assets") or [])]
+    actual_assets: list[dict[str, Any]] = []
+    mismatches: list[str] = []
+    app_root = (package_root / "app").resolve()
+    for asset in assets:
+        relative = str(asset.get("path") or "")
+        if not relative:
+            continue
+        path = (app_root / relative).resolve()
+        try:
+            path.relative_to(app_root)
+        except ValueError:
+            mismatches.append(f"{relative}: outside app root")
+            continue
+        if not path.exists() or not path.is_file():
+            mismatches.append(f"{relative}: missing")
+            continue
+        actual = {
+            "bytes": path.stat().st_size,
+            "path": relative,
+            "sha256": sha256_file(path),
+        }
+        actual_assets.append(actual)
+        if str(asset.get("sha256") or "") != actual["sha256"]:
+            mismatches.append(f"{relative}: sha256 mismatch")
+        if int(asset.get("bytes") or -1) != actual["bytes"]:
+            mismatches.append(f"{relative}: byte count mismatch")
+    if manifest:
+        manifest["served_asset_mismatches"] = mismatches
+        manifest["served_asset_status"] = "current" if not mismatches else "stale"
+        manifest["served_build_id"] = manifest.get("build_id")
+        manifest["served_dist_assets"] = actual_assets
+    return manifest
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def task_with_query_presentation(task: dict[str, Any]) -> dict[str, Any]:

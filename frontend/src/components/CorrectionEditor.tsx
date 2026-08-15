@@ -355,7 +355,7 @@ export function PendingCorrectionOverlay({
           );
         })}
       </svg>
-      <span className="pending-correction-label">Saved - updating Latest reviewed</span>
+      <span className="pending-correction-label">Correction saved — applying changes...</span>
     </div>
   );
 }

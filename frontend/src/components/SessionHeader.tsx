@@ -4,6 +4,7 @@ import type { Attribution, Session } from '../types/api';
 interface Props {
   attribution: Attribution;
   error?: string;
+  frontend?: Record<string, unknown>;
   session: Session | null;
   sessionLoadKind?: 'new' | 'resumed';
   resumableSessionId?: string;
@@ -18,6 +19,7 @@ export function SessionHeader({
   attribution,
   busy,
   error,
+  frontend,
   onExport,
   onOpenAttribution,
   onResumeSession,
@@ -28,6 +30,8 @@ export function SessionHeader({
 }: Props) {
   const bannerClass = error ? 'session-banner error' : session ? 'session-banner ready' : 'session-banner';
   const sessionPrefix = sessionLoadKind === 'resumed' ? 'Resumed review session' : 'Active review session';
+  const frontendBuildId = String(frontend?.served_build_id || frontend?.build_id || '');
+  const frontendStatus = String(frontend?.served_asset_status || '');
   const text = error
     ? error
     : session
@@ -44,6 +48,13 @@ export function SessionHeader({
           <p>Source-frame accurate redaction review.</p>
         </div>
         <div className="header-actions">
+          {frontendBuildId ? (
+            <details className={`build-identity ${frontendStatus === 'stale' ? 'stale' : ''}`}>
+              <summary>Technical</summary>
+              <span>UI build {frontendBuildId.slice(0, 12)}</span>
+              {frontendStatus ? <span>{frontendStatus}</span> : null}
+            </details>
+          ) : null}
           {resumableSessionId && !session ? (
             <button type="button" onClick={onResumeSession} disabled={busy}>
               Resume review

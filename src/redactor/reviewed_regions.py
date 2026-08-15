@@ -1450,9 +1450,6 @@ def publication_blockers(
             case_id=case_id,
             task_id=task_id,
         )
-        if task.get("blocking") and decision is None:
-            blockers.append(f"{task_id}: required task has no decision")
-            continue
         if decision is None:
             continue
         invalid_decision = invalid_task_decision_reason(task, decision)

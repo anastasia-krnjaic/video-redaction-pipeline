@@ -7,7 +7,14 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from redactor import case_ids, case_manifests, media, privacy_rendering, rendering
+from redactor import (
+    case_ids,
+    case_manifests,
+    media,
+    privacy_rendering,
+    rendering,
+    review_guidance_policy,
+)
 from redactor.detection import rational_to_float
 from redactor.privacy_records import (
     APPROVAL_ACCEPTED,
@@ -46,7 +53,7 @@ FINAL_REGION_SCHEMA_VERSION = "final_region_provenance.v1"
 CANONICAL_FINALIZATION_SCHEMA_VERSION = "canonical_review_finalization.v1"
 FINALIZATION_REVISION_SCHEMA_VERSION = "finalization_revision.v1"
 FINAL_CURRENT_POINTER_SCHEMA_VERSION = "final_current_pointer.v1"
-FULL_VIDEO_SWEEP_ACK_SCHEMA_VERSION = "full_video_sweep_acknowledgement.v2"
+FULL_VIDEO_SWEEP_ACK_SCHEMA_VERSION = "full_video_sweep_acknowledgement.v3"
 FINAL_CURRENT_POINTER_RELATIVE_PATH = Path("final") / "current.json"
 FINALIZATION_FAILURE_INJECTION_ENV = "REDACTOR_FINALIZATION_FAIL_AT"
 
@@ -80,9 +87,6 @@ def finalization_blockers(
             case_id=case_id,
             task_id=task_id,
         )
-        if task.get("blocking") and decision is None:
-            blockers.append(f"{task_id}: required task has no decision")
-            continue
         if decision is None:
             continue
         invalid_decision = invalid_task_decision_reason(task, decision)
@@ -226,7 +230,13 @@ def finalization_blockers(
         "blockers": blockers,
         "case_id": case_id,
         "ready": not blockers,
+        "review_guidance_policy_version": review_guidance_policy.POLICY_VERSION,
         "schema_version": "review_finalization_blockers.v1",
+        "unreviewed_guidance": review_guidance_policy.unreviewed_guidance_snapshot(
+            package_root=package_root,
+            working_state=working_state,
+            case_id=case_id,
+        ),
     }
 
 
@@ -499,6 +509,7 @@ def finalize_canonical_reviewed_case(
         candidate["working_state"],
         case_id=case_id,
     )
+    guidance_snapshot = dict(candidate["unreviewed_guidance"])
     finalization_input = finalization_input_payload(
         candidate=candidate,
         sweep_acknowledgement=sweep,
@@ -619,6 +630,11 @@ def finalize_canonical_reviewed_case(
             "finalization_input_sha256": finalization_input_sha256,
             "finalization_status": "approved",
             "finalized_at": media.utc_timestamp(),
+            "guidance_identity_hash": guidance_snapshot["guidance_identity_hash"],
+            "guidance_unreviewed_count": guidance_snapshot["guidance_unreviewed_count"],
+            "guidance_unreviewed_task_ids": guidance_snapshot[
+                "guidance_unreviewed_task_ids"
+            ],
             "latest_reviewed_media_validation_sha256": candidate[
                 "media_validation_sha256"
             ],
@@ -643,6 +659,7 @@ def finalize_canonical_reviewed_case(
                 "schema_version": "region_validation_identity.v1",
             },
             "resolved_task_set_hash": task_identity["resolved_task_set_hash"],
+            "review_guidance_policy_version": review_guidance_policy.POLICY_VERSION,
             "review_session_id": session_dir.name,
             "reviewed_region_set_sha256": candidate["reviewed_region_set_sha256"],
             "schema_version": FINALIZATION_REVISION_SCHEMA_VERSION,
@@ -652,6 +669,7 @@ def finalize_canonical_reviewed_case(
             "source_sha256": candidate["source_sha256"],
             "sweep_acknowledgement": sweep,
             "sweep_acknowledgement_sha256": sweep["sweep_acknowledgement_sha256"],
+            "unreviewed_guidance_snapshot": guidance_snapshot,
             "workspace_manifest_sha256": candidate["workspace_manifest_sha256"],
         }
         finalization_manifest["finalization_manifest_sha256"] = stable_hash(
@@ -875,6 +893,11 @@ def resolve_canonical_latest_reviewed_candidate(
         "revision_manifest_sha256": str(revision_manifest.get("revision_manifest_sha256") or ""),
         "reviewed_region_identity": dict(current_digest.get("reviewed_region_identity") or {}),
         "reviewed_region_set_sha256": reviewed_region_set_sha256,
+        "unreviewed_guidance": review_guidance_policy.unreviewed_guidance_snapshot(
+            package_root=package_root,
+            working_state=working_state,
+            case_id=case_id,
+        ),
         "selected_categories": reviewed_regions.selected_categories(workspace),
         "session_head_hash": validated.get("session_head_hash"),
         "source_config_validation": source_config_validation,
@@ -948,13 +971,25 @@ def sweep_acknowledgement_binding(
         "case_id": case_id,
         "current_session_head_before_ack": last_event_hash(session_dir),
         "explicit_reviewer_action": "full_video_sweep_acknowledged",
+        "guidance_identity_hash": candidate["unreviewed_guidance"][
+            "guidance_identity_hash"
+        ],
+        "guidance_unreviewed_count": candidate["unreviewed_guidance"][
+            "guidance_unreviewed_count"
+        ],
+        "guidance_unreviewed_task_ids": candidate["unreviewed_guidance"][
+            "guidance_unreviewed_task_ids"
+        ],
         "latest_reviewed_revision_id": candidate["revision_id"],
         "latest_reviewed_video_sha256": candidate["latest_video_sha256"],
+        "review_guidance_policy_version": review_guidance_policy.POLICY_VERSION,
         "reviewed_region_set_sha256": candidate["reviewed_region_set_sha256"],
         "schema_version": FULL_VIDEO_SWEEP_ACK_SCHEMA_VERSION,
         "session_head_hash": candidate["session_head_hash"],
         "session_id": session_dir.resolve().name,
         "source_sha256": candidate["source_sha256"],
+        "sweep_coverage_status": review_guidance_policy.SWEEP_COVERAGE_STATUS,
+        "unadjudicated_guidance_status": review_guidance_policy.UNADJUDICATED_STATUS,
         "workspace_manifest_sha256": candidate["workspace_manifest_sha256"],
     }
 
@@ -973,11 +1008,15 @@ def validate_canonical_sweep_acknowledgement(
         "case_id": case_id,
         "latest_reviewed_revision_id": candidate["revision_id"],
         "latest_reviewed_video_sha256": candidate["latest_video_sha256"],
+        "review_guidance_policy_version": review_guidance_policy.POLICY_VERSION,
         "reviewed_region_set_sha256": candidate["reviewed_region_set_sha256"],
         "session_id": candidate["pointer"].get("review_session_id"),
         "source_sha256": candidate["source_sha256"],
         "workspace_manifest_sha256": candidate["workspace_manifest_sha256"],
     }
+    guidance = dict(candidate.get("unreviewed_guidance") or {})
+    expected["guidance_identity_hash"] = guidance.get("guidance_identity_hash")
+    expected["guidance_unreviewed_count"] = guidance.get("guidance_unreviewed_count")
     blockers = [
         f"{case_id}: sweep_acknowledgement:{key} mismatch"
         for key, value in expected.items()

@@ -221,7 +221,7 @@ test.describe('Final Review React workspace', () => {
     await exitFullscreen(page);
 
     await page.getByRole('button', { name: 'Night' }).click();
-    await expect(page.locator('.filter-row button.active')).toContainText('Open');
+    await expect(page.locator('.filter-row button.active')).toContainText('Guidance');
     await expect(page.locator('.version-selector select option')).toContainText([
       'Original',
       'Automatic',
@@ -333,7 +333,7 @@ test.describe('Final Review React workspace', () => {
     await page.locator('.filter-row').getByRole('button', { name: /^Correct/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[0]}"]`)).toBeVisible();
 
-    await page.locator('.filter-row').getByRole('button', { name: /^Open/ }).click();
+    await page.locator('.filter-row').getByRole('button', { name: /^Guidance/ }).click();
     await Promise.all([
       page.waitForResponse((response) => response.url().includes('/api/v1/decisions') && response.request().method() === 'POST'),
       page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"] .decision-needs-correction`).click(),
@@ -344,7 +344,7 @@ test.describe('Final Review React workspace', () => {
     await page.getByRole('button', { name: /^Review$/ }).click();
     await page.locator('.filter-row').getByRole('button', { name: /^Needs correction/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"]`)).toBeVisible();
-    await page.locator('.filter-row').getByRole('button', { name: /^Open/ }).click();
+    await page.locator('.filter-row').getByRole('button', { name: /^Guidance/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[1]}"]`)).toHaveCount(0);
 
     await expect(page.locator('.filter-row')).not.toContainText('Unsure');
@@ -356,7 +356,7 @@ test.describe('Final Review React workspace', () => {
     await expect(page.locator(`.timeline-marker[data-task-id="${initialTaskIds[2]}"]`)).toHaveClass(/marker-not-sensitive/);
     await page.locator('.filter-row').getByRole('button', { name: /^Not sensitive/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[2]}"]`)).toBeVisible();
-    await page.locator('.filter-row').getByRole('button', { name: /^Open/ }).click();
+    await page.locator('.filter-row').getByRole('button', { name: /^Guidance/ }).click();
     await expect(page.locator(`.task-card[data-task-id="${initialTaskIds[2]}"]`)).toHaveCount(0);
   });
 
@@ -576,7 +576,7 @@ test.describe('Final Review React workspace', () => {
     await page.getByRole('button', { name: 'Preview correction' }).click();
     await expect(page.getByRole('button', { name: 'Save correction' })).toBeEnabled({ timeout: 120_000 });
     await page.getByRole('button', { name: 'Save correction' }).click();
-    await expect(page.locator('.case-subtitle')).toContainText(/Saved - updating Latest reviewed|Published/, {
+    await expect(page.locator('.case-subtitle')).toContainText(/Correction saved — applying changes|Published/, {
       timeout: 120_000,
     });
     expect(savedCorrections.at(-1)).toMatchObject({

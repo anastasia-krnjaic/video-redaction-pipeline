@@ -291,7 +291,7 @@ function reviewGroupReasonChips(children: TaskWithDecision[]): string[] {
 }
 
 export function decisionLabel(action?: string): string {
-  if (!action) return 'Open';
+  if (!action) return 'Guidance';
   if (action === ACTIONS.looksCorrect) return 'Correct';
   if (action === ACTIONS.notSensitive) return 'Not sensitive';
   if (NEEDS_CORRECTION_ACTIONS.has(action)) return 'Needs correction';

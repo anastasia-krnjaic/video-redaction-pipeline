@@ -5,6 +5,12 @@ import { bucketCounts } from '../state/reviewState';
 import { ReviewTaskCard } from './ReviewTaskCard';
 
 const buckets: QueueBucket[] = ['Open', 'Needs correction', 'Correct', 'Not sensitive'];
+const bucketLabels: Record<QueueBucket, string> = {
+  Open: 'Guidance',
+  'Needs correction': 'Needs correction',
+  Correct: 'Correct',
+  'Not sensitive': 'Not sensitive',
+};
 
 interface Props {
   bucket: QueueBucket;
@@ -42,7 +48,12 @@ export function ReviewQueue({
     const selectedCard = Array.from(listRef.current?.querySelectorAll<HTMLElement>('.task-card') || []).find(
       (card) => card.dataset.taskId === selectedTaskId,
     );
-    selectedCard?.scrollIntoView({ block: 'nearest' });
+    if (selectedCard && listRef.current) {
+      listRef.current.scrollTo({
+        top: Math.max(0, selectedCard.offsetTop - listRef.current.offsetTop - 12),
+        behavior: 'smooth',
+      });
+    }
   }, [bucket, selectedTaskId]);
 
   return (
@@ -51,7 +62,7 @@ export function ReviewQueue({
         <div className="task-summary">
           <div className="stat">
             <strong>{counts.Open}</strong>
-            <span>Open</span>
+            <span>Guidance</span>
           </div>
           <div className="stat">
             <strong>{counts['Needs correction']}</strong>
@@ -67,7 +78,7 @@ export function ReviewQueue({
             className={item === bucket ? 'active' : ''}
             onClick={() => onBucketChange(item)}
           >
-            {item} <span className="count">{counts[item]}</span>
+            {bucketLabels[item]} <span className="count">{counts[item]}</span>
           </button>
         ))}
       </div>
@@ -87,11 +98,11 @@ export function ReviewQueue({
           ))
         ) : reviewComplete && bucket === 'Open' ? (
           <div className="completion-state" role="status">
-            <strong>REVIEW COMPLETE</strong>
+            <strong>GUIDANCE CLEAR</strong>
             <p className="muted">Ready to build Latest reviewed.</p>
           </div>
         ) : (
-          <p className="muted empty-state">No tasks in this bucket.</p>
+          <p className="muted empty-state">No guidance in this bucket.</p>
         )}
       </div>
       {optionalTasks.length ? (

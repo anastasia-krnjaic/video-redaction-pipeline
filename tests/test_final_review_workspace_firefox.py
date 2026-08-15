@@ -401,7 +401,7 @@ def test_final_review_workspace_firefox_entity_timeline_smoke(tmp_path: Path) ->
                 record_step(report, "migration_session_app_load")
 
                 assert bucket_names(day_panel) == [
-                    "Open",
+                    "Guidance",
                     "Needs correction",
                     "Correct",
                     "Not sensitive",
@@ -410,9 +410,9 @@ def test_final_review_workspace_firefox_entity_timeline_smoke(tmp_path: Path) ->
                 assert "Completed" not in bucket_names(day_panel)
                 record_step(report, "canonical_queue_buckets")
 
-                click_bucket(page, "day", "Open")
+                click_bucket(page, "day", "Guidance")
                 day_group = first_open_plate_group(day_panel)
-                assert day_group.locator(".task-state-row .badge").first.inner_text() == "Open"
+                assert day_group.locator(".task-state-row .badge").first.inner_text() == "Guidance"
                 day_group_id = day_group.get_attribute("data-task-id")
                 assert day_group_id
                 day_group.locator(".task-title").click()
@@ -437,16 +437,16 @@ def test_final_review_workspace_firefox_entity_timeline_smoke(tmp_path: Path) ->
                 night_panel = active_case_panel(page, "night")
                 assert "night" in night_panel.locator(".case-header").inner_text().lower()
                 assert bucket_names(night_panel) == [
-                    "Open",
+                    "Guidance",
                     "Needs correction",
                     "Correct",
                     "Not sensitive",
                 ]
-                click_bucket(page, "night", "Open")
+                click_bucket(page, "night", "Guidance")
                 night_duplicate = task_card_for_child(page, "night", GROUPED_CHILD_TASK_ID)
                 assert (
                     night_duplicate.locator(".task-state-row .badge").first.inner_text()
-                    == "Open"
+                    == "Guidance"
                 )
                 night_group_id = night_duplicate.get_attribute("data-task-id")
                 assert night_group_id and night_group_id != GROUPED_CHILD_TASK_ID
@@ -496,10 +496,10 @@ def test_final_review_workspace_firefox_entity_timeline_smoke(tmp_path: Path) ->
 
                 page.get_by_role("button", name="Day").click()
                 active_case_panel(page, "day")
-                click_bucket(page, "day", "Open")
+                click_bucket(page, "day", "Guidance")
                 day_group = page.locator(task_card_selector("day", day_group_id))
                 day_group.wait_for(state="visible", timeout=5_000)
-                assert day_group.locator(".task-state-row .badge").first.inner_text() == "Open"
+                assert day_group.locator(".task-state-row .badge").first.inner_text() == "Guidance"
                 record_step(
                     report,
                     "day_group_still_open_after_night_decision",

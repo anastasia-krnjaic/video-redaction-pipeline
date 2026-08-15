@@ -32,10 +32,10 @@ export function ReviewTaskCard({ manifest, onDecision, onFixNow, onSelect, pendi
       </div>
       <div className="task-state-row">
         <span className={`badge ${badgeClass(task)}`}>
-          {task.decision ? decisionLabel(task.decision.action) : task.bucket}
+          {task.decision ? decisionLabel(task.decision.action) : bucketLabel(task.bucket)}
         </span>
         {task.decision_state === 'resolved' ? <span className="badge done">Corrected</span> : null}
-        {task.blocking ? <span className="badge warn">Blocking</span> : null}
+        {task.bucket === 'Needs correction' ? <span className="badge warn">Blocking</span> : null}
         {task.reason_chips.map((chip) => (
           <span className="badge neutral" key={chip}>{chip}</span>
         ))}
@@ -81,6 +81,10 @@ function badgeClass(task: ReviewGroup): string {
   if (task.bucket === 'Correct') return 'done';
   if (task.bucket === 'Not sensitive') return 'neutral';
   return 'needs-correction';
+}
+
+function bucketLabel(bucket: ReviewGroup['bucket']): string {
+  return bucket === 'Open' ? 'Guidance' : bucket;
 }
 
 function technicalDetails(task: ReviewGroup): Record<string, unknown> {

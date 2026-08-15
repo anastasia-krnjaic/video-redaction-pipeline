@@ -10,7 +10,6 @@ import {
   previewCorrection,
   resetToAutomaticBaseline,
   requestLatestReviewedBuild,
-  restartReviewWorkflow,
   retryMaterializationJob,
   restoreCheckpoint,
   saveCorrection as saveCorrectionRequest,
@@ -149,7 +148,6 @@ export function CaseReviewPage({
   const [checkpointName, setCheckpointName] = useState('');
   const [checkpointBusy, setCheckpointBusy] = useState<string | null>(null);
   const [checkpointDeleteTarget, setCheckpointDeleteTarget] = useState<Record<string, unknown> | null>(null);
-  const [restartConfirmOpen, setRestartConfirmOpen] = useState(false);
   const [resetEditsConfirmOpen, setResetEditsConfirmOpen] = useState(false);
   const [materializationJobs, setMaterializationJobs] = useState<Record<string, TrackedMaterializationJob>>({});
   const [materializationError, setMaterializationError] = useState<string>();
@@ -223,17 +221,18 @@ export function CaseReviewPage({
   const materializationStatusText = activeMaterializationJobs[0]
     ? formatMaterializationStatus(activeMaterializationJobs[0].job)
     : undefined;
-  const reviewComplete = tasks.length > 0 && counts.Open === 0 && counts['Needs correction'] === 0;
   const correctionAttentionCount = manualTasks
     .filter((task) => task.case_id === caseId)
     .filter((task) => task.normal_task_class === 'correction_verification')
-    .filter((task) => task.actionable === false || task.decision_state !== 'resolved')
+    .filter((task) => task.actionable !== false && task.decision_state !== 'resolved')
     .length + counts['Needs correction'];
+  const reviewReady = correctionAttentionCount === 0;
+  const allGuidanceAddressed = reviewReady && counts.Open === 0;
   const latestReviewedStatus = latestReviewedStatusText({
     activeJobs: activeMaterializationJobs,
     latestRole: materializedLatestRole,
     materializationError,
-    reviewComplete,
+    reviewReady,
     workingState,
   });
   const latestReviewedCurrent = latestReviewedStatus === 'Latest reviewed current';
@@ -297,7 +296,7 @@ export function CaseReviewPage({
   }, [caseId, session?.session_id, workingState?.active_projection_hash, workingState?.current_event_chain_head]);
 
   useEffect(() => {
-    if (!session?.session_id || !reviewComplete || activeMaterializationJobKey) return;
+    if (mode !== 'review' || !session?.session_id || !reviewReady || activeMaterializationJobKey) return;
     if (latestReviewedStatus !== 'Ready to build Latest reviewed' && latestReviewedStatus !== 'Latest reviewed stale — review changed') return;
     const revision = String(workingState?.active_projection_hash || workingState?.state_hash || '');
     const requestKey = `${caseId}:${revision}:${latestReviewedStatus}`;
@@ -322,7 +321,8 @@ export function CaseReviewPage({
     attribution,
     caseId,
     latestReviewedStatus,
-    reviewComplete,
+    mode,
+    reviewReady,
     session?.session_id,
     workingState?.active_projection_hash,
     workingState?.state_hash,
@@ -957,32 +957,6 @@ export function CaseReviewPage({
     }
   };
 
-  const restartReviewState = async () => {
-    if (!session) {
-      onError('Start review before restarting review.');
-      return;
-    }
-    setCheckpointBusy('restart');
-    onError(undefined);
-    try {
-      const result = await restartReviewWorkflow({
-        session_id: session.session_id,
-        actor: attribution || { display_name: null },
-        case_id: caseId,
-      });
-      appendEvents([result.event]);
-      applyWorkingStateProjection(result.working_state);
-      setBucket('Open');
-      setSelectedTaskId(null);
-      setFocusTarget(null);
-      setRestartConfirmOpen(false);
-    } catch (err) {
-      onError(`Review was not restarted: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setCheckpointBusy(null);
-    }
-  };
-
   const resetReviewState = async () => {
     if (!session) {
       onError('Start review before resetting edits.');
@@ -1070,7 +1044,7 @@ export function CaseReviewPage({
             <details className="materialization-blockers">
               <summary>
                 <strong>Latest reviewed not ready</strong>
-                <span>{counts.Open} Open queries remain</span>
+                <span>{counts.Open} guidance items remain optional</span>
                 <span>{correctionAttentionCount} corrections need attention</span>
                 <span>View technical blockers</span>
               </summary>
@@ -1128,19 +1102,16 @@ export function CaseReviewPage({
               </button>
             </span>
           ))}
-          <button type="button" onClick={() => setRestartConfirmOpen(true)} disabled={checkpointBusy === 'restart'}>
-            {checkpointBusy === 'restart' ? 'Restarting...' : 'Restart review'}
-          </button>
           <button type="button" className="danger" onClick={() => setResetEditsConfirmOpen(true)} disabled={checkpointBusy === 'reset-edits'}>
             {checkpointBusy === 'reset-edits' ? 'Resetting...' : 'Reset this case to Automatic baseline'}
           </button>
         </div>
       ) : null}
-      <section className={`next-step-panel ${reviewComplete ? 'complete' : 'progress'}`} aria-label={`${manifest.display_name} review progress`}>
+      <section className={`next-step-panel ${reviewReady ? 'complete' : 'progress'}`} aria-label={`${manifest.display_name} review progress`}>
         <div>
-          <strong>{reviewComplete ? 'REVIEW COMPLETE' : 'REVIEW IN PROGRESS'}</strong>
+          <strong>{reviewReady ? (allGuidanceAddressed ? 'GUIDANCE CLEAR' : 'GUIDANCE READY') : 'NEEDS CORRECTION'}</strong>
           <p className="muted">
-            Open {counts.Open} · Needs correction {counts['Needs correction']} · Correct {counts.Correct} · Not sensitive {counts['Not sensitive']}
+            Guidance remaining: {counts.Open} — optional · Needs correction: {counts['Needs correction']} — blocking · Correct {counts.Correct} · Not sensitive {counts['Not sensitive']}
           </p>
         </div>
         <div>
@@ -1206,7 +1177,7 @@ export function CaseReviewPage({
             selectedTaskId={selectedTaskId}
             tasks={tasks}
             optionalTasks={optionalTasks}
-            reviewComplete={reviewComplete}
+            reviewComplete={allGuidanceAddressed}
             onBucketChange={setBucket}
             onDecision={persistDecision}
             onFixNow={openCorrectionEditor}
@@ -1287,24 +1258,6 @@ export function CaseReviewPage({
                 {checkpointBusy === `delete:${String(checkpointDeleteTarget['checkpoint_uuid'] || '')}` ? 'Deleting...' : 'Delete checkpoint'}
               </button>
               <button type="button" onClick={() => setCheckpointDeleteTarget(null)} disabled={checkpointBusy === `delete:${String(checkpointDeleteTarget['checkpoint_uuid'] || '')}`}>
-                Cancel
-              </button>
-            </div>
-          </div>
-        </section>
-      ) : null}
-      {restartConfirmOpen ? (
-        <section className="modal open" aria-modal="true" role="dialog" aria-labelledby="restart-case-title">
-          <div className="modal-card">
-            <h2 id="restart-case-title">Restart {manifest.display_name} review?</h2>
-            <p className="muted">
-              Clear this case's task decisions, review progress counters, selected task, and full-video sweep acknowledgement. Entity edits, merges, manual redactions, checkpoints, and Latest reviewed are preserved.
-            </p>
-            <div className="button-row">
-              <button type="button" className="primary" onClick={() => void restartReviewState()} disabled={checkpointBusy === 'restart'}>
-                {checkpointBusy === 'restart' ? 'Restarting...' : 'Restart review'}
-              </button>
-              <button type="button" onClick={() => setRestartConfirmOpen(false)} disabled={checkpointBusy === 'restart'}>
                 Cancel
               </button>
             </div>
@@ -1419,18 +1372,18 @@ function latestReviewedStatusText({
   activeJobs,
   latestRole,
   materializationError,
-  reviewComplete,
+  reviewReady,
   workingState,
 }: {
   activeJobs: TrackedMaterializationJob[];
   latestRole?: MediaVersion;
   materializationError?: string;
-  reviewComplete: boolean;
+  reviewReady: boolean;
   workingState?: WorkingState;
-}): 'Review incomplete' | 'Ready to build Latest reviewed' | 'Building Latest reviewed' | 'Latest reviewed current' | 'Latest reviewed stale — review changed' | 'Latest reviewed validation failed' {
+}): 'Needs correction blocks Latest reviewed' | 'Ready to build Latest reviewed' | 'Building Latest reviewed' | 'Latest reviewed current' | 'Latest reviewed stale — review changed' | 'Latest reviewed validation failed' {
   if (materializationError) return 'Latest reviewed validation failed';
   if (activeJobs.length) return 'Building Latest reviewed';
-  if (!reviewComplete) return 'Review incomplete';
+  if (!reviewReady) return 'Needs correction blocks Latest reviewed';
   if (!latestRole) return 'Ready to build Latest reviewed';
   if (latestRole.media_validation_passed === false) return 'Latest reviewed validation failed';
   const activeRevision = String(workingState?.active_projection_hash || '');
