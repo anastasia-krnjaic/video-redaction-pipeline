@@ -3,15 +3,19 @@ import {
   acknowledgeFullVideoSweep,
   createCheckpoint,
   deleteCheckpoint,
+  loadFinalizationStatus,
   loadMaterializationJob,
+  loadWorkingState,
   mergeEntities,
   previewCorrection,
   resetToAutomaticBaseline,
+  requestLatestReviewedBuild,
   restartReviewWorkflow,
   retryMaterializationJob,
   restoreCheckpoint,
   saveCorrection as saveCorrectionRequest,
   saveDecision,
+  saveDecisionGroup,
   saveBulkEntityPolicy,
   saveEntityPolicy,
 } from '../api/client';
@@ -30,13 +34,14 @@ import { usePersistentState } from '../hooks/usePersistentState';
 import { useVideoController } from '../hooks/useVideoController';
 import {
   ACTIONS,
+  authoritativeWorkingStateAfterSweepApproval,
   bucketCounts,
-  policyVerificationTask,
+  optionalReviewGroups,
+  requiredReviewGroups,
   tasksForCase,
   normalizeDecisionsByCase,
   normalizeTaskResolutionsByCase,
   withTaskDecision,
-  withPolicyTaskId,
   withoutTaskResolution,
 } from '../state/reviewState';
 import { materializationJobMatchesCurrentProjection } from '../state/materialization';
@@ -45,6 +50,7 @@ import type {
   AuditEvent,
   Correction,
   Entity,
+  FinalizationStatus,
   MaterializationJob,
   MediaVersion,
   Session,
@@ -62,6 +68,7 @@ import type {
   EntityPolicy,
   ManualRedactionCategory,
   QueueBucket,
+  ReviewGroup,
   ReviewMode,
   TaskResolutionsByCase,
   TaskWithDecision,
@@ -137,6 +144,8 @@ export function CaseReviewPage({
   const [previewReady, setPreviewReady] = useState(false);
   const [previewToken, setPreviewToken] = useState<string>();
   const [correctionSaveStatus, setCorrectionSaveStatus] = useState<string>();
+  const [sweepBusy, setSweepBusy] = useState(false);
+  const [finalizationStatus, setFinalizationStatus] = useState<FinalizationStatus>();
   const [checkpointName, setCheckpointName] = useState('');
   const [checkpointBusy, setCheckpointBusy] = useState<string | null>(null);
   const [checkpointDeleteTarget, setCheckpointDeleteTarget] = useState<Record<string, unknown> | null>(null);
@@ -152,17 +161,25 @@ export function CaseReviewPage({
   const seekToFrameRef = useRef<(frame: number) => void>(() => {});
   const workingStateRef = useRef<WorkingState | undefined>(workingState);
   const editDraftContextRef = useRef<string | null>(null);
+  const autoBuildRequestRef = useRef<string>('');
 
   const allTasks = useMemo(
     () => [...baseTasks, ...manualTasks].filter((task) => task.case_id === caseId),
     [baseTasks, caseId, manualTasks],
   );
-  const tasks = useMemo(
+  const taskRows = useMemo(
     () => tasksForCase(allTasks, decisions, caseId, taskResolutions),
     [allTasks, caseId, decisions, taskResolutions],
   );
+  const tasks = useMemo(() => requiredReviewGroups(taskRows), [taskRows]);
+  const optionalTasks = useMemo(() => optionalReviewGroups(taskRows), [taskRows]);
   const counts = useMemo(() => bucketCounts(tasks), [tasks]);
-  const selectedTask = tasks.find((task) => task.review_task_id === selectedTaskId) || tasks[0] || null;
+  const selectedGroup = tasks.find((task) => task.review_task_id === selectedTaskId) || null;
+  const selectedTask =
+    selectedGroup?.child_tasks[0] ||
+    taskRows.find((task) => task.review_task_id === selectedTaskId) ||
+    taskRows[0] ||
+    null;
   const materializedLatestRole = workingState?.materialized_latest_reviewed?.[caseId] as MediaVersion | undefined;
   const caseEntityIds = useMemo(() => {
     const ids = new Set((workspace.entities.cases[caseId] || []).map((entity) => entity.entity_id));
@@ -171,6 +188,15 @@ export function CaseReviewPage({
     }
     return ids;
   }, [caseId, entityOverrides, workspace.entities.cases]);
+  const relatedTaskCountByEntity = useMemo(() => {
+    const countsByEntity: Record<string, number> = {};
+    for (const task of taskRows) {
+      const targets = (Array.isArray(task.target_entity_ids) ? task.target_entity_ids : []).map(String);
+      if (targets.length !== 1) continue;
+      countsByEntity[targets[0]] = (countsByEntity[targets[0]] || 0) + 1;
+    }
+    return countsByEntity;
+  }, [taskRows]);
 
   const roles = useMemo(() => {
     const sessionLatestRole = previewRole || latestRole || materializedLatestRole;
@@ -181,9 +207,10 @@ export function CaseReviewPage({
   const [draft, setDraft] = useState<CorrectionDraft>(() => initialDraft(caseId, manifest, caseFrame, selectedTask));
   const currentSourceFrame = caseToSourceFrame(manifest, caseFrame);
   const activeMaterializationJobs = Object.values(materializationJobs).filter(({ job }) => job.case_id === caseId && (job.status === 'queued' || job.status === 'running'));
+  const savedCorrectionOverlayActive = activeMaterializationJobs.length > 0 || Boolean(correctionSaveStatus?.startsWith('Correction saved'));
   const pendingCorrectionRegions = useMemo(
-    () => pendingRegionsForSourceFrame(corrections, manualTasks, caseId, currentSourceFrame),
-    [caseId, corrections, currentSourceFrame, manualTasks],
+    () => pendingRegionsForSourceFrame(corrections, manualTasks, caseId, currentSourceFrame, savedCorrectionOverlayActive),
+    [caseId, corrections, currentSourceFrame, manualTasks, savedCorrectionOverlayActive],
   );
   const activeMaterializationJobKey = useMemo(
     () => Object.values(materializationJobs)
@@ -210,8 +237,17 @@ export function CaseReviewPage({
     workingState,
   });
   const latestReviewedCurrent = latestReviewedStatus === 'Latest reviewed current';
-  const sweepAcknowledged = Boolean((workingState?.sweep_acknowledgements as Record<string, unknown> | undefined)?.[caseId]);
-  const finalNextStep = sweepAcknowledged && latestReviewedCurrent ? 'Ready to finalize' : latestReviewedCurrent ? 'Ready for final full-video review' : 'Final full-video review waits for current Latest reviewed';
+  const sweepAcknowledgement = (workingState?.sweep_acknowledgements as Record<string, unknown> | undefined)?.[caseId] as Record<string, unknown> | undefined;
+  const sweepAcknowledged = Boolean(sweepAcknowledgement);
+  const sweepStale = sweepAcknowledged && (
+    !latestReviewedCurrent ||
+    finalizationBlockerGroups(finalizationStatus).some((group) => group.key === 'full_video_approval')
+  );
+  const finalNextStep = finalizationStatus?.ready
+    ? 'Ready to finalize'
+    : latestReviewedCurrent
+      ? 'Ready for final full-video review'
+      : 'Final full-video review waits for current Latest reviewed';
 
   useEffect(() => {
     eventsRef.current = events;
@@ -238,14 +274,74 @@ export function CaseReviewPage({
   }, [controller.seekToFrame]);
 
   useEffect(() => {
+    let cancelled = false;
+    if (!session?.session_id) {
+      setFinalizationStatus(undefined);
+      return undefined;
+    }
+    const load = async () => {
+      try {
+        const status = await loadFinalizationStatus({
+          case_id: caseId,
+          session_id: session.session_id,
+        });
+        if (!cancelled) setFinalizationStatus(status);
+      } catch {
+        if (!cancelled) setFinalizationStatus(undefined);
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [caseId, session?.session_id, workingState?.active_projection_hash, workingState?.current_event_chain_head]);
+
+  useEffect(() => {
+    if (!session?.session_id || !reviewComplete || activeMaterializationJobKey) return;
+    if (latestReviewedStatus !== 'Ready to build Latest reviewed' && latestReviewedStatus !== 'Latest reviewed stale — review changed') return;
+    const revision = String(workingState?.active_projection_hash || workingState?.state_hash || '');
+    const requestKey = `${caseId}:${revision}:${latestReviewedStatus}`;
+    if (!revision || autoBuildRequestRef.current === requestKey) return;
+    autoBuildRequestRef.current = requestKey;
+    const run = async () => {
+      try {
+        const result = await requestLatestReviewedBuild({
+          session_id: session.session_id,
+          actor: attribution || { display_name: null },
+          case_id: caseId,
+        });
+        if (result.working_state) applyWorkingStateProjection(result.working_state);
+        trackMaterializationJob(result.materialization_job || result.job);
+      } catch (err) {
+        setMaterializationError(err instanceof Error ? err.message : String(err));
+      }
+    };
+    void run();
+  }, [
+    activeMaterializationJobKey,
+    attribution,
+    caseId,
+    latestReviewedStatus,
+    reviewComplete,
+    session?.session_id,
+    workingState?.active_projection_hash,
+    workingState?.state_hash,
+  ]);
+
+  useEffect(() => {
     if (!roles.some((role) => role.role === selectedRole)) {
       setSelectedRole(defaultRole(roles));
     }
   }, [roles, selectedRole, setSelectedRole]);
 
   useEffect(() => {
-    if (!selectedTaskId && tasks[0]) setSelectedTaskId(tasks[0].review_task_id);
-  }, [selectedTaskId, setSelectedTaskId, tasks]);
+    if (mode !== 'review') return;
+    if (!tasks.length) return;
+    if (!selectedTaskId || !tasks.some((task) => task.review_task_id === selectedTaskId)) {
+      const firstOpen = tasks.find((task) => task.bucket === 'Open');
+      setSelectedTaskId((firstOpen || tasks[0]).review_task_id);
+    }
+  }, [mode, selectedTaskId, setSelectedTaskId, tasks]);
 
   useEffect(() => {
     setDraft((current) => withDraftHash({ ...current, selectedTaskId: selectedTask?.review_task_id }));
@@ -256,16 +352,16 @@ export function CaseReviewPage({
       editDraftContextRef.current = null;
       return;
     }
-    controller.pause();
     const contextKey = `${caseId}:${selectedTask?.review_task_id || ''}`;
     const shouldInitialize = editDraftContextRef.current !== contextKey;
+    if (shouldInitialize) controller.pause();
     editDraftContextRef.current = contextKey;
     setDraft((current) => {
       if (current.caseId === caseId && !shouldInitialize) return current;
       if (current.caseId === caseId && current.keyframes.length) return current;
       return initialDraft(caseId, manifest, caseFrame, selectedTask);
     });
-  }, [caseFrame, caseId, controller.pause, manifest, mode, selectedTask]);
+  }, [caseId, controller.pause, manifest, mode, selectedTask?.review_task_id]);
 
   useEffect(() => {
     if (!focusTarget) return undefined;
@@ -336,7 +432,7 @@ export function CaseReviewPage({
             setLatestRole(tracked.job.latest_reviewed);
             setSelectedRoleRef.current('latest_reviewed');
             seekToFrameRef.current(tracked.preserveFrame);
-            setCorrectionSaveStatus('Published');
+            setCorrectionSaveStatus('Correction saved — Latest reviewed current');
           }
         }
         if (tracked.job.status === 'superseded') {
@@ -357,7 +453,7 @@ export function CaseReviewPage({
             });
           }
           setMaterializationError(tracked.job.error || 'Latest reviewed media update failed.');
-          setCorrectionSaveStatus('Materialization failed');
+          setCorrectionSaveStatus('Correction saved');
         }
       }
     };
@@ -389,7 +485,7 @@ export function CaseReviewPage({
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
   }, [controller]);
 
-  const selectTask = (task: TaskWithDecision) => {
+  const selectTask = (task: ReviewGroup) => {
     setFocusTarget(null);
     setBucket(task.bucket);
     setSelectedTaskId(task.review_task_id);
@@ -485,43 +581,84 @@ export function CaseReviewPage({
     setLatestRole((state.materialized_latest_reviewed || {})[caseId] as MediaVersion | undefined);
   };
 
-  const persistDecision = async (task: TaskWithDecision, action: string) => {
+  const persistDecision = async (task: ReviewGroup, action: string) => {
     if (!session) {
       onError('Start review before saving decisions.');
+      return;
+    }
+    if (task.child_tasks.length > 1 && action === ACTIONS.needsCorrection) {
+      openCorrectionEditor(task);
       return;
     }
     setPendingTaskId(task.review_task_id);
     onError(undefined);
     try {
-      const { decision, event } = await saveDecision({
-        session_id: session.session_id,
-        actor: attribution || { display_name: null },
-        case_id: caseId,
-        task_id: task.review_task_id,
-        action,
-        note:
-          action === ACTIONS.looksCorrect
-            ? 'Correct'
-            : action === ACTIONS.notSensitive
-              ? 'Not sensitive'
-              : 'Needs correction',
-      });
-      const nextDecisions = withTaskDecision(decisions, caseId, task.review_task_id, decision);
-      onDecisionsChange(nextDecisions);
-      onTaskResolutionsChange(withoutTaskResolution(taskResolutions, caseId, task.review_task_id));
-      appendEvents([event]);
+      let nextDecisions = decisions;
+      let nextResolutions = taskResolutions;
+      if (task.child_tasks.length > 1) {
+        const result = await saveDecisionGroup({
+          session_id: session.session_id,
+          actor: attribution || { display_name: null },
+          case_id: caseId,
+          review_group_id: task.group_id,
+          task_ids: task.child_task_ids,
+          action,
+          note: groupActionNote(task, action),
+        });
+        appendEvents(result.events);
+        if (result.working_state) {
+          applyWorkingStateProjection(result.working_state);
+          nextDecisions = normalizeDecisionsByCase(
+            result.working_state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+            result.working_state.task_decisions as Record<string, TaskDecision> | undefined,
+          );
+          nextResolutions = normalizeTaskResolutionsByCase(
+            result.working_state.task_resolutions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+            result.working_state.task_resolutions as Record<string, TaskDecision> | undefined,
+          );
+        }
+      } else {
+        const childTask = task.child_tasks[0] || task;
+        const { decision, event, working_state } = await saveDecision({
+          session_id: session.session_id,
+          actor: attribution || { display_name: null },
+          case_id: caseId,
+          task_id: childTask.review_task_id,
+          action,
+          note:
+            action === ACTIONS.looksCorrect
+              ? 'Correct'
+              : action === ACTIONS.notSensitive
+                ? 'Not sensitive'
+                : 'Needs correction',
+        });
+        if (working_state) {
+          applyWorkingStateProjection(working_state);
+          nextDecisions = normalizeDecisionsByCase(
+            working_state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+            working_state.task_decisions as Record<string, TaskDecision> | undefined,
+          );
+          nextResolutions = normalizeTaskResolutionsByCase(
+            working_state.task_resolutions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+            working_state.task_resolutions as Record<string, TaskDecision> | undefined,
+          );
+        } else {
+          nextDecisions = withTaskDecision(decisions, caseId, childTask.review_task_id, decision);
+          nextResolutions = withoutTaskResolution(taskResolutions, caseId, childTask.review_task_id);
+          onDecisionsChange(nextDecisions);
+          onTaskResolutionsChange(nextResolutions);
+        }
+        appendEvents([event]);
+      }
       if (action === ACTIONS.needsCorrection) {
         openCorrectionEditor(task);
         return;
       }
-      const nextResolutions = withoutTaskResolution(taskResolutions, caseId, task.review_task_id);
-      const nextOpenTask = tasksForCase(allTasks, nextDecisions, caseId, nextResolutions)
-        .filter((candidate) => candidate.bucket === 'Open')
-        .sort((left, right) => left.source_frame_start - right.source_frame_start)
-        .find((candidate) => candidate.source_frame_start >= task.source_frame_start)
-        || tasksForCase(allTasks, nextDecisions, caseId, nextResolutions)
-          .filter((candidate) => candidate.bucket === 'Open')
-          .sort((left, right) => left.source_frame_start - right.source_frame_start)[0];
+      const nextOpenTask = nearestNextOpenGroup(
+        tasks,
+        requiredReviewGroups(tasksForCase(allTasks, nextDecisions, caseId, nextResolutions)),
+        task.review_task_id,
+      );
       if (nextOpenTask) {
         setBucket('Open');
         setSelectedTaskId(nextOpenTask.review_task_id);
@@ -537,13 +674,14 @@ export function CaseReviewPage({
     }
   };
 
-  const openCorrectionEditor = (task: TaskWithDecision) => {
+  const openCorrectionEditor = (task: ReviewGroup) => {
+    const correctionTask = task.child_tasks[0] || task;
     setBucket('Needs correction');
-    setSelectedTaskId(task.review_task_id);
+    setSelectedTaskId(correctionTask.review_task_id);
     setSelectedRole('latest_reviewed');
     setMode('edit');
-    resetLocalCorrectionState(task);
-    controller.seekToSourceFrame(task.source_frame_start);
+    resetLocalCorrectionState(correctionTask);
+    controller.seekToSourceFrame(correctionTask.source_frame_start);
   };
 
   const acknowledgeSweep = async () => {
@@ -555,6 +693,7 @@ export function CaseReviewPage({
       onError('Latest reviewed must be current before approving the full-video review.');
       return;
     }
+    setSweepBusy(true);
     onError(undefined);
     try {
       const result = await acknowledgeFullVideoSweep({
@@ -569,9 +708,22 @@ export function CaseReviewPage({
         ],
       });
       appendEvents([result.event]);
-      if (result.working_state) applyWorkingStateProjection(result.working_state);
+      try {
+        const refreshedWorkingState = await authoritativeWorkingStateAfterSweepApproval(
+          result,
+          session.session_id,
+          loadWorkingState,
+        );
+        applyWorkingStateProjection(refreshedWorkingState);
+      } catch (refreshErr) {
+        onError(
+          `Full-video review was approved, but the refreshed review state could not be loaded: ${refreshErr instanceof Error ? refreshErr.message : String(refreshErr)}. Reload this review session to synchronize.`,
+        );
+      }
     } catch (err) {
       onError(`Full-video review was not approved: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setSweepBusy(false);
     }
   };
 
@@ -580,13 +732,11 @@ export function CaseReviewPage({
       onError('Start review before changing object policy.');
       return;
     }
-    const verificationTaskId = withPolicyTaskId(caseId, entity.entity_id, policy);
     const after: EffectiveEntity = {
       ...entity,
       current_policy: policy,
       default_privacy_policy: policy,
       privacy_action: policy,
-      verification_task_id: verificationTaskId || undefined,
     };
     setPendingEntityIds((current) => new Set([...current, entity.entity_id]));
     setFocusTarget(null);
@@ -607,13 +757,6 @@ export function CaseReviewPage({
         onEntityOverridesChange({ ...entityOverrides, [entity.entity_id]: result.entity || after });
       }
       trackMaterializationJob(result.materialization_job, [entity.entity_id]);
-      const nextTask = result.verification_task || (verificationTaskId ? policyVerificationTask(caseId, result.entity || after, verificationTaskId) : null);
-      if (nextTask) {
-        onManualTasksChange([
-          ...manualTasks.filter((task) => task.review_task_id !== nextTask.review_task_id),
-          nextTask,
-        ]);
-      }
     } catch (err) {
       setPendingEntityIds((current) => {
         const next = new Set(current);
@@ -721,7 +864,13 @@ export function CaseReviewPage({
     setPreviewInvalidated(false);
     setPreviewToken(undefined);
     setPreviewRole(undefined);
-    setCorrectionSaveStatus(materialization_required ? 'Saved - updating Latest reviewed' : `Saved - ${publication_status || 'published'}`);
+    setCorrectionSaveStatus(
+      materialization_required
+        ? 'Correction saved — applying changes...'
+        : publication_status === 'deferred'
+          ? 'Correction saved — review still incomplete'
+          : 'Correction saved',
+    );
     setSelectedRole('latest_reviewed');
     trackMaterializationJob(materialization_job, correction.entity_id ? [correction.entity_id] : []);
   };
@@ -911,6 +1060,12 @@ export function CaseReviewPage({
             {checkpointBusy ? ' · Review state update in progress...' : ''}
             {previewReady ? ' · Previewing unsaved correction' : ''}
           </p>
+          {correctionSaveStatus ? (
+            <div className="operation-status" role="status">
+              {correctionSaveStatus.includes('applying') ? <span className="inline-spinner" aria-hidden="true" /> : null}
+              <span>{correctionSaveStatus}</span>
+            </div>
+          ) : null}
           {materializationError ? (
             <details className="materialization-blockers">
               <summary>
@@ -996,12 +1151,19 @@ export function CaseReviewPage({
           <button
             type="button"
             className="primary"
-            disabled={!latestReviewedCurrent || sweepAcknowledged}
+            disabled={!latestReviewedCurrent || sweepBusy || (sweepAcknowledged && !sweepStale)}
             onClick={() => void acknowledgeSweep()}
           >
-            Approve full-video review
+            {sweepBusy ? (
+              <>
+                <span className="inline-spinner" aria-hidden="true" /> Approving full-video review...
+              </>
+            ) : (
+              'Approve full-video review'
+            )}
           </button>
-          {sweepAcknowledged ? <span className="badge done">Full-video review approved</span> : null}
+          {sweepAcknowledged && !sweepStale ? <span className="badge done">Current full-video review approved</span> : null}
+          {sweepStale ? <span className="badge warn">Previous full-video approval stale</span> : null}
         </div>
       </section>
       <div className="workspace-layout">
@@ -1031,7 +1193,7 @@ export function CaseReviewPage({
                 onDraftChange={updateDraft}
               />
             ) : null}
-            {mode !== 'edit' && selectedVersion?.role === 'latest_reviewed' ? (
+            {pendingCorrectionRegions.length ? (
               <PendingCorrectionOverlay manifest={manifest} regions={pendingCorrectionRegions} />
             ) : null}
           </ReviewVideoPlayer>
@@ -1043,6 +1205,7 @@ export function CaseReviewPage({
             pendingTaskId={pendingTaskId}
             selectedTaskId={selectedTaskId}
             tasks={tasks}
+            optionalTasks={optionalTasks}
             reviewComplete={reviewComplete}
             onBucketChange={setBucket}
             onDecision={persistDecision}
@@ -1084,6 +1247,7 @@ export function CaseReviewPage({
         open={entitiesOpen}
         overrides={entityOverrides}
         pendingEntityIds={pendingEntityIds}
+        relatedTaskCountByEntity={relatedTaskCountByEntity}
         unresolvedCount={unresolvedCount}
         onClose={() => setEntitiesOpen(false)}
         onFilterChange={setEntityFilter}
@@ -1185,6 +1349,63 @@ function publicVideoRoles(roles: MediaVersion[], latestRole?: MediaVersion): Med
   ].filter((role): role is MediaVersion => Boolean(role));
 }
 
+function nearestNextOpenGroup(
+  previousGroups: ReviewGroup[],
+  nextGroups: ReviewGroup[],
+  currentGroupId: string,
+): ReviewGroup | undefined {
+  const orderedNext = nextGroups
+    .filter((group) => group.bucket === 'Open')
+    .sort((left, right) => {
+      if (left.source_frame_start !== right.source_frame_start) return left.source_frame_start - right.source_frame_start;
+      return left.review_task_id.localeCompare(right.review_task_id);
+    });
+  if (!orderedNext.length) return undefined;
+  const previousIndex = previousGroups.findIndex((group) => group.review_task_id === currentGroupId);
+  const currentGroup = previousGroups[previousIndex];
+  if (!currentGroup) return orderedNext[0];
+  const next = orderedNext.find((candidate) =>
+    candidate.source_frame_start > currentGroup.source_frame_start ||
+    (candidate.source_frame_start === currentGroup.source_frame_start && candidate.review_task_id > currentGroup.review_task_id),
+  );
+  if (next) return next;
+  return [...orderedNext].reverse().find((candidate) =>
+    candidate.source_frame_start < currentGroup.source_frame_start ||
+    (candidate.source_frame_start === currentGroup.source_frame_start && candidate.review_task_id < currentGroup.review_task_id),
+  );
+}
+
+function groupActionNote(group: ReviewGroup, action: string): string {
+  const label =
+    action === ACTIONS.looksCorrect
+      ? 'Correct'
+      : action === ACTIONS.notSensitive
+        ? 'Not sensitive'
+        : 'Needs correction';
+  return `${label} review group ${group.group_id} covering ${group.child_task_ids.length} task${group.child_task_ids.length === 1 ? '' : 's'}.`;
+}
+
+interface FinalizationBlockerGroup {
+  blockers?: string[];
+  count: number;
+  key: string;
+  label: string;
+}
+
+function finalizationBlockerGroups(status?: FinalizationStatus): FinalizationBlockerGroup[] {
+  const raw = status?.['blocker_groups'];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    .map((item) => ({
+      blockers: Array.isArray(item.blockers) ? item.blockers.map(String) : undefined,
+      count: Number(item.count || 0),
+      key: String(item.key || ''),
+      label: String(item.label || ''),
+    }))
+    .filter((item) => item.key && item.label);
+}
+
 function workspaceIdentityForUi(workspace: WorkspaceSummary): string {
   const identity = workspace.workspace?.workspace_manifest_sha256
     || workspace.workspace?.workspace_identity_hash
@@ -1238,6 +1459,7 @@ function pendingRegionsForSourceFrame(
   manualTasks: Task[],
   caseId: CaseId,
   sourceFrame: number,
+  includeAllSavedCorrections = false,
 ): PendingCorrectionRegion[] {
   const pendingIds = new Set(
     manualTasks
@@ -1247,10 +1469,10 @@ function pendingRegionsForSourceFrame(
       .map((task) => String(task.correction_id || correctionIdFromTask(task)))
       .filter(Boolean),
   );
-  if (!pendingIds.size) return [];
+  if (!pendingIds.size && !includeAllSavedCorrections) return [];
   return corrections
     .filter((correction) => String(correction.case_id || '') === caseId)
-    .filter((correction) => pendingIds.has(String(correction.correction_id || '')))
+    .filter((correction) => includeAllSavedCorrections || pendingIds.has(String(correction.correction_id || '')))
     .filter((correction) => correction.operation === 'add_privacy_region' || correction.operation === 'replace_privacy_region')
     .map((correction) => {
       const bbox = correctionBoxAtSourceFrame(correction, sourceFrame);

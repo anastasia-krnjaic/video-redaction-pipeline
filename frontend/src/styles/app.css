@@ -190,7 +190,7 @@ main {
 .workspace-layout,
 .final-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 3fr) minmax(360px, 2fr);
   gap: 14px;
   align-items: start;
   min-height: 560px;
@@ -696,6 +696,39 @@ main {
   margin-top: 6px;
   color: var(--accent);
   font-size: 13px;
+}
+
+.operation-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 7px;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.optional-qa {
+  margin-top: var(--space-3);
+  border-top: 1px solid var(--border);
+  padding-top: var(--space-3);
+}
+
+.optional-qa summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.task-list.optional {
+  margin-top: var(--space-2);
+}
+
+.segment-list {
+  margin: 8px 0;
+  padding-left: 18px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .badge {

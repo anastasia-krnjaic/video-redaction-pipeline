@@ -1,5 +1,5 @@
-import type { Entity, Task, TaskDecision } from '../types/api';
-import type { CaseId, DecisionsByCase, EffectiveEntity, EntityFilter, EntityPolicy, QueueBucket, TaskResolutionsByCase, TaskWithDecision } from '../types/domain';
+import type { Entity, Task, TaskDecision, WorkingState } from '../types/api';
+import type { CaseId, DecisionsByCase, EffectiveEntity, EntityFilter, EntityPolicy, QueueBucket, ReviewGroup, TaskResolutionsByCase, TaskWithDecision } from '../types/domain';
 
 export const ACTIONS = {
   looksCorrect: 'looks_correct',
@@ -121,6 +121,173 @@ export function bucketCounts(tasks: TaskWithDecision[]): Record<QueueBucket, num
     Correct: tasks.filter((task) => task.bucket === 'Correct').length,
     'Not sensitive': tasks.filter((task) => task.bucket === 'Not sensitive').length,
   };
+}
+
+export function reviewGroupsForCase(tasks: TaskWithDecision[], includeOptional = false): ReviewGroup[] {
+  const buckets = new Map<string, TaskWithDecision[]>();
+  for (const task of tasks) {
+    if (Boolean(task.optional) !== includeOptional) continue;
+    const key = reviewGroupKey(task);
+    buckets.set(key, [...(buckets.get(key) || []), task]);
+  }
+  return [...buckets.entries()]
+    .map(([groupId, childTasks]) => buildReviewGroup(groupId, childTasks))
+    .sort((left, right) => {
+      if (left.source_frame_start !== right.source_frame_start) return left.source_frame_start - right.source_frame_start;
+      return left.review_task_id.localeCompare(right.review_task_id);
+    });
+}
+
+export function requiredReviewGroups(tasks: TaskWithDecision[]): ReviewGroup[] {
+  return reviewGroupsForCase(tasks, false);
+}
+
+export function optionalReviewGroups(tasks: TaskWithDecision[]): ReviewGroup[] {
+  return reviewGroupsForCase(tasks, true);
+}
+
+function buildReviewGroup(groupId: string, children: TaskWithDecision[]): ReviewGroup {
+  const childTasks = [...children].sort((left, right) => {
+    if (left.source_frame_start !== right.source_frame_start) return left.source_frame_start - right.source_frame_start;
+    return left.review_task_id.localeCompare(right.review_task_id);
+  });
+  const first = childTasks[0];
+  const bucket = reviewGroupBucket(childTasks);
+  const childIds = childTasks.map((task) => task.review_task_id);
+  const guidance = reviewGroupGuidance(childTasks);
+  const decision = sharedDecision(childTasks);
+  return {
+    ...first,
+    allowed_actions: commonAllowedActions(childTasks),
+    bucket,
+    child_task_ids: childIds,
+    child_tasks: childTasks,
+    correction_required: childTasks.some((task) => task.correction_required),
+    decision,
+    group_id: groupId,
+    is_review_group: true,
+    optional: childTasks.every((task) => task.optional),
+    optional_group: childTasks.every((task) => task.optional),
+    reason_chips: reviewGroupReasonChips(childTasks),
+    review_task_id: groupId,
+    segment_count: childTasks.length,
+    short_instruction: guidance.instruction,
+    short_title: guidance.title,
+    source_frame_end: Math.max(...childTasks.map((task) => task.source_frame_end)),
+    source_frame_start: Math.min(...childTasks.map((task) => task.source_frame_start)),
+    target_entity_ids: commonTargetEntityIds(childTasks),
+    title: guidance.title,
+    what_to_inspect: guidance.instruction,
+  } as ReviewGroup;
+}
+
+function reviewGroupKey(task: TaskWithDecision): string {
+  const binding = isRecord(task.target_binding) ? task.target_binding : {};
+  const allowed = (task.allowed_actions || []).join(',');
+  const sourceTaskId = String(binding.source_task_id || '');
+  const targetEntityIds = (Array.isArray(task.target_entity_ids) ? task.target_entity_ids : [])
+    .map(String)
+    .sort();
+  const groupClass = groupableClass(task);
+  if (sourceTaskId) {
+    return [
+      'source',
+      task.case_id,
+      task.category,
+      sourceTaskId,
+      groupClass,
+      allowed,
+      Boolean(task.correction_required),
+    ].join(':');
+  }
+  if (targetEntityIds.length === 1 && sameEntityCompositeClass(task)) {
+    return [
+      'entity',
+      task.case_id,
+      task.category,
+      targetEntityIds[0],
+      'entity_review',
+      allowed,
+      Boolean(task.correction_required),
+    ].join(':');
+  }
+  return ['task', task.case_id, task.review_task_id].join(':');
+}
+
+function groupableClass(task: TaskWithDecision): string {
+  const queryClass = validQueryPresentationClass(task.query_presentation_class) || guidanceFamily(task);
+  if (sameEntityCompositeClass(task)) return 'entity_review';
+  return queryClass;
+}
+
+function sameEntityCompositeClass(task: TaskWithDecision): boolean {
+  const queryClass = validQueryPresentationClass(task.query_presentation_class) || guidanceFamily(task);
+  return (
+    task.category === 'license_plate' &&
+    ['PLATE_COVERAGE_GAP', 'TRACKING_UNCERTAIN', 'POSSIBLE_FALSE_POSITIVE'].includes(queryClass)
+  );
+}
+
+function reviewGroupBucket(children: TaskWithDecision[]): QueueBucket {
+  if (children.some((task) => task.bucket === 'Needs correction')) return 'Needs correction';
+  if (children.some((task) => task.bucket === 'Open')) return 'Open';
+  const buckets = new Set(children.map((task) => task.bucket));
+  if (buckets.size === 1) return children[0].bucket;
+  return 'Correct';
+}
+
+function sharedDecision(children: TaskWithDecision[]): TaskDecision | undefined {
+  const decisions = children.map((task) => task.resolution || task.decision).filter(Boolean) as TaskDecision[];
+  if (decisions.length !== children.length) return undefined;
+  const actions = new Set(decisions.map((decision) => decision.action));
+  return actions.size === 1 ? decisions[0] : undefined;
+}
+
+function commonAllowedActions(children: TaskWithDecision[]): string[] {
+  const [first, ...rest] = children.map((task) => new Set(task.allowed_actions || []));
+  if (!first) return [];
+  return [...first].filter((action) => rest.every((allowed) => allowed.has(action)));
+}
+
+function commonTargetEntityIds(children: TaskWithDecision[]): string[] {
+  const targets = children.map((task) =>
+    (Array.isArray(task.target_entity_ids) ? task.target_entity_ids : []).map(String).sort(),
+  );
+  if (!targets.length) return [];
+  const first = targets[0].join('|');
+  return targets.every((target) => target.join('|') === first) ? targets[0] : [];
+}
+
+function reviewGroupGuidance(children: TaskWithDecision[]): TaskGuidance {
+  const first = children[0];
+  const chips = reviewGroupReasonChips(children);
+  if (children.length > 1 && first.category === 'license_plate' && chips.length > 1) {
+    return {
+      instruction: 'Check tracking and coverage across the listed segments.',
+      queryClass: 'OTHER_REVIEW',
+      title: 'Plate needs review',
+    };
+  }
+  const base = taskGuidance(first);
+  if (children.length === 1) return base;
+  return {
+    ...base,
+    instruction: `${base.instruction} Review all ${children.length} listed segments.`,
+  };
+}
+
+function reviewGroupReasonChips(children: TaskWithDecision[]): string[] {
+  const labels = new Set<string>();
+  for (const child of children) {
+    const queryClass = validQueryPresentationClass(child.query_presentation_class) || guidanceFamily(child);
+    if (queryClass === 'TRACKING_UNCERTAIN') labels.add('Tracking');
+    else if (queryClass === 'PLATE_COVERAGE_GAP' || queryClass === 'FACE_COVERAGE_GAP') labels.add('Coverage');
+    else if (queryClass === 'IDENTITY_UNCERTAIN') labels.add('Identity');
+    else if (queryClass === 'INTERPOLATION_OR_SCALE_RISK') labels.add('Drift');
+    else if (queryClass === 'POSSIBLE_FALSE_POSITIVE') labels.add('False positive');
+    else if (queryClass === 'OPTIONAL_SPOT_CHECK') labels.add('Optional QA');
+  }
+  return [...labels];
 }
 
 export function decisionLabel(action?: string): string {
@@ -402,7 +569,20 @@ export function policyLabel(policy?: string, category?: string): string {
 }
 
 export function withPolicyTaskId(caseId: string, entityId: string, policy: EntityPolicy): string | null {
-  return policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`;
+  void caseId;
+  void entityId;
+  void policy;
+  return null;
+}
+
+export async function authoritativeWorkingStateAfterSweepApproval(
+  result: { working_state?: WorkingState },
+  sessionId: string,
+  loadWorkingState: (sessionId: string) => Promise<{ working_state: WorkingState }>,
+): Promise<WorkingState> {
+  if (result.working_state) return result.working_state;
+  const refreshed = await loadWorkingState(sessionId);
+  return refreshed.working_state;
 }
 
 export function policyVerificationTask(caseId: CaseId, entity: EffectiveEntity, taskId: string): Task {

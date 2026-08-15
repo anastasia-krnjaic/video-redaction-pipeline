@@ -4762,6 +4762,52 @@ def materialization_acceptance_fields(
     }
 
 
+def finalization_blocker_groups(blockers: list[str]) -> list[dict[str, Any]]:
+    groups: dict[str, dict[str, Any]] = {}
+    for blocker in blockers:
+        key = finalization_blocker_group_key(blocker)
+        group = groups.setdefault(
+            key,
+            {
+                "blockers": [],
+                "count": 0,
+                "label": finalization_blocker_group_label(key),
+            },
+        )
+        group["blockers"].append(blocker)
+        group["count"] = int(group["count"]) + 1
+    return [groups[key] | {"key": key} for key in sorted(groups)]
+
+
+def finalization_blocker_group_key(blocker: str) -> str:
+    text = blocker.lower()
+    if "latest reviewed" in text or "latest_reviewed" in text or "stale_latest" in text:
+        return "latest_reviewed"
+    if "sweep" in text or "full-video" in text:
+        return "full_video_approval"
+    if "object policy" in text or "policy" in text:
+        return "entity_policy"
+    if "task" in text or "reviewer-added issue" in text:
+        return "review_queue"
+    if "correction" in text:
+        return "correction"
+    return "technical"
+
+
+def finalization_blocker_group_label(key: str) -> str:
+    if key == "latest_reviewed":
+        return "Latest reviewed changed — rebuild required"
+    if key == "full_video_approval":
+        return "Full-video approval is stale or missing"
+    if key == "entity_policy":
+        return "Entity policy review remains open"
+    if key == "review_queue":
+        return "Visible review queue still has blockers"
+    if key == "correction":
+        return "Saved correction still needs review"
+    return "Technical finalization blocker"
+
+
 class FinalReviewWorkspaceServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], package_root: Path) -> None:
         self.package_root = package_root.resolve()
@@ -5941,6 +5987,42 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         if path == "/api/v1/entities":
             self.send_json(read_json_file(self.server.package_root / "review_entities.json"))
             return True
+        if path == "/api/v1/finalization-status":
+            query = parse_qs(parsed.query)
+            session_dir = self.session_dir_from_query(query)
+            if session_dir is None:
+                return True
+            try:
+                case_id = require_workspace_case(
+                    self.server.package_root,
+                    str((query.get("case_id") or [""])[0]),
+                )
+                blockers = review_finalization.finalization_blockers(
+                    package_root=self.server.package_root,
+                    case_id=case_id,
+                    session_dir=session_dir,
+                )
+            except (FileNotFoundError, KeyError, ValueError) as exc:
+                self.send_json(
+                    {"error": str(exc), "ok": False},
+                    status=HTTPStatus.CONFLICT,
+                )
+                return True
+            self.send_json(
+                {
+                    "ok": True,
+                    "result": {
+                        "blocker_count": blockers["blocker_count"],
+                        "blocker_groups": finalization_blocker_groups(blockers["blockers"]),
+                        "blockers": blockers["blockers"],
+                        "case_id": case_id,
+                        "finalized": False,
+                        "ready": blockers["ready"],
+                        "schema_version": "review_finalization_status.v1",
+                    },
+                }
+            )
+            return True
         path = legacy_api_path(path)
         if path == "/api/workspace":
             self.send_json(
@@ -6113,7 +6195,100 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 note=str(payload.get("note") or ""),
                 task_before_state=task,
             )
-            self.send_json({"event": event, "ok": True})
+            self.send_json(
+                {
+                    "event": event,
+                    "ok": True,
+                    "working_state": review_working_state.derive_working_state(
+                        self.server.package_root,
+                        session_dir,
+                    ),
+                }
+            )
+            return
+        if path == "/api/decision-groups":
+            decision_case_id = require_workspace_case(
+                self.server.package_root,
+                str(payload["case_id"]),
+            )
+            action = str(payload["action"])
+            task_ids = [str(item) for item in list(payload.get("task_ids") or []) if item]
+            if not task_ids:
+                self.send_json(
+                    {"error": "at least one task_id is required", "ok": False},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            if len(task_ids) > 1 and action == review_sessions.ACTION_PRIVACY_LEAK:
+                self.send_json(
+                    {
+                        "error": "Needs correction opens the grouped correction workflow instead of bulk-resolving child tasks.",
+                        "ok": False,
+                    },
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            tasks: list[dict[str, Any]] = []
+            for task_id in task_ids:
+                task = decision_task_for_session(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=decision_case_id,
+                    task_id=task_id,
+                )
+                if task is None:
+                    self.send_json(
+                        {"error": f"decision references an unknown review task: {task_id}", "ok": False},
+                        status=HTTPStatus.NOT_FOUND,
+                    )
+                    return
+                gate = review_working_state.correction_verification_decision_gate(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=decision_case_id,
+                    task_id=task_id,
+                )
+                if not gate.get("ok"):
+                    self.send_json(
+                        {"error": gate.get("error"), "ok": False, "task": gate.get("task")},
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
+                try:
+                    review_sessions.validate_task_action(task, action)
+                except ValueError as exc:
+                    self.send_json({"error": str(exc), "ok": False}, status=HTTPStatus.BAD_REQUEST)
+                    return
+                tasks.append(task)
+            group_id = str(payload.get("review_group_id") or payload.get("group_id") or "")
+            events = [
+                review_sessions.append_decision_event(
+                    session_dir,
+                    actor=actor,
+                    case_id=decision_case_id,
+                    task_id=str(task["review_task_id"]),
+                    action=action,
+                    note=str(payload.get("note") or "Review group action."),
+                    task_before_state=task,
+                    application_hashes={
+                        "child_task_count": str(len(task_ids)),
+                        "child_task_set_hash": stable_hash(task_ids),
+                        "review_group_id": group_id,
+                    },
+                )
+                for task in tasks
+            ]
+            self.send_json(
+                {
+                    "events": events,
+                    "ok": True,
+                    "review_group_id": group_id,
+                    "working_state": review_working_state.derive_working_state(
+                        self.server.package_root,
+                        session_dir,
+                    ),
+                }
+            )
             return
         if path == "/api/events/sweep":
             sweep_case_id = require_workspace_case(
@@ -6144,7 +6319,16 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 override_reason=payload.get("override_reason"),
                 binding=sweep_binding,
             )
-            self.send_json({"event": event, "ok": True})
+            self.send_json(
+                {
+                    "event": event,
+                    "ok": True,
+                    "working_state": review_working_state.derive_working_state(
+                        self.server.package_root,
+                        session_dir,
+                    ),
+                }
+            )
             return
         if path == "/api/corrections/preview":
             from redactor.review_corrections import correction_from_dict
@@ -6606,6 +6790,41 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             )
             self.send_json({"job": retry_job, "ok": True})
             return
+        if path == "/api/materialization-jobs":
+            publish_case_id = require_workspace_case(
+                self.server.package_root,
+                str(payload["case_id"]),
+            )
+            state = review_working_state.derive_working_state(
+                self.server.package_root,
+                session_dir,
+            )
+            before_digest = review_working_state.baseline_effective_privacy_region_digest(
+                self.server.package_root,
+                case_id=publish_case_id,
+            )
+            materialization_plan = self.plan_materialization_for_case(
+                session_dir=session_dir,
+                case_id=publish_case_id,
+                actor=actor,
+                operation="latest_reviewed_publish_requested",
+                reason="Latest reviewed media build requested after review completion.",
+                accepted_revision=str(
+                    state.get("active_projection_hash") or state.get("state_hash") or ""
+                ),
+                before_digest=before_digest,
+                after_state=state,
+            )
+            self.send_json(
+                {
+                    "job": materialization_plan["job"],
+                    "materialization_job": materialization_plan["job"],
+                    "materialization_plan": materialization_plan["plan"],
+                    "ok": True,
+                    "working_state": state,
+                }
+            )
+            return
         if path == "/api/entity-events":
             entity_event = dict(payload.get("event") or {})
             event_case_id = require_workspace_case(
@@ -6867,18 +7086,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             case_id=case_id,
         )
         before = dict(entity)
-        verification_task_id = (
-            f"object_policy_verify_{case_id}_{entity_id}_{policy}"
-            if policy
-            in {privacy_entities.POLICY_KEEP_VISIBLE, privacy_entities.POLICY_NOT_SENSITIVE}
-            else None
-        )
         after = before | {
             "current_policy": policy,
             "last_reviewer_policy_action": policy,
             "privacy_action": policy,
             "reviewer_override": True,
-            "verification_task_id": verification_task_id,
         }
         event = review_sessions.append_event(
             session_dir,
@@ -6891,24 +7103,6 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             note=f"{after.get('label') or entity_id} set to {policy}.",
             application_hashes={},
         )
-        verification_event = None
-        verification_task = None
-        if verification_task_id:
-            verification_task = policy_verification_task(case_id, after, verification_task_id)
-            verification_event = review_sessions.append_event(
-                session_dir,
-                event_type="manual_issue_created",
-                actor=actor,
-                case_id=case_id,
-                task_id=verification_task_id,
-                before_state=None,
-                after_state={"task": verification_task},
-                note="Object policy verification task created.",
-                application_hashes={},
-            )
-        events = [event]
-        if verification_event is not None:
-            events.append(verification_event)
         state = review_working_state.derive_working_state(
             self.server.package_root,
             session_dir,
@@ -6930,12 +7124,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         return {
             "entity": after,
             "event": event,
-            "events": events,
+            "events": [event],
             "materialization_job": materialization_plan["job"],
             "materialization_plan": materialization_plan["plan"],
             "materialization_required": materialization_plan["plan"]["materialization_required"],
             "ok": True,
-            "verification_task": verification_task,
             "working_state": state,
         }
 
@@ -8546,7 +8739,7 @@ function closeEntities() { const modal = document.getElementById('entitiesModal'
 function possibleDuplicateSuggestions(caseId) { const entities = effectiveEntities(caseId); const suggestions = []; for (let i=0; i<entities.length; i++) for (let j=i+1; j<entities.length; j++) { const a=entities[i], b=entities[j]; if (a.category !== b.category || entitiesOverlap(a,b)) continue; const gap = Math.max(0, Math.max(a.first_visible_source_frame || 0, b.first_visible_source_frame || 0) - Math.min(a.last_visible_source_frame || 0, b.last_visible_source_frame || 0)); if (gap <= 30) suggestions.push({entity_ids:[a.entity_id,b.entity_id], labels:[a.label,b.label], reason:'nearby_non_overlapping_tracklets'}); } return suggestions.slice(0, 20); }
 function findEntity(caseId, id) { return effectiveEntities(caseId).find(e => e.entity_id === id); }
 function policyLabel(policy) { return {redact:'Redact', keep_visible:'Keep visible', not_sensitive:'Invalid / not sensitive', review_required:'Needs review'}[policy] || policy; }
-async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; const reason = 'Reviewer object policy update.'; const before = {...entity}; const verificationTaskId = policy === 'redact' ? null : `object_policy_verify_${caseId}_${entityId}_${policy}`; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy, verification_task_id: verificationTaskId}; state.entityOverrides[entityId] = after; state.workingState = null; if (verificationTaskId && !state.manualTasks.some(t => t.review_task_id === verificationTaskId)) state.manualTasks.push(policyTask(caseId, after, verificationTaskId)); const response = await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after, child_track_ids: entity.member_detector_tracker_ids || entity.automatic_source_track_ids || [] } }, reason }); state.workingState = response.working_state || state.workingState; renderCase(caseId); refreshSidePanel(caseId, {preserveScroll:true}); refreshOpenEntities(caseId); }
+async function setEntityPolicy(caseId, entityId, policy) { if (!state.session) return showSessionError('Start review before changing object policy.'); const entity = findEntity(caseId, entityId); if (!entity) return; const reason = 'Reviewer object policy update.'; const before = {...entity}; const after = {...entity, current_policy: policy, default_privacy_policy: policy, privacy_action: policy}; state.entityOverrides[entityId] = after; state.workingState = null; const response = await postJson('/api/entity-events', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId, event: { event_type: 'entity_policy_changed', case_id: caseId, entity_id: entityId, payload: { before, after, child_track_ids: entity.member_detector_tracker_ids || entity.automatic_source_track_ids || [] } }, reason }); state.workingState = response.working_state || state.workingState; renderCase(caseId); refreshSidePanel(caseId, {preserveScroll:true}); refreshOpenEntities(caseId); }
 function policyTask(caseId, entity, taskId) { return { allowed_actions: [ACTIONS.looks, ACTIONS.leak, ACTIONS.notSensitive], blocking: true, case_id: caseId, category: entity.category, correction_required: false, decision_state: 'pending', issue_type: 'entity_policy_verification', raw_signal_ids: [], review_task_id: taskId, schema_version: 'case_reviewer_task.v1', severity: 'blocker', source_frame_start: entity.first_visible_source_frame || caseData(caseId).source_frame_start, source_frame_end: entity.first_visible_source_frame || caseData(caseId).source_frame_start, technical_only: false, title: `Verify ${policyLabel(entity.current_policy)} for ${entity.label}`, what_to_inspect: 'Confirm this object policy is correct before finalization.' }; }
 function refreshOpenEntities(caseId) { const modal = document.getElementById('entitiesModal'); if (!modal?.classList.contains('open')) return; const content = document.getElementById('entitiesModalContent'); const filter = modal.dataset.filter || 'all'; content.innerHTML = `<div class="entity-filter-row">${entityFilterButtons(filter)}</div><div class="object-list">${entityCardsHtml(caseId, filter)}</div><details class="technical"><summary>Possible duplicates</summary><pre>${esc(JSON.stringify(possibleDuplicateSuggestions(caseId), null, 2))}</pre></details>`; bindEntityPanel(caseId, content); }
 function openMergeModal(caseId, entityId) { if (!state.session) return showSessionError('Start review before merging objects.'); const source = findEntity(caseId, entityId); if (!source) return; const modal = document.getElementById('mergeModal'); const content = document.getElementById('mergeModalContent'); const candidates = mergeCandidates(caseId, source); state.mergeDraft = {caseId, sourceEntityId: entityId, targetEntityId: candidates[0]?.entity_id || null}; content.innerHTML = `<p class="task-title">Merge ${esc(source.label)} with...</p><p class="muted">Only same-category, non-overlapping candidates are shown.</p><div class="merge-candidates">${candidates.map((candidate, index) => mergeCandidateHtml(candidate, index === 0)).join('') || '<p class="muted">No safe merge candidates are available.</p>'}</div>`; modal.classList.add('open'); modal.setAttribute('aria-hidden', 'false'); content.querySelectorAll('.merge-card').forEach(card => card.addEventListener('click', () => { state.mergeDraft.targetEntityId = card.dataset.entityId; content.querySelectorAll('.merge-card').forEach(item => item.classList.toggle('selected', item === card)); })); }
@@ -8560,7 +8753,7 @@ function entitiesOverlap(a,b) { const a1=a.first_visible_source_frame, a2=a.last
 function urlSessionId() { const raw = new URLSearchParams(location.search).get('session_id') || new URLSearchParams(location.search).get('sessionId'); const sessionId = String(raw || '').trim(); return /^session_[A-Za-z0-9]+$/.test(sessionId) ? sessionId : null; }
 async function loadUrlSession() { const sessionId = urlSessionId(); if (!sessionId) return; try { await loadSessionState(sessionId, 'resumed'); } catch (err) { state.sessionLoadError = `Could not resume review session ${sessionId}: ${err.message}`; } }
 async function loadSessionState(sessionId, loadKind = 'resumed') { const res = await fetch(`/api/session-state?session_id=${encodeURIComponent(sessionId)}`); if (!res.ok) throw new Error(await res.text()); const payload = await res.json(); state.session = payload.session; state.sessionLoadKind = loadKind; state.attribution = payload.attribution; state.decisions = normalizeByCase(payload.decisions_by_case, payload.decisions || {}); state.taskResolutions = normalizeByCase(payload.task_resolutions_by_case || payload.working_state?.task_resolutions_by_case, payload.task_resolutions || payload.working_state?.task_resolutions || {}); state.events = payload.events || []; state.corrections = payload.corrections || []; state.workingState = payload.working_state || null; if (state.session?.session_id) localStorage.setItem(storageKey('session_id'), state.session.session_id); rebuildFromEvents(); }
-function rebuildFromEvents() { state.manualTasks = []; state.entityOverrides = {}; for (const event of state.events) { if (event.event_type === 'manual_issue_created' && event.after_state?.task) state.manualTasks.push(event.after_state.task); if (event.event_type === 'entity_policy_changed' && event.after_state?.entity_id) { state.entityOverrides[event.after_state.entity_id] = event.after_state; if (event.after_state.verification_task_id) state.manualTasks.push(policyTask(event.case_id, event.after_state, event.after_state.verification_task_id)); } if (event.event_type === 'entities_merged' && event.after_state?.primary) { state.entityOverrides[event.after_state.primary.entity_id] = event.after_state.primary; for (const id of event.after_state.retired_entity_ids || []) state.entityOverrides[id] = { entity_id: id, current_status: 'merged' }; } } }
+function rebuildFromEvents() { state.manualTasks = []; state.entityOverrides = {}; for (const event of state.events) { if (event.event_type === 'manual_issue_created' && event.after_state?.task) state.manualTasks.push(event.after_state.task); if (event.event_type === 'entity_policy_changed' && event.after_state?.entity_id) { state.entityOverrides[event.after_state.entity_id] = event.after_state; } if (event.event_type === 'entities_merged' && event.after_state?.primary) { state.entityOverrides[event.after_state.primary.entity_id] = event.after_state.primary; for (const id of event.after_state.retired_entity_ids || []) state.entityOverrides[id] = { entity_id: id, current_status: 'merged' }; } } }
 function renderSessionBanner() { const banner = document.getElementById('sessionBanner'); const start = document.getElementById('startSession'); start.textContent = state.session ? 'New review session' : 'Start new review'; start.disabled = false; if (state.sessionLoadError && !state.session) { banner.className = 'session-banner error'; banner.textContent = state.sessionLoadError; return; } if (!state.session) { const stored = localStorage.getItem(storageKey('session_id')); banner.className = 'session-banner'; banner.textContent = stored ? `No session loaded. Open with ?session_id=${stored} to resume explicitly, or start a new clean review session.` : 'No local review session loaded. Start a new review session to enable decisions and corrections.'; return; } banner.className = 'session-banner ready'; const prefix = state.sessionLoadKind === 'resumed' ? 'Resumed review session' : 'Active review session'; banner.textContent = `${prefix} ${state.session.session_id}${state.attribution?.display_name ? ` · Reviewer ${state.attribution.display_name}` : ' · anonymous until export/finalization'}`; }
 function showSessionError(message) { const banner = document.getElementById('sessionBanner'); banner.className = 'session-banner error'; banner.textContent = message; }
 async function startSession() { try { const payload = await postJson('/api/sessions', { reviewer: {}, source_revision: DATA.workspace.source_revision || null }); state.session = payload.session; localStorage.setItem(storageKey('session_id'), state.session.session_id); await loadSessionState(state.session.session_id, 'new'); renderApp(); } catch (err) { showSessionError(`Could not start local review session: ${err.message}`); } }

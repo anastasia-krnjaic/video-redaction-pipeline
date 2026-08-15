@@ -1671,7 +1671,9 @@ def test_finalization_blocks_reviewer_added_manual_issue(tmp_path: Path) -> None
     assert any("reviewer-added issue has no decision" in blocker for blocker in result["blockers"])
 
 
-def test_finalization_blocks_not_sensitive_entity_policy_until_verified(tmp_path: Path) -> None:
+def test_finalization_accepts_not_sensitive_policy_without_extra_verify(
+    tmp_path: Path,
+) -> None:
     package = tmp_path / "package"
     manifest = synthetic_case_manifest(package)
     write_base_region(package, manifest.case_id)
@@ -1691,10 +1693,12 @@ def test_finalization_blocks_not_sensitive_entity_policy_until_verified(tmp_path
         task_id=None,
         before_state=None,
         after_state={
+            "case_id": manifest.case_id,
+            "current_policy": privacy_entities.POLICY_NOT_SENSITIVE,
+            "default_privacy_policy": privacy_entities.POLICY_NOT_SENSITIVE,
             "entity_id": "entity_plate_1",
             "label": "Plate 01",
-            "policy": privacy_entities.POLICY_NOT_SENSITIVE,
-            "verification_task_id": "object_policy_verify_synthetic_plate_1_not_sensitive",
+            "privacy_action": privacy_entities.POLICY_NOT_SENSITIVE,
         },
         note="not a plate",
         application_hashes={},
@@ -1706,9 +1710,110 @@ def test_finalization_blocks_not_sensitive_entity_policy_until_verified(tmp_path
         session_dir=session_dir,
     )
 
-    assert result["finalized"] is False
-    assert any(
-        "Not sensitive policy has not been verified" in blocker for blocker in result["blockers"]
+    assert result["finalized"] is True
+    assert not any(
+        "policy has not been verified" in blocker
+        for blocker in result.get("blockers", [])
+    )
+
+
+def test_entity_not_sensitive_action_derives_single_entity_task_resolution(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_base_region(package, manifest.case_id)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": list(review_sessions.CANONICAL_REVIEW_ACTIONS),
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "review_task_id": "plate_task",
+                    "source_frame_start": 0,
+                    "source_frame_end": 2,
+                    "target_entity_ids": ["entity_plate_1"],
+                    "technical_only": False,
+                },
+                {
+                    "allowed_actions": list(review_sessions.CANONICAL_REVIEW_ACTIONS),
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "review_task_id": "multi_entity_task",
+                    "source_frame_start": 0,
+                    "source_frame_end": 2,
+                    "target_entity_ids": ["entity_plate_1", "entity_plate_2"],
+                    "technical_only": False,
+                },
+            ]
+        },
+    )
+    session_dir = create_session(package, manifest)
+    review_sessions.append_event(
+        session_dir,
+        event_type="entity_policy_changed",
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state=None,
+        after_state={
+            "case_id": manifest.case_id,
+            "current_policy": privacy_entities.POLICY_NOT_SENSITIVE,
+            "default_privacy_policy": privacy_entities.POLICY_NOT_SENSITIVE,
+            "entity_id": "entity_plate_1",
+            "label": "Plate 01",
+            "privacy_action": privacy_entities.POLICY_NOT_SENSITIVE,
+        },
+        note="not a plate",
+        application_hashes={},
+    )
+
+    state = review_working_state.derive_working_state(package, session_dir)
+
+    day_resolutions = state["task_resolutions_by_case"][manifest.case_id]
+    assert day_resolutions["plate_task"]["action"] == review_sessions.ACTION_NOT_SENSITIVE
+    assert day_resolutions["plate_task"]["resolved_by"] == "derived_from_entity_action"
+    assert "multi_entity_task" not in day_resolutions
+
+
+def test_legacy_object_policy_verify_tasks_do_not_remain_active(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_base_region(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    session_dir = create_session(package, manifest)
+    verification_task_id = "object_policy_verify_day_entity_plate_1_not_sensitive"
+    task = {
+        "allowed_actions": list(review_sessions.CANONICAL_REVIEW_ACTIONS),
+        "blocking": True,
+        "case_id": manifest.case_id,
+        "category": CATEGORY_PLATE,
+        "review_task_id": verification_task_id,
+        "source_frame_start": 0,
+        "source_frame_end": 0,
+        "technical_only": False,
+    }
+    review_sessions.append_event(
+        session_dir,
+        event_type="manual_issue_created",
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id=verification_task_id,
+        before_state=None,
+        after_state={"task": task},
+        note="legacy verifier",
+        application_hashes={},
+    )
+
+    state = review_working_state.derive_working_state(package, session_dir)
+    events = review_sessions.load_events(session_dir)
+
+    assert any(event["task_id"] == verification_task_id for event in events)
+    assert all(
+        item["review_task_id"] != verification_task_id
+        for item in state["active_manual_tasks"]
     )
 
 
@@ -2540,6 +2645,106 @@ def test_review_decision_api_enforces_authoritative_task_allowed_actions(
         assert legal_privacy["ok"] is True
         assert legal_not_sensitive["ok"] is True
         assert entity_green["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_review_decision_group_api_is_atomic_and_records_children(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    write_json(package / "workspace_manifest.json", {"case_count": 1})
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_NOT_SENSITIVE,
+                    ],
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "review_task_id": "group_child_1",
+                    "source_frame_end": 1,
+                    "source_frame_start": 0,
+                    "technical_only": False,
+                },
+                {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_NOT_SENSITIVE,
+                    ],
+                    "blocking": True,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "review_task_id": "group_child_2",
+                    "source_frame_end": 3,
+                    "source_frame_start": 2,
+                    "technical_only": False,
+                },
+            ]
+        },
+    )
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(f"{base_url}/api/v1/sessions", {})
+        session_id = str(session_response["session"]["session_id"])
+        session_dir = package / "sessions" / session_id
+
+        status, body = post_json_error(
+            f"{base_url}/api/v1/decision-groups",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "review_group_id": "group:synthetic",
+                "session_id": session_id,
+                "task_ids": ["group_child_1", "missing_child"],
+            },
+        )
+
+        assert status == 404
+        assert "missing_child" in str(body["error"])
+        assert not [
+            event
+            for event in review_sessions.load_events(session_dir)
+            if event["event_type"] == "task_decision"
+        ]
+
+        response = post_json(
+            f"{base_url}/api/v1/decision-groups",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "note": "Correct grouped chunks.",
+                "review_group_id": "group:synthetic",
+                "session_id": session_id,
+                "task_ids": ["group_child_1", "group_child_2"],
+            },
+        )
+
+        assert response["ok"] is True
+        assert [event["task_id"] for event in response["events"]] == [
+            "group_child_1",
+            "group_child_2",
+        ]
+        for event in response["events"]:
+            assert event["application_hashes"]["child_task_count"] == "2"
+            assert (
+                event["application_hashes"]["child_task_set_hash"]
+                == stable_hash(["group_child_1", "group_child_2"])
+            )
+            assert event["application_hashes"]["review_group_id"] == "group:synthetic"
+        state = response["working_state"]
+        assert set(state["task_decisions_by_case"][manifest.case_id]) == {
+            "group_child_1",
+            "group_child_2",
+        }
     finally:
         server.shutdown()
         server.server_close()
@@ -5288,6 +5493,12 @@ def test_supported_canonical_public_sweep_finalize_and_versions(
         assert sweep_response["event"]["after_state"]["schema_version"] == (
             "full_video_sweep_acknowledgement.v2"
         )
+        assert sweep_response["working_state"]["current_event_chain_head"] == sweep_response[
+            "event"
+        ]["event_hash"]
+        assert sweep_response["working_state"]["sweep_acknowledgements"][manifest.case_id][
+            "latest_reviewed_revision_id"
+        ] == materialization["revision_id"]
         assert finalize_response["ok"] is True
         assert finalize_response["result"]["final_video_sha256"] == materialization["video_sha256"]
         assert "final_reviewed" in {role["role"] for role in after_finalize}
@@ -7427,7 +7638,7 @@ def test_finalization_uses_latest_correction_revision(tmp_path: Path) -> None:
     assert blockers["ready"] is True
 
 
-def test_finalization_blocks_keep_policy_until_verified(tmp_path: Path) -> None:
+def test_finalization_accepts_keep_policy_without_second_verification(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest = synthetic_case_manifest(package)
     write_base_region(package, manifest.case_id)
@@ -7447,10 +7658,12 @@ def test_finalization_blocks_keep_policy_until_verified(tmp_path: Path) -> None:
         task_id=None,
         before_state={"default_privacy_policy": "redact"},
         after_state={
+            "case_id": manifest.case_id,
+            "current_policy": privacy_entities.POLICY_KEEP_VISIBLE,
             "default_privacy_policy": privacy_entities.POLICY_KEEP_VISIBLE,
             "entity_id": "entity_keep",
             "label": "Person 01",
-            "verification_task_id": "object_policy_verify_synthetic_entity_keep",
+            "privacy_action": privacy_entities.POLICY_KEEP_VISIBLE,
         },
         note="known non-sensitive officer",
         application_hashes={},
@@ -7461,21 +7674,7 @@ def test_finalization_blocks_keep_policy_until_verified(tmp_path: Path) -> None:
         case_id=manifest.case_id,
         session_dir=session_dir,
     )
-    assert any("Keep policy has not been verified" in item for item in blockers["blockers"])
-
-    review_sessions.append_decision_event(
-        session_dir,
-        actor={"reviewer_id": "analyst@example.test"},
-        case_id=manifest.case_id,
-        task_id="object_policy_verify_synthetic_entity_keep",
-        action=review_sessions.ACTION_LOOKS_CORRECT,
-        note="verified",
-    )
-    blockers = review_finalization.finalization_blockers(
-        package_root=package,
-        case_id=manifest.case_id,
-        session_dir=session_dir,
-    )
+    assert not any("policy has not been verified" in item for item in blockers["blockers"])
     assert blockers["ready"] is True
 
 

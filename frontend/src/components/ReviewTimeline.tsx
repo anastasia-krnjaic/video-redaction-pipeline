@@ -1,14 +1,14 @@
 import type { Case } from '../types/api';
-import type { TaskWithDecision } from '../types/domain';
+import type { ReviewGroup } from '../types/domain';
 import { sourceToCaseFrame } from '../utils/frame';
 import { taskColorClass } from '../state/reviewState';
 
 interface Props {
   manifest: Case;
-  tasks: TaskWithDecision[];
+  tasks: ReviewGroup[];
   selectedTaskId?: string | null;
   currentFrame: number;
-  onSelectTask: (task: TaskWithDecision) => void;
+  onSelectTask: (task: ReviewGroup) => void;
 }
 
 export function ReviewTimeline({ currentFrame, manifest, onSelectTask, selectedTaskId, tasks }: Props) {

@@ -17,7 +17,7 @@ export function useRouteState(): [TopLevelRoute, (route: TopLevelRoute) => void]
 
   const setRoute = useCallback((nextRoute: TopLevelRoute) => {
     const prefix = window.location.pathname.includes('/app/') ? '/app' : '';
-    window.history.pushState({}, '', `${prefix}/${nextRoute}`);
+    window.history.pushState({}, '', `${prefix}/${nextRoute}${window.location.search}${window.location.hash}`);
     setRouteState(nextRoute);
   }, []);
 

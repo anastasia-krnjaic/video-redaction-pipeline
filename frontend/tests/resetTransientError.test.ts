@@ -26,4 +26,20 @@ describe('reset transient correction errors', () => {
     expect(source).toContain("useEffect(() => {\n    setError('');\n  }, [draft.draft_hash, draft.case_id]);");
     expect(source).toContain("setError('');\n              onDiscard();");
   });
+
+  it('keeps full-video sweep approval non-optimistic until authoritative state is refreshed', () => {
+    const source = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/CaseReviewPage.tsx'), 'utf8');
+    const sweepBody = source.match(/const acknowledgeSweep = async \(\) => \{(?<body>[\s\S]+?)\n  \};/)?.groups?.body || '';
+    const approvalButton = source.match(/<button\s+type="button"\s+className="primary"(?<body>[\s\S]+?)<\/button>/)?.groups?.body || '';
+
+    expect(sweepBody).toContain('setSweepBusy(true)');
+    expect(sweepBody).toContain('authoritativeWorkingStateAfterSweepApproval(');
+    expect(sweepBody).toContain('loadWorkingState');
+    expect(sweepBody).toContain('applyWorkingStateProjection(refreshedWorkingState)');
+    expect(sweepBody).toContain('Full-video review was approved, but the refreshed review state could not be loaded');
+    expect(sweepBody).toContain('setSweepBusy(false)');
+    expect(approvalButton).toContain('disabled={!latestReviewedCurrent || sweepBusy || (sweepAcknowledged && !sweepStale)}');
+    expect(source).toContain('workingState?.current_event_chain_head');
+    expect(source).not.toContain('setSweepAcknowledged');
+  });
 });

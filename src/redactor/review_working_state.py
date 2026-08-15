@@ -588,6 +588,10 @@ def derive_active_review_projection(
                 if case_id:
                     entity.setdefault("case_id", case_id)
                 entity.setdefault("reviewer_override", True)
+                entity["policy_event_hash"] = event.get("event_hash")
+                entity["policy_event_id"] = event.get("event_id")
+                entity["policy_event_type"] = event_type
+                entity["policy_timestamp_utc"] = event.get("timestamp_utc")
                 overrides[entity_id] = entity
                 if case_id:
                     entity_case_by_id[entity_id] = case_id
@@ -601,6 +605,10 @@ def derive_active_review_projection(
                         if case_id:
                             updated.setdefault("case_id", case_id)
                         updated.setdefault("reviewer_override", True)
+                        updated["policy_event_hash"] = event.get("event_hash")
+                        updated["policy_event_id"] = event.get("event_id")
+                        updated["policy_event_type"] = event_type
+                        updated["policy_timestamp_utc"] = event.get("timestamp_utc")
                         overrides[entity_id] = updated
                         if case_id:
                             entity_case_by_id[entity_id] = case_id
@@ -696,12 +704,24 @@ def derive_active_review_projection(
         decisions_by_case=decisions_by_case,
         materialized=materialized,
     )
+    apply_entity_action_task_resolutions(
+        package_root=package_root,
+        decisions_by_case=decisions_by_case,
+        overrides=overrides,
+        resolutions_by_case=resolutions_by_case,
+    )
     task_decisions = flatten_decisions_by_case(decisions_by_case)
     task_resolutions = flatten_decisions_by_case(resolutions_by_case)
     return {
         "active_correction_ids": sorted(active_correction_ids),
         "active_manual_tasks": sorted(
-            manual_tasks.values(),
+            (
+                task
+                for task in manual_tasks.values()
+                if not object_policy_verification_task_id(
+                    str(task.get("review_task_id") or "")
+                )
+            ),
             key=lambda task: (
                 str(task.get("case_id") or ""),
                 int(task.get("source_frame_start") or 0),
@@ -716,6 +736,66 @@ def derive_active_review_projection(
         "task_resolutions": task_resolutions,
         "task_resolutions_by_case": resolutions_by_case,
     }
+
+
+def apply_entity_action_task_resolutions(
+    *,
+    package_root: Path,
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+    overrides: dict[str, dict[str, Any]],
+    resolutions_by_case: dict[str, dict[str, dict[str, Any]]],
+) -> None:
+    tasks_path = package_root / "reviewer_tasks.json"
+    if not tasks_path.exists():
+        return
+    tasks_payload = read_json(tasks_path)
+    for task in list(tasks_payload.get("tasks") or []):
+        if not isinstance(task, dict) or task.get("technical_only"):
+            continue
+        task_id = str(task.get("review_task_id") or "")
+        case_id = str(task.get("case_id") or "")
+        if not task_id or not case_id:
+            continue
+        if durable_edit_verification_task_id(task_id):
+            continue
+        entity_ids = [str(item) for item in list(task.get("target_entity_ids") or []) if item]
+        if len(set(entity_ids)) != 1:
+            continue
+        entity_id = entity_ids[0]
+        entity = dict(overrides.get(entity_id) or {})
+        if str(entity.get("case_id") or case_id) != case_id:
+            continue
+        if entity.get("reviewer_override") is not True:
+            continue
+        policy = inherited_policy(entity)
+        if policy not in SUPPRESSING_POLICIES:
+            continue
+        action = (
+            "not_sensitive"
+            if policy == POLICY_NOT_SENSITIVE
+            else "looks_correct"
+        )
+        if action not in set(task.get("allowed_actions") or []):
+            continue
+        resolution = {
+            "action": action,
+            "case_id": case_id,
+            "decision_status": "green",
+            "derived_from_entity_action": True,
+            "entity_id": entity_id,
+            "event_hash": entity.get("policy_event_hash"),
+            "event_id": entity.get("policy_event_id"),
+            "policy": policy,
+            "resolved_at_utc": entity.get("policy_timestamp_utc"),
+            "resolved_by": "derived_from_entity_action",
+            "task_id": task_id,
+        }
+        set_task_resolution_for_case(
+            resolutions_by_case,
+            case_id=case_id,
+            task_id=task_id,
+            resolution=resolution,
+        )
 
 
 def projection_with_authoritative_latest_reviewed(
@@ -973,7 +1053,11 @@ def reset_review_workflow_from_active_projection(
 
 
 def durable_edit_verification_task_id(task_id: str) -> bool:
-    return task_id.startswith("correction_verify_") or task_id.startswith("object_policy_verify_")
+    return task_id.startswith("correction_verify_") or object_policy_verification_task_id(task_id)
+
+
+def object_policy_verification_task_id(task_id: str) -> bool:
+    return task_id.startswith("object_policy_verify_")
 
 
 def correction_id_from_verification_task(task: dict[str, Any]) -> str:

@@ -19,6 +19,7 @@ interface Props {
   open: boolean;
   overrides: Record<string, EffectiveEntity>;
   pendingEntityIds?: Set<string>;
+  relatedTaskCountByEntity?: Record<string, number>;
   unresolvedCount: number;
   onClose: () => void;
   onBulkPolicy: (entities: EffectiveEntity[], policy: EntityPolicy) => void;
@@ -41,6 +42,7 @@ export function EntityPanel({
   open,
   overrides,
   pendingEntityIds,
+  relatedTaskCountByEntity = {},
   unresolvedCount,
 }: Props) {
   const cardRef = useRef<HTMLDivElement>(null);
@@ -61,6 +63,7 @@ export function EntityPanel({
   const selectedEffective = effective.filter((entity) => selectedIds.has(entity.entity_id));
   const mergeEligibility = mergeSelectedEligibility(selectedEffective);
   const bulk = (policy: EntityPolicy) => {
+    if (!confirmEntityPolicyChange(selectedVisible, policy, relatedTaskCountByEntity)) return;
     onBulkPolicy(selectedVisible, policy);
     setSelectedIds(new Set());
   };
@@ -161,7 +164,10 @@ export function EntityPanel({
                     setSelectedIds(next);
                   }}
                   onJump={onJump}
-                  onPolicy={onPolicy}
+                  onPolicy={(target, policy) => {
+                    if (!confirmEntityPolicyChange([target], policy, relatedTaskCountByEntity)) return;
+                    onPolicy(target, policy);
+                  }}
                 />
               ))
             ) : (
@@ -179,6 +185,23 @@ export function EntityPanel({
         </div>
       </div>
     </section>
+  );
+}
+
+function confirmEntityPolicyChange(
+  entities: EffectiveEntity[],
+  policy: EntityPolicy,
+  relatedTaskCountByEntity: Record<string, number>,
+): boolean {
+  if (policy !== 'not_sensitive') return true;
+  const affectedTasks = entities.reduce((sum, entity) => sum + Number(relatedTaskCountByEntity[entity.entity_id] || 0), 0);
+  const label = entities.length === 1 ? entities[0].label : `${entities.length} objects`;
+  const category = entities.length === 1 && entities[0].category === 'face' ? 'person' : entities.length === 1 ? 'plate' : 'object';
+  const start = Math.min(...entities.map((entity) => Number(entity.first_visible_source_frame)).filter(Number.isFinite));
+  const end = Math.max(...entities.map((entity) => Number(entity.last_visible_source_frame)).filter(Number.isFinite));
+  const range = Number.isFinite(start) && Number.isFinite(end) ? ` across frames ${start}-${end}` : '';
+  return window.confirm(
+    `Remove redaction for ${label}${range}? This marks the ${category} as not sensitive and resolves ${affectedTasks} related review issue${affectedTasks === 1 ? '' : 's'}.`,
   );
 }
 

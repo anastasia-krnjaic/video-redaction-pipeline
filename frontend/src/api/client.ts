@@ -99,7 +99,7 @@ export async function saveDecision(payload: {
   task_id: string;
   action: string;
   note?: string;
-}): Promise<{ decision: TaskDecision; event: AuditEvent }> {
+}): Promise<{ decision: TaskDecision; event: AuditEvent; working_state?: WorkingState }> {
   const response = await postJson<JsonResponse>(`${API_PREFIX}/decisions`, payload);
   const after = response.event?.after_state as TaskDecision | undefined;
   if (!after) throw new Error('Decision response did not include persisted state.');
@@ -107,6 +107,23 @@ export async function saveDecision(payload: {
   return {
     decision: { ...after, event_hash: response.event.event_hash, event_id: response.event.event_id },
     event: response.event,
+    working_state: response.working_state,
+  };
+}
+
+export async function saveDecisionGroup(payload: {
+  session_id: string;
+  actor: Attribution | Record<string, unknown>;
+  case_id: CaseId;
+  review_group_id: string;
+  task_ids: string[];
+  action: string;
+  note?: string;
+}): Promise<{ events: AuditEvent[]; working_state?: WorkingState }> {
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/decision-groups`, payload);
+  return {
+    events: response.events || [],
+    working_state: response.working_state,
   };
 }
 
@@ -313,6 +330,19 @@ export async function retryMaterializationJob(payload: {
   return { job: response.job };
 }
 
+export async function requestLatestReviewedBuild(payload: {
+  session_id: string;
+  actor: Attribution | Record<string, unknown>;
+  case_id: CaseId;
+}): Promise<{ job?: MaterializationJob; materialization_job?: MaterializationJob; working_state?: WorkingState }> {
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/materialization-jobs`, payload);
+  return {
+    job: response.job,
+    materialization_job: response.materialization_job,
+    working_state: response.working_state,
+  };
+}
+
 export async function acknowledgeFullVideoSweep(payload: {
   session_id: string;
   actor: Attribution | Record<string, unknown>;
@@ -327,6 +357,17 @@ export async function acknowledgeFullVideoSweep(payload: {
   });
   if (!response.event) throw new Error('Sweep acknowledgement response did not include an event.');
   return { event: response.event, working_state: response.working_state };
+}
+
+export async function loadFinalizationStatus(payload: {
+  case_id: CaseId;
+  session_id: string;
+}): Promise<FinalizationStatus> {
+  const response = await getJson<JsonResponse>(
+    `${API_PREFIX}/finalization-status?case_id=${encodeURIComponent(payload.case_id)}&session_id=${encodeURIComponent(payload.session_id)}`,
+  );
+  if (!response.result) throw new Error('Finalization status response did not include a result.');
+  return response.result;
 }
 
 export async function setReviewerAttribution(payload: {

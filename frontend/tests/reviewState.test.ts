@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import type { Entity, Task, TaskDecision } from '../src/types/api';
+import type { Entity, Task, TaskDecision, WorkingState } from '../src/types/api';
 import {
   ACTIONS,
+  authoritativeWorkingStateAfterSweepApproval,
   bucketCounts,
   effectiveEntities,
   filteredEntities,
   guidanceFamily,
+  optionalReviewGroups,
+  requiredReviewGroups,
   taskBucket,
   taskDecisionActionOptions,
   taskGuidance,
@@ -35,6 +38,23 @@ function decision(action: string, caseId = 'day', taskId = 'task_1'): TaskDecisi
   };
 }
 
+function workingState(revision?: string): WorkingState {
+  return {
+    active_projection_hash: revision,
+    baseline: {},
+    current_event_chain_head: revision || null,
+    manual_corrections: [],
+    materialized_latest_reviewed: {},
+    object_policy_overrides: {},
+    schema_version: 'review_working_state.v1',
+    state_hash: revision || 'state_hash',
+    task_decisions: {},
+    task_decisions_by_case: {},
+    task_resolutions: {},
+    task_resolutions_by_case: {},
+  };
+}
+
 const entityA: Entity = {
   case_id: 'day',
   category: 'face',
@@ -59,6 +79,51 @@ const entityB: Entity = {
 };
 
 describe('review state helpers', () => {
+  it('uses authoritative sweep working state from the mutation response before reloading', async () => {
+    const responseState = workingState('sweep_head');
+    const loadedState = workingState('loaded_head');
+    let reloadCount = 0;
+
+    const resolved = await authoritativeWorkingStateAfterSweepApproval(
+      { working_state: responseState },
+      'session_1',
+      async () => {
+        reloadCount += 1;
+        return { working_state: loadedState };
+      },
+    );
+
+    expect(resolved).toBe(responseState);
+    expect(reloadCount).toBe(0);
+  });
+
+  it('reloads authoritative sweep working state when a legacy response omits it', async () => {
+    const loadedState = workingState('loaded_head');
+
+    const resolved = await authoritativeWorkingStateAfterSweepApproval(
+      {},
+      'session_1',
+      async (sessionId) => {
+        expect(sessionId).toBe('session_1');
+        return { working_state: loadedState };
+      },
+    );
+
+    expect(resolved).toBe(loadedState);
+  });
+
+  it('propagates sweep working-state reload failures without synthesizing approval', async () => {
+    await expect(
+      authoritativeWorkingStateAfterSweepApproval(
+        {},
+        'session_1',
+        async () => {
+          throw new Error('network down');
+        },
+      ),
+    ).rejects.toThrow('network down');
+  });
+
   it('maps persisted decisions to lifecycle buckets', () => {
     expect(taskBucket(task)).toBe('Open');
     expect(taskBucket(task, decision(ACTIONS.looksCorrect))).toBe('Correct');
@@ -285,5 +350,85 @@ describe('review state helpers', () => {
     };
     const effective = effectiveEntities([entityA, entityB], { 'night-merged': nightEntity });
     expect(effective.map((entity: Entity) => entity.entity_id)).toEqual(['a', 'b']);
+  });
+
+  it('groups chunked required tasks by authoritative source task and separates optional QA', () => {
+    const taskRows = tasksForCase([
+      {
+        ...task,
+        review_task_id: 'identity_chunk_1',
+        source_frame_start: 10,
+        source_frame_end: 20,
+        target_binding: { source_task_id: 'identity_root_1' },
+        query_presentation_class: 'IDENTITY_UNCERTAIN',
+      },
+      {
+        ...task,
+        review_task_id: 'identity_chunk_2',
+        source_frame_start: 21,
+        source_frame_end: 30,
+        target_binding: { source_task_id: 'identity_root_1' },
+        query_presentation_class: 'IDENTITY_UNCERTAIN',
+      },
+      {
+        ...task,
+        optional: true,
+        review_task_id: 'spot_check_1',
+        source_frame_start: 31,
+        source_frame_end: 31,
+        query_presentation_class: 'OPTIONAL_SPOT_CHECK',
+      },
+    ], {}, 'day');
+
+    const required = requiredReviewGroups(taskRows);
+    const optional = optionalReviewGroups(taskRows);
+
+    expect(required).toHaveLength(1);
+    expect(required[0].child_task_ids).toEqual(['identity_chunk_1', 'identity_chunk_2']);
+    expect(required[0].segment_count).toBe(2);
+    expect(required[0].optional_group).toBe(false);
+    expect(optional).toHaveLength(1);
+    expect(optional[0].child_task_ids).toEqual(['spot_check_1']);
+  });
+
+  it('groups compatible same-entity plate checks into one review group', () => {
+    const taskRows = tasksForCase([
+      {
+        ...task,
+        category: 'license_plate',
+        review_task_id: 'plate_coverage',
+        source_frame_start: 40,
+        source_frame_end: 50,
+        query_presentation_class: 'PLATE_COVERAGE_GAP',
+        target_entity_ids: ['plate_03'],
+      },
+      {
+        ...task,
+        category: 'license_plate',
+        review_task_id: 'plate_tracking',
+        source_frame_start: 42,
+        source_frame_end: 56,
+        query_presentation_class: 'TRACKING_UNCERTAIN',
+        target_entity_ids: ['plate_03'],
+      },
+      {
+        ...task,
+        category: 'license_plate',
+        review_task_id: 'other_plate',
+        source_frame_start: 42,
+        source_frame_end: 56,
+        query_presentation_class: 'TRACKING_UNCERTAIN',
+        target_entity_ids: ['plate_04'],
+      },
+    ], {}, 'day');
+
+    const groups = requiredReviewGroups(taskRows);
+
+    expect(groups).toHaveLength(2);
+    const plateGroup = groups.find((group) => group.child_task_ids.includes('plate_coverage'));
+    expect(plateGroup?.title).toBe('Plate needs review');
+    expect(plateGroup?.child_task_ids).toEqual(['plate_coverage', 'plate_tracking']);
+    expect(plateGroup?.reason_chips).toEqual(['Coverage', 'Tracking']);
+    expect(groups.find((group) => group.child_task_ids.includes('other_plate'))?.segment_count).toBe(1);
   });
 });

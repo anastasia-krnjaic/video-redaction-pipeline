@@ -4,7 +4,6 @@ import { AppShell } from './components/AppShell';
 import { AttributionDialog } from './components/AttributionDialog';
 import { useRouteState } from './hooks/useRouteState';
 import { useWorkspace } from './hooks/useWorkspace';
-import { policyVerificationTask } from './state/reviewState';
 import type { AuditEvent, Task } from './types/api';
 import type { EffectiveEntity, TopLevelRoute } from './types/domain';
 import { caseTabLabel } from './utils/cases';
@@ -203,10 +202,6 @@ function rebuildFromEvents(events: AuditEvent[]): {
     if (event.event_type === 'entity_policy_changed' && typeof after.entity_id === 'string') {
       const entity = after as unknown as EffectiveEntity;
       entityOverrides[entity.entity_id] = entity;
-      const taskId = typeof after.verification_task_id === 'string' ? after.verification_task_id : null;
-      if (taskId && typeof event.case_id === 'string') {
-        manualTasks.push(policyVerificationTask(event.case_id, entity, taskId));
-      }
     }
     if (event.event_type === 'entities_merged' && isRecord(after.primary)) {
       const primary = after.primary as unknown as EffectiveEntity;

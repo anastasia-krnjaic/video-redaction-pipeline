@@ -20,6 +20,14 @@ export interface WorkspaceSummary {
 
 export interface Case {
   "blockers"?: string[];
+  "blocker_count"?: number;
+  "blocker_groups"?: {
+  "blockers"?: string[];
+  "count": number;
+  "key": string;
+  "label": string;
+  [key: string]: unknown;
+}[];
   "case_id": string;
   "display_name": string;
   "duration_seconds"?: number | null;
@@ -354,6 +362,7 @@ export interface FinalizationStatus {
   "final_video"?: string | null;
   "finalized": boolean;
   "media_validation_passed"?: boolean;
+  "ready"?: boolean;
   "schema_version": string;
   [key: string]: unknown;
 }

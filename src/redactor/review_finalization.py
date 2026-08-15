@@ -105,6 +105,8 @@ def finalization_blockers(
         if not task_id:
             blockers.append(f"{case_id}: manual issue is missing a task id")
             continue
+        if review_working_state.durable_edit_verification_task_id(task_id):
+            continue
         decision = review_working_state.effective_task_state_for_case(
             decisions_by_case,
             resolutions_by_case,
@@ -235,8 +237,6 @@ def object_policy_blockers(
     *,
     case_id: str,
 ) -> list[str]:
-    from redactor import review_working_state
-
     blockers: list[str] = []
     for entity_id, raw_entity in sorted(
         dict(working_state.get("object_policy_overrides") or {}).items()
@@ -259,23 +259,6 @@ def object_policy_blockers(
         if policy == "review_required":
             blockers.append(f"{label}: object policy remains Needs review")
             continue
-        if policy in {"keep_visible", "not_sensitive"}:
-            task_id = str(
-                after.get("verification_task_id") or f"object_policy_verify_{case_id}_{entity_id}"
-            )
-            decision = review_working_state.effective_task_state_for_case(
-                decisions_by_case,
-                resolutions_by_case,
-                case_id=case_id,
-                task_id=task_id,
-            )
-            if decision is None:
-                action_label = "Keep" if policy == "keep_visible" else "Not sensitive"
-                blockers.append(f"{label}: {action_label} policy has not been verified")
-                continue
-            if str(decision.get("action")) not in GREEN_ACTIONS:
-                action_label = "Keep" if policy == "keep_visible" else "Not sensitive"
-                blockers.append(f"{label}: {action_label} policy verification is not green")
     return blockers
 
 
@@ -1054,6 +1037,8 @@ def required_task_resolution_identity(
             continue
         task_id = str(task.get("review_task_id") or "")
         if not task_id:
+            continue
+        if review_working_state.durable_edit_verification_task_id(task_id):
             continue
         decision = dict(
             review_working_state.effective_task_state_for_case(

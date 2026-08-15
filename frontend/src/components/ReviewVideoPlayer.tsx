@@ -2,7 +2,7 @@ import { Download, RotateCcw } from 'lucide-react';
 import type { ReactNode } from 'react';
 import type { Case, MediaVersion } from '../types/api';
 import type { VideoController } from '../hooks/useVideoController';
-import type { TaskWithDecision } from '../types/domain';
+import type { ReviewGroup } from '../types/domain';
 import { PlayerChrome } from './PlayerChrome';
 import { VersionSelector, roleLabel } from './VersionSelector';
 
@@ -16,9 +16,9 @@ interface Props {
   version?: MediaVersion;
   controller: VideoController;
   selectedTaskId?: string | null;
-  tasks?: TaskWithDecision[];
+  tasks?: ReviewGroup[];
   onVersionChange: (role: string) => void;
-  onSelectTask?: (task: TaskWithDecision) => void;
+  onSelectTask?: (task: ReviewGroup) => void;
 }
 
 export function ReviewVideoPlayer({

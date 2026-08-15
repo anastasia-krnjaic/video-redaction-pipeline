@@ -1,5 +1,5 @@
-import { useState } from 'react';
-import { finalizeCase as finalizeCaseRequest } from '../api/client';
+import { useEffect, useState } from 'react';
+import { finalizeCase as finalizeCaseRequest, loadFinalizationStatus } from '../api/client';
 import { ReviewVideoPlayer } from '../components/ReviewVideoPlayer';
 import { usePersistentState } from '../hooks/usePersistentState';
 import { useVideoController } from '../hooks/useVideoController';
@@ -64,8 +64,31 @@ export function FinalResultsPage({
     roles.find((role) => role.role === 'latest_reviewed') ||
     roles[0];
   const controller = useVideoController(manifest, selectedVersion, caseFrame, setCaseFrame);
-  const sweepAcknowledged = Boolean((workingState?.sweep_acknowledgements as Record<string, unknown> | undefined)?.[caseId]);
-  const finalizationReady = Boolean(materializedLatestRole && sweepAcknowledged);
+  const finalizationReady = Boolean(status?.ready);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!session?.session_id || !caseId) return undefined;
+    const load = async () => {
+      try {
+        const result = await loadFinalizationStatus({
+          case_id: caseId,
+          session_id: session.session_id,
+        });
+        if (!cancelled) setFinalStatus((current) => ({ ...current, [caseId]: result }));
+      } catch {
+        if (!cancelled) setFinalStatus((current) => {
+          const next = { ...current };
+          delete next[caseId];
+          return next;
+        });
+      }
+    };
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [caseId, session?.session_id, workingState?.active_projection_hash, workingState?.current_event_chain_head]);
 
   const finalize = async () => {
     if (!session) {
@@ -140,6 +163,13 @@ export function FinalResultsPage({
             ) : (
               <div className="status-box warning">
                 <strong>Final media unavailable</strong>
+                {finalizationBlockerGroups(status).length ? (
+                  <ul>
+                    {finalizationBlockerGroups(status).map((group) => (
+                      <li key={group.key}>{group.label} ({group.count})</li>
+                    ))}
+                  </ul>
+                ) : null}
                 <ul>
                   {(status.blockers || []).map((blocker) => (
                     <li key={blocker}>{blocker}</li>
@@ -180,4 +210,23 @@ function workspaceIdentityForUi(workspace: WorkspaceSummary): string {
     || workspace.backend_workspace_schema_version
     || 'unknown-workspace';
   return String(identity).replace(/[^A-Za-z0-9_-]/g, '_');
+}
+
+interface FinalizationBlockerGroup {
+  count: number;
+  key: string;
+  label: string;
+}
+
+function finalizationBlockerGroups(status?: FinalizationStatus): FinalizationBlockerGroup[] {
+  const raw = status?.['blocker_groups'];
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    .map((item) => ({
+      count: Number(item.count || 0),
+      key: String(item.key || ''),
+      label: String(item.label || ''),
+    }))
+    .filter((item) => item.key && item.label);
 }

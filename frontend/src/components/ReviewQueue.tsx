@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from 'react';
 import type { Case } from '../types/api';
-import type { QueueBucket, TaskWithDecision } from '../types/domain';
+import type { QueueBucket, ReviewGroup } from '../types/domain';
 import { bucketCounts } from '../state/reviewState';
 import { ReviewTaskCard } from './ReviewTaskCard';
 
@@ -9,14 +9,15 @@ const buckets: QueueBucket[] = ['Open', 'Needs correction', 'Correct', 'Not sens
 interface Props {
   bucket: QueueBucket;
   manifest: Case;
+  optionalTasks?: ReviewGroup[];
   pendingTaskId?: string;
   selectedTaskId?: string | null;
-  tasks: TaskWithDecision[];
+  tasks: ReviewGroup[];
   reviewComplete?: boolean;
   onBucketChange: (bucket: QueueBucket) => void;
-  onDecision: (task: TaskWithDecision, action: string) => void;
-  onFixNow: (task: TaskWithDecision) => void;
-  onSelectTask: (task: TaskWithDecision) => void;
+  onDecision: (task: ReviewGroup, action: string) => void;
+  onFixNow: (task: ReviewGroup) => void;
+  onSelectTask: (task: ReviewGroup) => void;
 }
 
 export function ReviewQueue({
@@ -26,6 +27,7 @@ export function ReviewQueue({
   onDecision,
   onFixNow,
   onSelectTask,
+  optionalTasks = [],
   reviewComplete,
   pendingTaskId,
   selectedTaskId,
@@ -69,11 +71,6 @@ export function ReviewQueue({
           </button>
         ))}
       </div>
-      <div className="action-legend" aria-label="Review action meanings">
-        <span><strong>Correct</strong> current redaction is acceptable.</span>
-        <span><strong>Needs correction</strong> redaction geometry must be changed.</span>
-        <span><strong>Not sensitive</strong> this content does not require redaction.</span>
-      </div>
       <div className="task-list" ref={listRef}>
         {visibleTasks.length ? (
           visibleTasks.map((task) => (
@@ -97,6 +94,25 @@ export function ReviewQueue({
           <p className="muted empty-state">No tasks in this bucket.</p>
         )}
       </div>
+      {optionalTasks.length ? (
+        <details className="optional-qa">
+          <summary>Optional QA checks ({optionalTasks.length})</summary>
+          <div className="task-list optional">
+            {optionalTasks.map((task) => (
+              <ReviewTaskCard
+                key={task.review_task_id}
+                manifest={manifest}
+                pending={pendingTaskId === task.review_task_id}
+                selected={selectedTaskId === task.review_task_id}
+                task={task}
+                onDecision={onDecision}
+                onFixNow={onFixNow}
+                onSelect={onSelectTask}
+              />
+            ))}
+          </div>
+        </details>
+      ) : null}
     </aside>
   );
 }

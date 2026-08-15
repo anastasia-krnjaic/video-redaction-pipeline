@@ -3,7 +3,7 @@ import { useMemo, useRef, useState } from 'react';
 import type { MouseEvent as ReactMouseEvent, PointerEvent } from 'react';
 import type { Case } from '../types/api';
 import type { VideoController } from '../hooks/useVideoController';
-import type { TaskWithDecision } from '../types/domain';
+import type { ReviewGroup } from '../types/domain';
 import { taskColorClass } from '../state/reviewState';
 import { sourceToCaseFrame, timelinePercent, timelineRatioToFrame, timelineTooltip } from '../utils/frame';
 
@@ -11,8 +11,8 @@ interface Props {
   controller: VideoController;
   manifest: Case;
   selectedTaskId?: string | null;
-  tasks?: TaskWithDecision[];
-  onSelectTask?: (task: TaskWithDecision) => void;
+  tasks?: ReviewGroup[];
+  onSelectTask?: (task: ReviewGroup) => void;
 }
 
 export function PlayerChrome({ controller, manifest, onSelectTask, selectedTaskId, tasks = [] }: Props) {

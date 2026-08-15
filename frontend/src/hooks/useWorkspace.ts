@@ -88,6 +88,7 @@ export function useWorkspace(): WorkspaceLoadState {
     setCorrections(payload.corrections || []);
     setWorkingState(payload.working_state);
     storeLastSessionId(loadedWorkspace, payload.session.session_id);
+    replaceUrlSessionId(payload.session.session_id);
   };
 
   const refreshSession = useMemo(
@@ -103,8 +104,13 @@ export function useWorkspace(): WorkspaceLoadState {
   const setSession = (nextSession: Session | null) => {
     setSessionState(nextSession);
     setSessionLoadKind(nextSession ? 'new' : undefined);
-    if (nextSession) storeLastSessionId(workspace, nextSession.session_id);
-    else clearLastSessionId(workspace);
+    if (nextSession) {
+      storeLastSessionId(workspace, nextSession.session_id);
+      replaceUrlSessionId(nextSession.session_id);
+    } else {
+      clearLastSessionId(workspace);
+      replaceUrlSessionId(null);
+    }
   };
 
   const resumeStoredSession = async () => {
@@ -187,4 +193,12 @@ function workspaceIdentity(workspace: WorkspaceSummary): string {
     || workspace.backend_workspace_schema_version
     || 'unknown-workspace';
   return String(identity);
+}
+
+function replaceUrlSessionId(sessionId: string | null): void {
+  const url = new URL(window.location.href);
+  if (sessionId) url.searchParams.set('session_id', sessionId);
+  else url.searchParams.delete('session_id');
+  url.searchParams.delete('sessionId');
+  window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
 }

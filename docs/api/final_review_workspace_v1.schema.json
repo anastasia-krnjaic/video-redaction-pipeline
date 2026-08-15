@@ -177,6 +177,38 @@
           },
           "type": "array"
         },
+        "blocker_count": {
+          "type": "number"
+        },
+        "blocker_groups": {
+          "items": {
+            "additionalProperties": true,
+            "properties": {
+              "blockers": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "count": {
+                "type": "number"
+              },
+              "key": {
+                "type": "string"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "count",
+              "key",
+              "label"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
         "case_id": {
           "type": "string"
         },
@@ -712,6 +744,9 @@
           "type": "boolean"
         },
         "media_validation_passed": {
+          "type": "boolean"
+        },
+        "ready": {
           "type": "boolean"
         },
         "schema_version": {

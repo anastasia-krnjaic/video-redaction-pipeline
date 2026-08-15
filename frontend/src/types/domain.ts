@@ -99,3 +99,13 @@ export interface TaskWithDecision extends Task {
   resolution?: TaskDecision;
   bucket: QueueBucket;
 }
+
+export interface ReviewGroup extends TaskWithDecision {
+  child_task_ids: string[];
+  child_tasks: TaskWithDecision[];
+  group_id: string;
+  is_review_group: true;
+  optional_group: boolean;
+  reason_chips: string[];
+  segment_count: number;
+}
