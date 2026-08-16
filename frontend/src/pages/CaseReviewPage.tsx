@@ -227,10 +227,10 @@ export function CaseReviewPage({
   const allGuidanceAddressed = reviewReady && counts.Open === 0;
   const latestReviewedStatus = latestReviewedStatusText({
     activeJobs: activeMaterializationJobs,
+    finalizationStatus,
     latestRole: materializedLatestRole,
     materializationError,
     reviewReady,
-    workingState,
   });
   const latestReviewedCurrent = latestReviewedStatus === 'Reviewed video ready';
   const sweepAcknowledgement = (workingState?.sweep_acknowledgements as Record<string, unknown> | undefined)?.[caseId] as Record<string, unknown> | undefined;
@@ -239,18 +239,13 @@ export function CaseReviewPage({
     !latestReviewedCurrent ||
     finalizationBlockerGroups(finalizationStatus).some((group) => group.key === 'full_video_approval')
   );
-  const finalNextStep = finalizationStatus?.ready
-    ? 'Ready to finalize'
-    : latestReviewedCurrent
-      ? 'Ready for final full-video review'
-      : reviewReady
-        ? 'Reviewed video is still updating'
-        : 'Needs correction must be cleared first';
-  const approveUnavailableReason = latestReviewedCurrent
-    ? undefined
-    : reviewReady
-      ? 'Reviewed video is still updating'
-      : 'Needs correction must be cleared first';
+  const lifecycleMessage = reviewLifecycleMessage({
+    correctionAttentionCount,
+    latestReviewedStatus,
+    reviewReady,
+    sweepAcknowledged,
+    sweepStale,
+  });
 
   useEffect(() => {
     eventsRef.current = events;
@@ -301,7 +296,7 @@ export function CaseReviewPage({
 
   useEffect(() => {
     if (mode !== 'review' || !session?.session_id || !reviewReady || activeMaterializationJobKey) return;
-    if (latestReviewedStatus !== 'Ready to build reviewed video' && latestReviewedStatus !== 'Reviewed video changed — rebuilding...') return;
+    if (latestReviewedStatus !== 'Ready to build reviewed video') return;
     const revision = String(workingState?.active_projection_hash || workingState?.state_hash || '');
     const requestKey = `${caseId}:${revision}:${latestReviewedStatus}`;
     if (!revision || autoBuildRequestRef.current === requestKey) return;
@@ -1111,15 +1106,8 @@ export function CaseReviewPage({
         </div>
       ) : null}
       <section className={`next-step-panel ${reviewReady ? 'complete' : 'progress'}`} aria-label={`${manifest.display_name} review progress`}>
-        {!reviewReady ? (
-          <div>
-            <strong>Needs correction: {correctionAttentionCount}</strong>
-            <p className="muted">Blocking reviewed video until cleared.</p>
-          </div>
-        ) : null}
         <div>
-          <strong>{latestReviewedStatus}</strong>
-          <p className="muted">{finalNextStep}</p>
+          <strong>{lifecycleMessage}</strong>
         </div>
         <div className="button-row">
           <button
@@ -1136,9 +1124,6 @@ export function CaseReviewPage({
               'Approve full-video review'
             )}
           </button>
-          {approveUnavailableReason ? <span className="muted">{approveUnavailableReason}</span> : null}
-          {sweepAcknowledged && !sweepStale ? <span className="badge done">Current full-video review approved</span> : null}
-          {sweepStale ? <span className="badge warn">Previous full-video approval stale</span> : null}
         </div>
       </section>
       <div className="workspace-layout">
@@ -1377,37 +1362,49 @@ type ReviewedVideoStatus =
   | 'Ready to build reviewed video'
   | 'Updating reviewed video...'
   | 'Reviewed video ready'
-  | 'Reviewed video changed — rebuilding...'
   | 'Could not update reviewed video — Retry';
 
 function latestReviewedStatusText({
   activeJobs,
+  finalizationStatus,
   latestRole,
   materializationError,
   reviewReady,
-  workingState,
 }: {
   activeJobs: TrackedMaterializationJob[];
+  finalizationStatus?: FinalizationStatus;
   latestRole?: MediaVersion;
   materializationError?: string;
   reviewReady: boolean;
-  workingState?: WorkingState;
 }): ReviewedVideoStatus {
   if (materializationError) return 'Could not update reviewed video — Retry';
   if (activeJobs.length) return 'Updating reviewed video...';
   if (!reviewReady) return 'Needs correction blocks reviewed video';
   if (!latestRole) return 'Ready to build reviewed video';
   if (latestRole.media_validation_passed === false) return 'Could not update reviewed video — Retry';
-  const activeRevision = String(workingState?.active_projection_hash || '');
-  const publishedRevision = String(
-    latestRole.published_working_state_revision ||
-      latestRole.accepted_working_state_revision ||
-      latestRole.latest_reviewed_revision_id ||
-      '',
-  );
-  if (activeRevision && publishedRevision && activeRevision !== publishedRevision) {
-    return 'Reviewed video changed — rebuilding...';
+  if (finalizationBlockerGroups(finalizationStatus).some((group) => group.key === 'latest_reviewed')) {
+    return 'Ready to build reviewed video';
   }
+  return 'Reviewed video ready';
+}
+
+function reviewLifecycleMessage({
+  correctionAttentionCount,
+  latestReviewedStatus,
+  reviewReady,
+  sweepAcknowledged,
+  sweepStale,
+}: {
+  correctionAttentionCount: number;
+  latestReviewedStatus: ReviewedVideoStatus;
+  reviewReady: boolean;
+  sweepAcknowledged: boolean;
+  sweepStale: boolean;
+}): string {
+  if (!reviewReady) return `Needs correction: ${correctionAttentionCount}`;
+  if (latestReviewedStatus !== 'Reviewed video ready') return latestReviewedStatus;
+  if (sweepAcknowledged && !sweepStale) return 'Full-video review approved';
+  if (sweepStale) return 'Full-video approval stale';
   return 'Reviewed video ready';
 }
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { finalizeCase as finalizeCaseRequest, loadFinalizationStatus } from '../api/client';
 import { ReviewVideoPlayer } from '../components/ReviewVideoPlayer';
 import { usePersistentState } from '../hooks/usePersistentState';
@@ -27,7 +27,7 @@ export function FinalResultsPage({
   workingState,
   workspace,
 }: Props) {
-  const caseIds = Object.keys(workspace.cases);
+  const caseIds = useMemo(() => Object.keys(workspace.cases), [workspace.cases]);
   const defaultCaseId = caseIds.includes('day') ? 'day' : caseIds[0] || '';
   const finalUiScope = `${workspaceIdentityForUi(workspace)}:${session?.session_id || 'no-session'}:final`;
   const [persistedCaseId, setCaseId] = usePersistentState<CaseId>(`${finalUiScope}:case`, defaultCaseId);
@@ -36,9 +36,12 @@ export function FinalResultsPage({
   const [caseFrame, setCaseFrame] = usePersistentState<number>(`${finalUiScope}:${caseId}:frame`, 0);
   const [selectedRole, setSelectedRole] = usePersistentState<string>(`${finalUiScope}:${caseId}:version`, 'latest_reviewed');
   const [finalStatus, setFinalStatus] = useState<Record<string, FinalizationStatus>>({});
+  const [statusErrors, setStatusErrors] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [confirmingFinal, setConfirmingFinal] = useState(false);
   const status = finalStatus[caseId];
+  const statusError = statusErrors[caseId];
+  const caseIdsKey = useMemo(() => caseIds.join('|'), [caseIds]);
 
   if (!manifest) {
     return (
@@ -71,28 +74,44 @@ export function FinalResultsPage({
 
   useEffect(() => {
     let cancelled = false;
-    if (!session?.session_id || !caseId) return undefined;
-    setConfirmingFinal(false);
-    const load = async () => {
+    if (!session?.session_id || !caseIds.length) return undefined;
+    const load = async (targetCaseId: CaseId) => {
       try {
         const result = await loadFinalizationStatus({
-          case_id: caseId,
+          case_id: targetCaseId,
           session_id: session.session_id,
         });
-        if (!cancelled) setFinalStatus((current) => ({ ...current, [caseId]: result }));
-      } catch {
+        if (!cancelled) {
+          setFinalStatus((current) => ({ ...current, [targetCaseId]: result }));
+          setStatusErrors((current) => {
+            const next = { ...current };
+            delete next[targetCaseId];
+            return next;
+          });
+        }
+      } catch (err) {
         if (!cancelled) setFinalStatus((current) => {
           const next = { ...current };
-          delete next[caseId];
+          delete next[targetCaseId];
           return next;
         });
+        if (!cancelled) {
+          setStatusErrors((current) => ({
+            ...current,
+            [targetCaseId]: err instanceof Error ? err.message : String(err),
+          }));
+        }
       }
     };
-    void load();
+    caseIds.forEach((targetCaseId) => void load(targetCaseId));
     return () => {
       cancelled = true;
     };
-  }, [caseId, session?.session_id, workingState?.active_projection_hash, workingState?.current_event_chain_head]);
+  }, [caseIds, caseIdsKey, session?.session_id, workingState?.active_projection_hash, workingState?.current_event_chain_head]);
+
+  useEffect(() => {
+    setConfirmingFinal(false);
+  }, [caseId]);
 
   const createFinal = async () => {
     if (!session) {
@@ -128,13 +147,13 @@ export function FinalResultsPage({
 
   const lifecycleLine = finalRole
     ? 'Final current'
-    : historicalFinal
-      ? 'Final historical — case reopened'
-      : finalizationReady
+    : finalizationReady
         ? 'Ready to create Final'
-        : status
-          ? 'Full-video review required'
-          : 'Reviewed video not ready';
+        : historicalFinal
+          ? 'Final historical — case reopened'
+          : status
+            ? 'Full-video review required'
+            : 'Reviewed video not ready';
 
   return (
     <section className="case-panel active">
@@ -209,7 +228,7 @@ export function FinalResultsPage({
           {status ? (
             status.finalized ? (
               <div className="status-box success">Final media is available.</div>
-            ) : historicalFinal ? (
+            ) : finalizationReady ? null : historicalFinal ? (
               <div className="status-box warning">
                 Historical Final {String(historicalFinal['finalization_id'] || '')} is no longer current.
               </div>
@@ -230,8 +249,13 @@ export function FinalResultsPage({
                 </ul>
               </div>
             )
+          ) : statusError ? (
+            <div className="status-box warning">
+              <strong>Could not load finalization status</strong>
+              <p className="muted">{statusError}</p>
+            </div>
           ) : (
-            <p className="muted">No finalization result has been checked for this local session.</p>
+            <p className="muted">Loading finalization status...</p>
           )}
         </aside>
       </div>

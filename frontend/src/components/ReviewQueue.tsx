@@ -97,10 +97,7 @@ export function ReviewQueue({
             />
           ))
         ) : reviewComplete && bucket === 'Open' ? (
-          <div className="completion-state" role="status">
-            <strong>GUIDANCE CLEAR</strong>
-            <p className="muted">Ready to build reviewed video.</p>
-          </div>
+          null
         ) : (
           <p className="muted empty-state">No guidance in this bucket.</p>
         )}

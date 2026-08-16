@@ -118,6 +118,7 @@ export function useVideoController(
       setCaseFrame(nextFrame);
     };
     const onLoadedMetadata = () => {
+      setMediaError(undefined);
       const frame = clamp(Math.round(caseFrameRef.current), 0, Math.max(0, manifest.frame_count - 1));
       const localFrame = caseToVersionLocalFrame(frame);
       const nextFrame = versionLocalToCaseFrame(localFrame);
@@ -127,7 +128,13 @@ export function useVideoController(
     };
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
-    const onError = () => setMediaError('Media could not be loaded. Check package media files and Range support.');
+    const onError = () => {
+      if (isBenignMediaAbort(video.error)) {
+        setMediaError(undefined);
+        return;
+      }
+      setMediaError('Media could not be loaded. Check package media files and Range support.');
+    };
     video.addEventListener('timeupdate', onTimeUpdate);
     video.addEventListener('loadedmetadata', onLoadedMetadata);
     video.addEventListener('play', onPlay);
@@ -184,4 +191,8 @@ export function useVideoController(
       togglePlay,
     ],
   );
+}
+
+export function isBenignMediaAbort(error: MediaError | null): boolean {
+  return error?.code === 1;
 }

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { isBenignMediaAbort } from '../src/hooks/useVideoController';
 import { materializationJobMatchesCurrentProjection } from '../src/state/materialization';
 import type { MaterializationJob, WorkingState } from '../src/types/api';
 
@@ -65,5 +66,12 @@ describe('materialization completion revision guard', () => {
       state('rev_current'),
       expected,
     )).toBe(false);
+  });
+
+  it('suppresses only browser-requested media aborts as benign player transitions', () => {
+    expect(isBenignMediaAbort({ code: 1 } as MediaError)).toBe(true);
+    expect(isBenignMediaAbort({ code: 2 } as MediaError)).toBe(false);
+    expect(isBenignMediaAbort({ code: 3 } as MediaError)).toBe(false);
+    expect(isBenignMediaAbort(null)).toBe(false);
   });
 });
