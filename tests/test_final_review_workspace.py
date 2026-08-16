@@ -665,6 +665,90 @@ def create_multi_case_session(
     return review_sessions.session_directory(package_root, session.session_id)
 
 
+def test_event_hash_chain_cache_invalidates_when_event_log_changes(tmp_path: Path) -> None:
+    session_dir = tmp_path / "sessions" / "session_cache_test"
+    actor = {"display_name": "Analyst", "reviewer_id": "analyst"}
+    review_sessions.append_event(
+        session_dir,
+        event_type="cache_probe_started",
+        actor=actor,
+        case_id="day",
+        task_id=None,
+        before_state=None,
+        after_state={"step": 1},
+        note="Cache probe.",
+        application_hashes={},
+    )
+
+    first = review_sessions.validate_event_hash_chain(session_dir)
+    second = review_sessions.validate_event_hash_chain(session_dir)
+
+    assert first["passed"] is True
+    assert second == first
+    assert second["event_count"] == 1
+
+    review_sessions.append_event(
+        session_dir,
+        event_type="cache_probe_completed",
+        actor=actor,
+        case_id="day",
+        task_id=None,
+        before_state={"step": 1},
+        after_state={"step": 2},
+        note="Cache probe completed.",
+        application_hashes={},
+    )
+
+    updated = review_sessions.validate_event_hash_chain(session_dir)
+
+    assert updated["passed"] is True
+    assert updated["event_count"] == 2
+
+
+def test_guidance_task_cache_invalidates_when_reviewer_tasks_change(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "case_id": "day",
+                    "review_task_id": "guidance_a",
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
+
+    first = review_guidance_policy.load_review_tasks(package)
+    first[0]["review_task_id"] = "mutated_copy"
+    second = review_guidance_policy.load_review_tasks(package)
+
+    assert [task["review_task_id"] for task in second] == ["guidance_a"]
+
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "case_id": "day",
+                    "review_task_id": "guidance_a",
+                    "technical_only": False,
+                },
+                {
+                    "case_id": "night",
+                    "review_task_id": "guidance_b",
+                    "technical_only": False,
+                },
+            ]
+        },
+    )
+
+    updated = review_guidance_policy.load_review_tasks(package)
+
+    assert [task["review_task_id"] for task in updated] == ["guidance_a", "guidance_b"]
+
+
 def write_duplicate_task_case_package(
     tmp_path: Path,
 ) -> tuple[Path, case_manifests.CaseManifest, case_manifests.CaseManifest, Path]:
@@ -5836,6 +5920,8 @@ def test_supported_canonical_public_sweep_finalize_and_versions(
         assert missing_status == 409
         assert missing_body["ok"] is False
         assert finalization_status["ready"] is True
+        assert finalization_status["performance"]["timing_ms"]["total"] >= 0
+        assert "immutable_media" in finalization_status["performance"]["cache"]
         assert finalization_status["finalization_request"]["latest_reviewed_revision_id"] == (
             materialization["revision_id"]
         )
@@ -8387,6 +8473,125 @@ def test_materialization_job_manager_coalesces_queued_case_jobs(tmp_path: Path) 
 
     audit = json.loads((package / "materialization_job_audit.json").read_text())
     assert audit["cases"]["day"]["jobs_coalesced"] == 1
+
+
+def test_working_state_cache_is_bound_to_event_chain_head(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    review_working_state.clear_working_state_cache()
+
+    first = review_working_state.derive_working_state(package, session_dir, write_snapshot=False)
+    second = review_working_state.derive_working_state(package, session_dir, write_snapshot=False)
+    stats_after_second = review_working_state.working_state_cache_stats()
+
+    assert first == second
+    assert stats_after_second["hits"] == 1
+    assert stats_after_second["misses"] == 1
+
+    review_sessions.append_event(
+        session_dir,
+        event_type="cache_test_marker",
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state=None,
+        after_state={"marker": "event head changed"},
+        note="cache invalidation marker",
+        application_hashes={},
+    )
+    third = review_working_state.derive_working_state(package, session_dir, write_snapshot=False)
+
+    assert third["current_event_chain_head"] != first["current_event_chain_head"]
+    assert review_working_state.working_state_cache_stats()["misses"] == 2
+
+
+def test_reviewed_region_digest_cache_is_bound_to_projection_state(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    reviewed_regions.clear_reviewed_region_digest_cache()
+
+    state = review_working_state.derive_working_state(package, session_dir, write_snapshot=False)
+    first = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        working_state=state,
+    )
+    second = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        working_state=state,
+    )
+
+    assert first["effective_regions_hash"] == second["effective_regions_hash"]
+    assert second["cache_hit"] is True
+    assert reviewed_regions.reviewed_region_digest_cache_stats()["hits"] == 1
+
+    review_sessions.append_event(
+        session_dir,
+        event_type="digest_cache_test_marker",
+        actor={"reviewer_id": "analyst@example.test"},
+        case_id=manifest.case_id,
+        task_id=None,
+        before_state=None,
+        after_state={"marker": "event head changed"},
+        note="digest cache invalidation marker",
+        application_hashes={},
+    )
+    updated_state = review_working_state.derive_working_state(
+        package,
+        session_dir,
+        write_snapshot=False,
+    )
+    third = reviewed_regions.reviewed_region_digest(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        working_state=updated_state,
+    )
+
+    assert third["cache_hit"] is False
+    assert reviewed_regions.reviewed_region_digest_cache_stats()["misses"] == 2
+
+
+def test_materialization_job_manager_records_heavy_job_admission(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manager = review_workspace.MaterializationJobManager(package)
+    job = {
+        "_last_progress_monotonic": 0.0,
+        "case_id": "day",
+        "created_at_utc": review_workspace.media.utc_timestamp(),
+        "job_id": "job_test",
+        "status": "running",
+    }
+
+    acquired = manager._acquire_heavy_job_slot(job, "day")
+    try:
+        assert acquired is True
+        assert job["queue_state"] == "running"
+        assert job["resource_admission"]["slot_acquired"] is True
+        assert job["resource_admission"]["max_heavy_jobs"] == 1
+        assert job["queue_wait_time_ms"] >= 0
+        assert manager.metrics["day"]["heavy_job_queue_wait_time_ms"] >= 0
+    finally:
+        manager._heavy_job_semaphore.release()
 
 
 def media_hash(path: Path) -> str:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 from dataclasses import replace
@@ -48,6 +50,8 @@ WORKSPACE_PUBLICATION_IDENTITY_KEYS = {
 }
 LATEST_REVIEWED_CONTENT_IDENTITY_PREFIX = "latest_reviewed_"
 CURRENT_POINTER_RELATIVE_PATH = Path("latest_reviewed") / "current.json"
+REVIEWED_REGION_DIGEST_CACHE_DISABLE_ENV = "REDACTOR_DISABLE_REVIEWED_REGION_DIGEST_CACHE"
+REVIEWED_REGION_DIGEST_CACHE_MAX_ENTRIES = 128
 FAILURE_INJECTION_ENV = "REDACTOR_REVIEWED_REGIONS_FAIL_AT"
 REVIEWED_REGION_SET_IDENTITY_RUNTIME_KEYS = {
     "active_correction_audit_hash",
@@ -102,6 +106,10 @@ REVISION_ARTIFACT_KEYS = (
     "region_validation",
 )
 
+_DIGEST_CACHE_LOCK = threading.RLock()
+_DIGEST_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_DIGEST_CACHE_STATS: dict[str, int] = {"hits": 0, "misses": 0}
+
 
 class ReviewedRegionCompilationError(ValueError):
     """Raised when an authoritative reviewed region set cannot be compiled safely."""
@@ -147,7 +155,12 @@ def compile_reviewed_regions(
     state = (
         dict(working_state)
         if working_state is not None
-        else review_working_state.derive_working_state(package_root, session_dir)
+        else review_working_state.derive_working_state(
+            package_root,
+            session_dir,
+            copy_cached=False,
+            write_snapshot=False,
+        )
     )
     state.setdefault("state_hash", review_working_state.state_hash(state))
     entities_by_case = review_working_state.load_entity_index(package_root)
@@ -261,16 +274,43 @@ def reviewed_region_digest(
     from redactor import review_working_state
 
     started = time.monotonic()
+    state = (
+        dict(working_state)
+        if working_state is not None
+        else review_working_state.derive_working_state(
+            package_root,
+            session_dir,
+            write_snapshot=False,
+        )
+    )
+    cache_key = _reviewed_region_digest_cache_key(
+        package_root=package_root,
+        session_dir=session_dir,
+        case_id=case_id,
+        require_blockers_resolved=require_blockers_resolved,
+        working_state=state,
+    )
+    if _reviewed_region_digest_cache_enabled():
+        with _DIGEST_CACHE_LOCK:
+            cached = _DIGEST_CACHE.get(cache_key)
+            if cached is not None:
+                _DIGEST_CACHE_STATS["hits"] += 1
+                return dict(cached) | {
+                    "cache_hit": True,
+                    "duration_ms": int((time.monotonic() - started) * 1000),
+                }
+            _DIGEST_CACHE_STATS["misses"] += 1
     regions, provenance = compile_reviewed_regions(
         package_root,
         session_dir,
         case_id=case_id,
         require_blockers_resolved=require_blockers_resolved,
-        working_state=working_state,
+        working_state=state,
     )
     digest = str(provenance["reviewed_region_set_sha256"])
-    return {
+    result = {
         "affected_source_frame_intervals": review_working_state.privacy_region_intervals(regions),
+        "cache_hit": False,
         "case_id": case_id,
         "duration_ms": int((time.monotonic() - started) * 1000),
         "effective_regions_hash": digest,
@@ -280,6 +320,97 @@ def reviewed_region_digest(
         "schema_version": "effective_privacy_region_digest.v1",
         "state_hash": provenance.get("state_hash"),
     }
+    if _reviewed_region_digest_cache_enabled():
+        with _DIGEST_CACHE_LOCK:
+            _DIGEST_CACHE[cache_key] = copy.deepcopy(result)
+            while len(_DIGEST_CACHE) > REVIEWED_REGION_DIGEST_CACHE_MAX_ENTRIES:
+                _DIGEST_CACHE.pop(next(iter(_DIGEST_CACHE)))
+    return result
+
+
+def reviewed_region_digest_cache_stats() -> dict[str, int]:
+    with _DIGEST_CACHE_LOCK:
+        return dict(_DIGEST_CACHE_STATS) | {"entries": len(_DIGEST_CACHE)}
+
+
+def clear_reviewed_region_digest_cache() -> None:
+    with _DIGEST_CACHE_LOCK:
+        _DIGEST_CACHE.clear()
+        for key in _DIGEST_CACHE_STATS:
+            _DIGEST_CACHE_STATS[key] = 0
+
+
+def _reviewed_region_digest_cache_enabled() -> bool:
+    return os.environ.get(REVIEWED_REGION_DIGEST_CACHE_DISABLE_ENV, "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _reviewed_region_digest_cache_key(
+    *,
+    package_root: Path,
+    session_dir: Path,
+    case_id: str,
+    require_blockers_resolved: bool,
+    working_state: dict[str, Any],
+) -> tuple[Any, ...]:
+    from redactor import review_working_state
+
+    package_root = package_root.resolve()
+    session_dir = session_dir.resolve()
+    case_id = case_ids.validate_case_id(case_id)
+    renderer_settings = review_working_state.render_settings()
+    return (
+        str(package_root),
+        str(session_dir),
+        case_id,
+        bool(require_blockers_resolved),
+        stable_hash(dict(renderer_settings.__dict__)),
+        working_state.get("current_event_chain_head"),
+        working_state.get("active_projection_hash"),
+        working_state.get("state_hash"),
+        _file_signatures(
+            [
+                package_root / "workspace_manifest.json",
+                package_root / "review_entities.json",
+                package_root / "reviewer_tasks.json",
+                package_root / "latest_reviewed" / "current.json",
+                package_root / "cases" / f"{case_id}.json",
+                package_root / "regions" / f"{case_id}_current_regions.jsonl",
+                session_dir / "events.jsonl",
+                session_dir / "corrections.jsonl",
+            ]
+        ),
+        _glob_file_signatures(session_dir / "latest_reviewed" / case_id, "**/*"),
+    )
+
+
+def _glob_file_signatures(root: Path, pattern: str) -> tuple[tuple[Any, ...], ...]:
+    if not root.exists():
+        return ()
+    return _file_signatures(path for path in sorted(root.glob(pattern)) if path.is_file())
+
+
+def _file_signatures(paths: Any) -> tuple[tuple[Any, ...], ...]:
+    signatures: list[tuple[Any, ...]] = []
+    for path in paths:
+        file_path = Path(path)
+        try:
+            stat = file_path.stat()
+        except FileNotFoundError:
+            signatures.append((str(file_path), None, None, None))
+            continue
+        signatures.append(
+            (
+                str(file_path.resolve()),
+                int(stat.st_size),
+                int(stat.st_mtime_ns),
+                int(getattr(stat, "st_ino", 0)),
+            )
+        )
+    return tuple(signatures)
 
 
 def materialize_latest_reviewed_revision(
@@ -962,17 +1093,34 @@ def compile_object_policy_regions(
     kept: list[PrivacyRegionRecord] = []
     suppressed_rows: list[dict[str, Any]] = []
     entity_rows: list[dict[str, Any]] = []
+    entity_infos: list[dict[str, Any]] = []
+    for index, entity in enumerate(effective_entities):
+        entity_infos.append(
+            {
+                "category": str(entity.get("category") or ""),
+                "entity": entity,
+                "index": index,
+                "policy": review_working_state.inherited_policy(entity),
+                "source_track_ids": sorted(review_working_state.entity_track_ids(entity)),
+                "track_variants": review_working_state.entity_track_variants(entity),
+            }
+        )
+    entity_match_counts = [0 for _item in entity_infos]
     for record in baseline_regions:
-        matched_entities = [
-            entity
-            for entity in effective_entities
-            if review_working_state.region_belongs_to_entity(record, entity)
+        record_values = review_working_state.region_identity_values(record)
+        matched_infos = [
+            info
+            for info in entity_infos
+            if (not info["category"] or info["category"] == record.category)
+            and bool(record_values & info["track_variants"])
         ]
+        for info in matched_infos:
+            entity_match_counts[int(info["index"])] += 1
+        matched_entities = [dict(info["entity"]) for info in matched_infos]
         suppressing = [
-            entity
-            for entity in matched_entities
-            if review_working_state.inherited_policy(entity)
-            in review_working_state.SUPPRESSING_POLICIES
+            dict(info["entity"])
+            for info in matched_infos
+            if info["policy"] in review_working_state.SUPPRESSING_POLICIES
         ]
         if suppressing:
             suppressed_rows.append(
@@ -989,20 +1137,16 @@ def compile_object_policy_regions(
 
     added_regions: list[PrivacyRegionRecord] = []
     existing_keys = {reviewed_region_unique_key(record) for record in kept}
-    for entity in effective_entities:
-        policy = review_working_state.inherited_policy(entity)
-        matched = [
-            record
-            for record in baseline_regions
-            if review_working_state.region_belongs_to_entity(record, entity)
-        ]
+    for info in entity_infos:
+        entity = dict(info["entity"])
+        policy = str(info["policy"])
         entity_rows.append(
             {
                 "category": entity.get("category"),
                 "entity_id": entity.get("entity_id"),
-                "matched_baseline_region_count": len(matched),
+                "matched_baseline_region_count": entity_match_counts[int(info["index"])],
                 "policy": policy,
-                "source_track_ids": sorted(review_working_state.entity_track_ids(entity)),
+                "source_track_ids": list(info["source_track_ids"]),
             }
         )
         if (

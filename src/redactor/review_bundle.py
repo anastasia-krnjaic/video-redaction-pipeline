@@ -2905,19 +2905,6 @@ def validate_rendered_region_application(
     media_slug: str | None = None,
 ) -> dict[str, Any]:
     errors: list[str] = []
-    original_frames = decode_video_frames(original_clip_path)
-    rendered_frames = decode_video_frames(rendered_clip_path)
-    if len(original_frames) != frame_mapping.frame_count:
-        errors.append(
-            f"original clip decoded frame count mismatch: expected {frame_mapping.frame_count}, "
-            f"got {len(original_frames)}"
-        )
-    if len(rendered_frames) != frame_mapping.frame_count:
-        errors.append(
-            f"rendered clip decoded frame count mismatch: expected {frame_mapping.frame_count}, "
-            f"got {len(rendered_frames)}"
-        )
-
     region_results: list[dict[str, Any]] = []
     expected_region_frames: set[int] = set()
     successful_region_frames: set[int] = set()
@@ -2925,6 +2912,17 @@ def validate_rendered_region_application(
     unexpected_rendered_region_frames: set[int] = set()
     expected_region_count = 0
     successful_region_count = 0
+    original_decoded_count = 0
+    rendered_decoded_count = 0
+    collect_contact_frames = decoded_audit_dir is not None
+    original_contact_frames: list[np.ndarray] = []
+    rendered_contact_frames: list[np.ndarray] = []
+    original_capture = cv.VideoCapture(str(original_clip_path))
+    rendered_capture = cv.VideoCapture(str(rendered_clip_path))
+    if not original_capture.isOpened():
+        errors.append(f"original clip could not be opened: {original_clip_path}")
+    if not rendered_capture.isOpened():
+        errors.append(f"rendered clip could not be opened: {rendered_clip_path}")
     source_capture = cv.VideoCapture(str(source_video_path)) if source_video_path else None
     if source_capture is not None and not source_capture.isOpened():
         source_capture.release()
@@ -2950,10 +2948,19 @@ def validate_rendered_region_application(
             frame_mapping.source_frame_end + 1,
         ):
             local_index = frame_mapping.local_for_source(source_frame_index)
-            if local_index >= len(original_frames) or local_index >= len(rendered_frames):
+            original_ok, original = original_capture.read()
+            rendered_ok, rendered = rendered_capture.read()
+            if original_ok:
+                original_decoded_count += 1
+            if rendered_ok:
+                rendered_decoded_count += 1
+            if not original_ok or not rendered_ok:
                 continue
-            original = original_frames[local_index]
-            rendered = rendered_frames[local_index]
+            if collect_contact_frames:
+                original_contact_frames.append(original)
+                rendered_contact_frames.append(rendered)
+            if local_index >= frame_mapping.frame_count:
+                continue
             renderable_regions = [
                 region
                 for region in regions_by_frame.get(source_frame_index, [])
@@ -3089,10 +3096,24 @@ def validate_rendered_region_application(
                 successful_region_frames.add(source_frame_index)
             else:
                 missing_region_frames.add(source_frame_index)
+        original_decoded_count += consume_remaining_frames(original_capture)
+        rendered_decoded_count += consume_remaining_frames(rendered_capture)
     finally:
+        original_capture.release()
+        rendered_capture.release()
         if source_capture is not None:
             source_capture.release()
 
+    if original_decoded_count != frame_mapping.frame_count:
+        errors.append(
+            f"original clip decoded frame count mismatch: expected {frame_mapping.frame_count}, "
+            f"got {original_decoded_count}"
+        )
+    if rendered_decoded_count != frame_mapping.frame_count:
+        errors.append(
+            f"rendered clip decoded frame count mismatch: expected {frame_mapping.frame_count}, "
+            f"got {rendered_decoded_count}"
+        )
     if missing_region_frames:
         errors.append(
             "expected privacy regions were not visibly applied on source frames: "
@@ -3118,8 +3139,8 @@ def validate_rendered_region_application(
         )
         write_application_contact_sheet(
             contact_sheet_path,
-            original_frames=original_frames,
-            rendered_frames=rendered_frames,
+            original_frames=original_contact_frames,
+            rendered_frames=rendered_contact_frames,
             frame_mapping=frame_mapping,
             regions_by_frame=regions_by_frame,
             settings=settings,
@@ -3140,6 +3161,15 @@ def validate_rendered_region_application(
         "successfully_rendered_region_frames": sorted(successful_region_frames),
         "unexpected_rendered_region_frames": sorted(unexpected_rendered_region_frames),
     }
+
+
+def consume_remaining_frames(capture: cv.VideoCapture) -> int:
+    count = 0
+    while True:
+        ok, _frame = capture.read()
+        if not ok:
+            return count
+        count += 1
 
 
 def region_difference_metrics(

@@ -63,6 +63,8 @@ BLOCKING_ACTIONS = {
 }
 
 _SESSION_WRITE_LOCK = threading.RLock()
+_EVENT_CHAIN_CACHE_LOCK = threading.Lock()
+_EVENT_CHAIN_CACHE: dict[tuple[str, int, int], dict[str, Any]] = {}
 
 
 def allowed_actions_for_task(task: dict[str, Any]) -> tuple[str, ...]:
@@ -627,6 +629,20 @@ def _append_encoded_event_rows(session_dir: Path, encoded_rows: list[str]) -> No
 
 
 def validate_event_hash_chain(session_dir: Path) -> dict[str, Any]:
+    events_path = session_dir / "events.jsonl"
+    if events_path.exists():
+        stat = events_path.stat()
+        cache_key = (
+            events_path.resolve().as_posix(),
+            int(stat.st_size),
+            int(stat.st_mtime_ns),
+        )
+        with _EVENT_CHAIN_CACHE_LOCK:
+            cached = _EVENT_CHAIN_CACHE.get(cache_key)
+            if cached is not None:
+                return dict(cached)
+    else:
+        cache_key = None
     previous: str | None = None
     errors: list[str] = []
     count = 0
@@ -641,13 +657,18 @@ def validate_event_hash_chain(session_dir: Path) -> dict[str, Any]:
         if expected_hash != actual_hash:
             errors.append(f"events[{index}] event hash mismatch")
         previous = str(expected_hash)
-    return {
+    result = {
         "error_count": len(errors),
         "errors": errors,
         "event_count": count,
         "passed": not errors,
         "schema_version": "review_event_chain_validation.v1",
     }
+    if cache_key is not None:
+        with _EVENT_CHAIN_CACHE_LOCK:
+            _EVENT_CHAIN_CACHE.clear()
+            _EVENT_CHAIN_CACHE[cache_key] = dict(result)
+    return result
 
 
 def load_events(session_dir: Path) -> list[dict[str, Any]]:

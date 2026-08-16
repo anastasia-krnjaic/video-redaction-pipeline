@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import shutil
+import threading
 import time
 import uuid
 import zipfile
@@ -58,6 +60,15 @@ LATEST_REVIEWED_PUBLICATION_DEFERRED_ERROR_CODE = "latest_reviewed_publication_d
 LATEST_REVIEWED_PUBLICATION_DEFERRED_REASON = (
     "mixed_reviewed_region_compilation_not_implemented"
 )
+WORKING_STATE_CACHE_DISABLE_ENV = "REDACTOR_DISABLE_WORKING_STATE_CACHE"
+WORKING_STATE_CACHE_MAX_ENTRIES = 64
+
+_WORKING_STATE_CACHE_LOCK = threading.RLock()
+_WORKING_STATE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_WORKING_STATE_CACHE_STATS: dict[str, int] = {
+    "hits": 0,
+    "misses": 0,
+}
 
 POLICY_REDACT = privacy_entities.POLICY_REDACT
 POLICY_KEEP_VISIBLE = privacy_entities.POLICY_KEEP_VISIBLE
@@ -293,12 +304,24 @@ def derive_working_state(
     package_root: Path,
     session_dir: Path,
     *,
+    copy_cached: bool = True,
     write_snapshot: bool = True,
 ) -> dict[str, Any]:
     """Return deterministic session working state plus any valid materialized versions."""
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
     ensure_session_layout(session_dir)
+    cache_key = _working_state_cache_key(package_root, session_dir)
+    if _working_state_cache_enabled():
+        with _WORKING_STATE_CACHE_LOCK:
+            cached = _WORKING_STATE_CACHE.get(cache_key)
+            if cached is not None:
+                _WORKING_STATE_CACHE_STATS["hits"] += 1
+                state = copy.deepcopy(cached) if copy_cached else cached
+                if write_snapshot:
+                    write_state_snapshot(session_dir, state)
+                return state
+            _WORKING_STATE_CACHE_STATS["misses"] += 1
     baseline = package_baseline(package_root)
     entities = load_entity_index(package_root)
     projection = derive_active_review_projection(
@@ -373,7 +396,83 @@ def derive_working_state(
     state["state_hash"] = state_hash(state)
     if write_snapshot:
         write_state_snapshot(session_dir, state)
+    if _working_state_cache_enabled():
+        with _WORKING_STATE_CACHE_LOCK:
+            _WORKING_STATE_CACHE[cache_key] = copy.deepcopy(state)
+            while len(_WORKING_STATE_CACHE) > WORKING_STATE_CACHE_MAX_ENTRIES:
+                _WORKING_STATE_CACHE.pop(next(iter(_WORKING_STATE_CACHE)))
     return state
+
+
+def working_state_cache_stats() -> dict[str, int]:
+    with _WORKING_STATE_CACHE_LOCK:
+        return dict(_WORKING_STATE_CACHE_STATS) | {
+            "entries": len(_WORKING_STATE_CACHE),
+        }
+
+
+def clear_working_state_cache() -> None:
+    with _WORKING_STATE_CACHE_LOCK:
+        _WORKING_STATE_CACHE.clear()
+        for key in _WORKING_STATE_CACHE_STATS:
+            _WORKING_STATE_CACHE_STATS[key] = 0
+
+
+def _working_state_cache_enabled() -> bool:
+    return os.environ.get(WORKING_STATE_CACHE_DISABLE_ENV, "").strip().lower() not in {
+        "1",
+        "true",
+        "yes",
+    }
+
+
+def _working_state_cache_key(package_root: Path, session_dir: Path) -> tuple[Any, ...]:
+    return (
+        str(package_root),
+        str(session_dir),
+        current_event_chain_head(session_dir),
+        _file_signatures(
+            [
+                package_root / "workspace_manifest.json",
+                package_root / "reviewer_tasks.json",
+                package_root / "review_entities.json",
+                package_root / "latest_reviewed" / "current.json",
+                session_dir / "events.jsonl",
+                session_dir / "corrections.jsonl",
+                session_dir / "review_session.json",
+            ]
+        ),
+        _glob_file_signatures(package_root / "cases", "*.json"),
+        _glob_file_signatures(package_root / "regions", "*.jsonl"),
+        _glob_file_signatures(session_dir / "checkpoints", "*.json"),
+        _glob_file_signatures(session_dir / "latest_reviewed", "**/*"),
+    )
+
+
+def _glob_file_signatures(root: Path, pattern: str) -> tuple[tuple[Any, ...], ...]:
+    if not root.exists():
+        return ()
+    return _file_signatures(path for path in sorted(root.glob(pattern)) if path.is_file())
+
+
+def _file_signatures(paths: Any) -> tuple[tuple[Any, ...], ...]:
+    signatures: list[tuple[Any, ...]] = []
+    for path in paths:
+        file_path = Path(path)
+        try:
+            stat = file_path.stat()
+        except FileNotFoundError:
+            signatures.append((str(file_path), None, None, None))
+            continue
+        signatures.append(
+            (
+                str(file_path.resolve()),
+                int(stat.st_size),
+                int(stat.st_mtime_ns),
+                int(getattr(stat, "st_ino", 0)),
+            )
+        )
+    return tuple(signatures)
 
 
 def package_baseline(package_root: Path) -> dict[str, Any]:
@@ -1434,6 +1533,7 @@ def effective_privacy_region_digest(
     session_dir: Path,
     *,
     case_id: str,
+    working_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if latest_reviewed_publication_supported(package_root):
         from redactor import reviewed_regions
@@ -1443,6 +1543,7 @@ def effective_privacy_region_digest(
             session_dir,
             case_id=case_id,
             require_blockers_resolved=False,
+            working_state=working_state,
         )
     started = time.monotonic()
     regions, provenance = compute_effective_privacy_regions(

@@ -906,6 +906,49 @@ def test_rendered_region_application_validates_nonzero_start_mapping(
     assert validation["region_results"][0]["local_task_frame_index"] == 1
 
 
+def test_rendered_region_application_streams_video_frames(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mapping = review_bundle.TaskFrameMapping(0, 5)
+    settings = review_bundle.ReviewRenderConfig(pixel_size=4).render_settings()
+    region = review_bundle.rendering.RenderRegion(
+        frame_index=2,
+        bbox_xyxy=(10, 10, 30, 30),
+        provenance="ordinary_tracker",
+        state="covered",
+        source_record={},
+    )
+    original_clip = write_synthetic_video(
+        tmp_path / "original.mp4",
+        [synthetic_frame(index) for index in range(6)],
+    )
+    rendered_frames = [synthetic_frame(index) for index in range(6)]
+    rendered_frames[2] = review_bundle.rendering.render_frame(
+        rendered_frames[2],
+        2,
+        {2: [region]},
+        settings,
+    )
+    rendered_clip = write_synthetic_video(tmp_path / "rendered.mp4", rendered_frames)
+
+    def fail_full_decode(path: Path) -> list[np.ndarray]:
+        raise AssertionError(f"full decode should not be used for {path}")
+
+    monkeypatch.setattr(review_bundle, "decode_video_frames", fail_full_decode)
+
+    validation = review_bundle.validate_rendered_region_application(
+        original_clip_path=original_clip,
+        rendered_clip_path=rendered_clip,
+        frame_mapping=mapping,
+        regions_by_frame={2: [region]},
+        settings=settings,
+    )
+
+    assert validation["passed"] is True
+    assert validation["expected_region_frames"] == [2]
+
+
 def test_rendered_region_application_uses_shared_visibility_contract_for_h264_overlap(
     tmp_path: Path,
 ) -> None:

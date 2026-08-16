@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -34,6 +36,7 @@ from redactor.privacy_records import (
 SCHEMA_VERSION = "case_pipeline.v1"
 CASE_MANIFEST_SCHEMA_VERSION = "unified_case_manifest.v1"
 RENDER_PLAN_SCHEMA_VERSION = "unified_render_plan.v1"
+RESUMABLE_STAGE_MANIFEST_SCHEMA_VERSION = "case_pipeline_resumable_stage_manifest.v1"
 
 STAGE_INGEST = "INGEST"
 STAGE_DETECT = "DETECT"
@@ -706,9 +709,20 @@ def run_case_pipeline(
     if not categories:
         raise ValueError("at least one privacy category must be selected")
     options = options or CasePipelineOptions()
-    ensure_case_output_dir(output_dir, overwrite=options.overwrite)
     source_info = media.probe_media(input_video)
     source_identity = SourceIdentity.from_video(input_video, info=source_info)
+    if not options.overwrite:
+        reusable = reusable_case_pipeline_result(
+            input_video=input_video,
+            output_dir=output_dir,
+            categories=categories,
+            options=options,
+            source_info=source_info,
+            source_identity=source_identity,
+        )
+        if reusable is not None:
+            return reusable
+    ensure_case_output_dir(output_dir, overwrite=options.overwrite)
     case_id = case_ids.validate_case_id(output_dir.name)
     context = CaseContext(
         case_id=case_id,
@@ -966,6 +980,12 @@ def run_case_pipeline(
         source_identity_artifact=source_identity_artifact,
         category_failures=category_failures,
     )
+    resumable_manifest = write_case_pipeline_resumable_stage_manifest(
+        context=context,
+        options=options,
+        categories=categories,
+        case_manifest=manifest,
+    )
     if category_failures:
         details = "; ".join(
             f"{item['category']}: {item['error']}" for item in category_failures
@@ -977,10 +997,217 @@ def run_case_pipeline(
         "combined_preview": combined_preview,
         "manifest": manifest,
         "render_plan": render_plan,
+        "resumable_stage_manifest": resumable_manifest,
         "review_workspace": review_workspace_result,
         "schema_version": SCHEMA_VERSION,
         "stage_statuses": [stage.to_dict() for stage in stage_statuses],
     }
+
+
+def reusable_case_pipeline_result(
+    *,
+    input_video: Path,
+    output_dir: Path,
+    categories: tuple[str, ...],
+    options: CasePipelineOptions,
+    source_info: media.MediaInfo,
+    source_identity: SourceIdentity,
+) -> dict[str, Any] | None:
+    if not output_dir.exists() or not output_dir.is_dir():
+        return None
+    case_id = case_ids.validate_case_id(output_dir.name)
+    context = CaseContext(
+        case_id=case_id,
+        output_dir=output_dir,
+        selected_categories=categories,
+        source_identity=source_identity,
+        source_info=source_info,
+        source_video=input_video,
+    )
+    manifest_path = output_dir / "case_manifest.json"
+    stage_manifest_path = output_dir / "case_pipeline_stage_manifest.json"
+    if not manifest_path.exists() or not stage_manifest_path.exists():
+        return None
+    case_manifest = load_json_if_exists(manifest_path)
+    decision = resumable_stage_reuse_decision(
+        stage_manifest_path,
+        expected_identity=case_pipeline_stage_identity(
+            context=context,
+            options=options,
+            categories=categories,
+            case_manifest=case_manifest,
+        ),
+        output_dir=output_dir,
+    )
+    if not decision["reusable"]:
+        return None
+    return {
+        "case_id": case_id,
+        "categories": list(categories),
+        "combined_preview": None,
+        "manifest": case_manifest,
+        "render_plan": {},
+        "resumable_reuse": True,
+        "resumable_stage_manifest": decision["manifest"],
+        "review_workspace": None,
+        "schema_version": SCHEMA_VERSION,
+        "stage_statuses": list(case_manifest.get("stages") or []),
+    }
+
+
+def write_case_pipeline_resumable_stage_manifest(
+    *,
+    context: CaseContext,
+    options: CasePipelineOptions,
+    categories: tuple[str, ...],
+    case_manifest: dict[str, Any],
+) -> dict[str, Any]:
+    output_hashes = case_pipeline_output_hashes(context.output_dir, case_manifest)
+    payload = {
+        "case_id": context.case_id,
+        "completed_at_utc": media.utc_timestamp(),
+        "configuration_identity": case_pipeline_configuration_identity(context, options),
+        "implementation_identity": case_pipeline_implementation_identity(),
+        "input_hashes": {
+            "source_video_sha256": context.source_identity.sha256,
+        },
+        "output_hashes": output_hashes,
+        "schema_version": RESUMABLE_STAGE_MANIFEST_SCHEMA_VERSION,
+        "source_identity": context.source_identity.to_dict(),
+        "stage": "CASE_PIPELINE",
+        "status": STATUS_SUCCEEDED,
+    }
+    payload["stage_identity"] = stable_hash(stage_identity_payload(payload))
+    publish_resumable_stage_manifest(
+        context.output_dir / "case_pipeline_stage_manifest.json",
+        payload,
+    )
+    return payload
+
+
+def resumable_stage_reuse_decision(
+    manifest_path: Path,
+    *,
+    expected_identity: str,
+    output_dir: Path,
+) -> dict[str, Any]:
+    try:
+        payload = load_json_if_exists(manifest_path)
+    except json.JSONDecodeError as exc:
+        return {
+            "manifest": {},
+            "reason": f"malformed resumable stage manifest: {exc}",
+            "reusable": False,
+        }
+    if payload.get("schema_version") != RESUMABLE_STAGE_MANIFEST_SCHEMA_VERSION:
+        return {"manifest": payload, "reason": "schema mismatch", "reusable": False}
+    if payload.get("status") != STATUS_SUCCEEDED:
+        return {"manifest": payload, "reason": "stage incomplete", "reusable": False}
+    if payload.get("stage_identity") != expected_identity:
+        return {"manifest": payload, "reason": "stage identity mismatch", "reusable": False}
+    actual_hashes = case_pipeline_output_hashes(
+        output_dir,
+        load_json_if_exists(output_dir / "case_manifest.json"),
+    )
+    if dict(payload.get("output_hashes") or {}) != actual_hashes:
+        return {"manifest": payload, "reason": "output hash mismatch", "reusable": False}
+    return {"manifest": payload, "reason": "completed stage matches", "reusable": True}
+
+
+def case_pipeline_stage_identity(
+    *,
+    context: CaseContext,
+    options: CasePipelineOptions,
+    categories: tuple[str, ...],
+    case_manifest: dict[str, Any],
+) -> str:
+    payload = {
+        "case_id": context.case_id,
+        "configuration_identity": case_pipeline_configuration_identity(context, options),
+        "implementation_identity": case_pipeline_implementation_identity(),
+        "input_hashes": {"source_video_sha256": context.source_identity.sha256},
+        "output_hashes": case_pipeline_output_hashes(context.output_dir, case_manifest),
+        "selected_categories": list(categories),
+        "source_identity": context.source_identity.to_dict(),
+        "stage": "CASE_PIPELINE",
+    }
+    return stable_hash(payload)
+
+
+def stage_identity_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "case_id": payload.get("case_id"),
+        "configuration_identity": payload.get("configuration_identity"),
+        "implementation_identity": payload.get("implementation_identity"),
+        "input_hashes": payload.get("input_hashes"),
+        "output_hashes": payload.get("output_hashes"),
+        "selected_categories": list(
+            dict(payload.get("configuration_identity") or {}).get("selected_categories") or []
+        ),
+        "source_identity": payload.get("source_identity"),
+        "stage": payload.get("stage"),
+    }
+
+
+def case_pipeline_output_hashes(output_dir: Path, case_manifest: dict[str, Any]) -> dict[str, str]:
+    hashes: dict[str, str] = {}
+    case_manifest_path = output_dir / "case_manifest.json"
+    if case_manifest_path.exists():
+        hashes["case_manifest.json"] = media.sha256_file(case_manifest_path)
+    for artifact in list(case_manifest.get("artifacts") or []):
+        artifact_path = output_dir / str(dict(artifact).get("path") or "")
+        if artifact_path.exists() and artifact_path.is_file():
+            hashes[str(dict(artifact).get("path") or "")] = media.sha256_file(artifact_path)
+    return dict(sorted(hashes.items()))
+
+
+def case_pipeline_configuration_identity(
+    context: CaseContext,
+    options: CasePipelineOptions,
+) -> dict[str, Any]:
+    payload = {
+        "allow_partial_plate_preview": options.allow_partial_plate_preview,
+        "face_policy_mode": options.face_policy_mode,
+        "no_detection_overlay": options.no_detection_overlay,
+        "primary_threshold": options.primary_threshold,
+        "proposal_threshold": options.proposal_threshold,
+        "schema_version": "case_pipeline_configuration_identity.v1",
+        "selected_categories": list(context.selected_categories),
+        "source_sha256": context.source_identity.sha256,
+    }
+    payload["category_configuration_hashes"] = {
+        category: category_configuration_identity(context, options, category=category)[
+            "configuration_hash"
+        ]
+        for category in context.selected_categories
+    }
+    payload["configuration_hash"] = stable_hash(payload)
+    return payload
+
+
+def case_pipeline_implementation_identity() -> dict[str, Any]:
+    return {
+        "case_pipeline_schema_version": SCHEMA_VERSION,
+        "case_manifest_schema_version": CASE_MANIFEST_SCHEMA_VERSION,
+        "render_plan_schema_version": RENDER_PLAN_SCHEMA_VERSION,
+        "resumable_manifest_schema_version": RESUMABLE_STAGE_MANIFEST_SCHEMA_VERSION,
+        "schema_version": "case_pipeline_implementation_identity.v1",
+    }
+
+
+def publish_resumable_stage_manifest(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        with temp_path.open("w", encoding="utf-8") as file:
+            json.dump(payload, file, indent=2, sort_keys=True)
+            file.write("\n")
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_path, path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
 
 
 def parse_categories(value: str | None, *, legacy_faces_enabled: bool = True) -> tuple[str, ...]:

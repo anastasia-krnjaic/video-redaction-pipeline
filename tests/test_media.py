@@ -37,6 +37,24 @@ def test_sha256_file_streams_bytes(tmp_path: Path) -> None:
     assert media.sha256_file(sample, chunk_size=1024) == hashlib.sha256(content).hexdigest()
 
 
+def test_sha256_file_cache_hits_and_invalidates_on_file_change(tmp_path: Path) -> None:
+    sample = tmp_path / "sample.bin"
+    sample.write_bytes(b"first")
+    media.clear_immutable_media_cache()
+
+    first = media.sha256_file(sample)
+    second = media.sha256_file(sample)
+    assert first == second
+    assert media.immutable_cache_stats()["sha256_hits"] == 1
+
+    sample.write_bytes(b"second value changes size")
+    changed = media.sha256_file(sample)
+    assert changed != first
+    stats = media.immutable_cache_stats()
+    assert stats["sha256_misses"] == 2
+    assert stats["sha256_hits"] == 1
+
+
 def test_parse_video_with_audio(tmp_path: Path) -> None:
     source = tmp_path / "clip with spaces.mp4"
     parsed = parse_fixture("ffprobe_video_audio.json", source, tmp_path)
@@ -148,6 +166,46 @@ def test_probe_media_handles_paths_with_spaces_and_argument_lists(
 
     assert parsed["source_path"] == "clip with spaces.mp4"
     assert commands
+
+
+def test_probe_media_cache_reuses_ffprobe_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_path = tmp_path / "cached probe.mp4"
+    input_path.write_bytes(b"video bytes")
+    fixture = load_fixture("ffprobe_video_audio.json")
+    commands: list[list[str]] = []
+    media.clear_immutable_media_cache()
+
+    def fake_which(name: str) -> str:
+        return name
+
+    def fake_run(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        if command[0] == "ffprobe" and "-version" in command:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout="ffprobe version test\n",
+                stderr="",
+            )
+        if command[0] == "ffprobe":
+            return subprocess.CompletedProcess(command, 0, stdout=json.dumps(fixture), stderr="")
+        raise AssertionError(f"unexpected command: {command}")
+
+    monkeypatch.setattr(media.shutil, "which", fake_which)
+    monkeypatch.setattr(media.subprocess, "run", fake_run)
+
+    first = media.probe_media(input_path, cwd=tmp_path).to_dict()
+    second = media.probe_media(input_path, cwd=tmp_path).to_dict()
+
+    assert first["sha256"] == second["sha256"]
+    assert [command for command in commands if "-show_streams" in command]
+    assert len([command for command in commands if "-show_streams" in command]) == 1
+    stats = media.immutable_cache_stats()
+    assert stats["ffprobe_hits"] == 1
+    assert stats["version_hits"] == 1
 
 
 def test_ffmpeg_helpers_use_argument_lists_not_shell(

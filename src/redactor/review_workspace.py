@@ -41,6 +41,7 @@ from redactor import (
     review_guidance_policy,
     review_sessions,
     review_working_state,
+    reviewed_regions,
 )
 from redactor.detection import rational_to_float
 from redactor.privacy_records import (
@@ -4982,6 +4983,8 @@ class MaterializationJobManager:
     def __init__(self, package_root: Path) -> None:
         self.package_root = package_root.resolve()
         self.lock = threading.RLock()
+        self.max_heavy_jobs = max(1, int(os.environ.get("REDACTOR_MAX_HEAVY_JOBS", "1") or "1"))
+        self._heavy_job_semaphore = threading.BoundedSemaphore(self.max_heavy_jobs)
         self.jobs: dict[str, dict[str, Any]] = {}
         self.case_state: dict[tuple[str, str], dict[str, Any]] = {}
         self.debounce_seconds = 0.85
@@ -5068,6 +5071,11 @@ class MaterializationJobManager:
             "planned_frames_to_render": plan.get("planned_frames_to_render", 0),
             "publication_status": "queued",
             "publication_guard": {},
+            "resource_admission": {
+                "max_heavy_jobs": self.max_heavy_jobs,
+                "schema_version": "heavy_job_admission.v1",
+                "slot_acquired": False,
+            },
             "queue_state": "latest_pending",
             "queue_wait_time_ms": 0,
             "progress": 0.0,
@@ -5510,22 +5518,27 @@ class MaterializationJobManager:
                 self._write_audit_locked()
             self._start_next_if_needed(key, session_dir, actor, completed_job_id=job_id)
             return
-        start_event = review_sessions.append_event(
-            session_dir,
-            event_type="reviewed_media_materialization_started",
-            actor=actor,
-            case_id=case_id,
-            task_id=None,
-            before_state=None,
-            after_state={
-                "case_id": case_id,
-                "job_id": job_id,
-                "state_hash": job.get("accepted_working_state_revision"),
-            },
-            note=str(job.get("reason") or "Latest reviewed media update started."),
-            application_hashes={},
-        )
+        slot_acquired = self._acquire_heavy_job_slot(job, case_id)
+        if not slot_acquired:
+            self._start_next_if_needed(key, session_dir, actor, completed_job_id=job_id)
+            return
+        start_event: dict[str, Any] | None = None
         try:
+            start_event = review_sessions.append_event(
+                session_dir,
+                event_type="reviewed_media_materialization_started",
+                actor=actor,
+                case_id=case_id,
+                task_id=None,
+                before_state=None,
+                after_state={
+                    "case_id": case_id,
+                    "job_id": job_id,
+                    "state_hash": job.get("accepted_working_state_revision"),
+                },
+                note=str(job.get("reason") or "Latest reviewed media update started."),
+                application_hashes={},
+            )
             with self.lock:
                 job["current_stage"] = "rendering_full_media"
                 job["encode_stage"] = "rendering"
@@ -5623,7 +5636,10 @@ class MaterializationJobManager:
                 actor=actor,
                 case_id=case_id,
                 task_id=None,
-                before_state={"job_id": job_id, "started_event_hash": start_event["event_hash"]},
+                before_state={
+                    "job_id": job_id,
+                    "started_event_hash": start_event["event_hash"],
+                },
                 after_state={
                     "accepted_working_state_revision": accepted_revision,
                     "active_projection_hash_schema_version": (
@@ -5694,7 +5710,10 @@ class MaterializationJobManager:
                 actor=actor,
                 case_id=case_id,
                 task_id=None,
-                before_state={"job_id": job_id, "started_event_hash": start_event["event_hash"]},
+                before_state={
+                    "job_id": job_id,
+                    "started_event_hash": (start_event or {}).get("event_hash"),
+                },
                 after_state={"case_id": case_id, "error": str(exc), "job_id": job_id},
                 note=f"Latest reviewed media update failed: {exc}",
                 application_hashes={},
@@ -5716,9 +5735,53 @@ class MaterializationJobManager:
                 )
                 self._write_audit_locked()
         finally:
+            if slot_acquired:
+                self._heavy_job_semaphore.release()
             self._start_next_if_needed(key, session_dir, actor, completed_job_id=job_id)
             with self.lock:
                 self._worker_threads.discard(threading.current_thread())
+
+    def _acquire_heavy_job_slot(self, job: dict[str, Any], case_id: str) -> bool:
+        wait_started = time.monotonic()
+        with self.lock:
+            job["current_stage"] = "waiting_for_heavy_job_slot"
+            job["queue_state"] = "waiting_for_heavy_job_slot"
+            job["resource_admission"] = {
+                "max_heavy_jobs": self.max_heavy_jobs,
+                "schema_version": "heavy_job_admission.v1",
+                "slot_acquired": False,
+            }
+            job["last_progress_at_utc"] = media.utc_timestamp()
+            job["_last_progress_monotonic"] = time.monotonic()
+            self._write_audit_locked()
+        while True:
+            if self._heavy_job_semaphore.acquire(timeout=0.2):
+                wait_ms = int((time.monotonic() - wait_started) * 1000)
+                with self.lock:
+                    job["queue_wait_time_ms"] = wait_ms
+                    job["queue_state"] = "running"
+                    job["resource_admission"] = {
+                        "max_heavy_jobs": self.max_heavy_jobs,
+                        "queue_wait_time_ms": wait_ms,
+                        "schema_version": "heavy_job_admission.v1",
+                        "slot_acquired": True,
+                    }
+                    self._metric(case_id, "heavy_job_queue_wait_time_ms", wait_ms, mode="set")
+                    self._write_audit_locked()
+                return True
+            with self.lock:
+                if self._closed:
+                    job["completed_at_utc"] = media.utc_timestamp()
+                    job["current_stage"] = "cancelled"
+                    job["error"] = (
+                        "Materialization job cancelled while waiting for a heavy-job slot."
+                    )
+                    job["publication_status"] = "cancelled"
+                    job["queue_state"] = "server_closing"
+                    job["progress"] = 1.0
+                    job["status"] = "cancelled"
+                    self._write_audit_locked()
+                    return False
 
     def _start_next_if_needed(
         self,
@@ -6173,24 +6236,51 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             if session_dir is None:
                 return True
             try:
+                status_started = time.perf_counter()
+                timing_ms: dict[str, int] = {}
                 case_id = require_workspace_case(
                     self.server.package_root,
                     str((query.get("case_id") or [""])[0]),
                 )
+                step_started = time.perf_counter()
+                working_state = review_working_state.derive_working_state(
+                    self.server.package_root,
+                    session_dir,
+                    copy_cached=False,
+                    write_snapshot=False,
+                )
+                timing_ms["working_state_projection"] = int(
+                    (time.perf_counter() - step_started) * 1000
+                )
+                step_started = time.perf_counter()
                 blockers = review_finalization.finalization_blockers(
                     package_root=self.server.package_root,
                     case_id=case_id,
                     session_dir=session_dir,
+                    working_state=working_state,
                 )
+                timing_ms["blocker_projection"] = int(
+                    (time.perf_counter() - step_started) * 1000
+                )
+                step_started = time.perf_counter()
                 final_role = review_finalization.current_final_role(
                     self.server.package_root,
                     session_dir,
                     case_id=case_id,
+                    canonical_state_already_validated=bool(blockers["ready"]),
+                    working_state=working_state,
+                )
+                timing_ms["current_final_validation"] = int(
+                    (time.perf_counter() - step_started) * 1000
                 )
                 historical_final = {}
+                step_started = time.perf_counter()
                 final_pointer = review_finalization.load_current_final_pointer(
                     self.server.package_root,
                     case_id=case_id,
+                )
+                timing_ms["final_pointer_load"] = int(
+                    (time.perf_counter() - step_started) * 1000
                 )
                 if final_pointer and final_pointer.get("current") is not True:
                     historical_final = {
@@ -6210,13 +6300,19 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 request_binding = None
                 if blockers["ready"] and not final_role:
                     try:
+                        step_started = time.perf_counter()
                         request_binding = review_finalization.finalization_request_binding(
                             package_root=self.server.package_root,
                             case_id=case_id,
                             session_dir=session_dir,
+                            working_state=working_state,
+                        )
+                        timing_ms["request_binding"] = int(
+                            (time.perf_counter() - step_started) * 1000
                         )
                     except (FileNotFoundError, KeyError, ValueError):
                         request_binding = None
+                timing_ms["total"] = int((time.perf_counter() - status_started) * 1000)
             except (FileNotFoundError, KeyError, ValueError) as exc:
                 self.send_json(
                     {"error": str(exc), "ok": False},
@@ -6237,6 +6333,16 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                         "finalization_request": request_binding,
                         "finalized": bool(final_role),
                         "historical_final": historical_final,
+                        "performance": {
+                            "cache": {
+                                "immutable_media": media.immutable_cache_stats(),
+                                "reviewed_region_digest": (
+                                    reviewed_regions.reviewed_region_digest_cache_stats()
+                                ),
+                                "working_state": review_working_state.working_state_cache_stats(),
+                            },
+                            "timing_ms": timing_ms,
+                        },
                         "ready": blockers["ready"],
                         "review_guidance_policy_version": blockers.get(
                             "review_guidance_policy_version"

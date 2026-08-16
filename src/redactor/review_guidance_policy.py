@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +10,9 @@ from redactor.privacy_records import stable_hash
 POLICY_VERSION = "review_guidance_full_sweep.v1"
 SWEEP_COVERAGE_STATUS = "COVERED_BY_CURRENT_FULL_VIDEO_SWEEP"
 UNADJUDICATED_STATUS = "NOT_INDIVIDUALLY_ADJUDICATED"
+
+_TASK_CACHE_LOCK = threading.Lock()
+_TASK_CACHE: dict[tuple[str, int, int], tuple[dict[str, Any], ...]] = {}
 
 
 def unreviewed_guidance_snapshot(
@@ -77,6 +81,16 @@ def load_review_tasks(package_root: Path) -> list[dict[str, Any]]:
     path = package_root / "reviewer_tasks.json"
     if not path.exists():
         return []
+    stat = path.stat()
+    cache_key = (path.resolve().as_posix(), int(stat.st_size), int(stat.st_mtime_ns))
+    with _TASK_CACHE_LOCK:
+        cached = _TASK_CACHE.get(cache_key)
+        if cached is not None:
+            return [dict(task) for task in cached]
     payload = json.loads(path.read_text(encoding="utf-8"))
     raw_tasks = list(payload.get("tasks") or payload.get("reviewer_tasks") or [])
-    return [dict(task) for task in raw_tasks]
+    tasks = tuple(dict(task) for task in raw_tasks)
+    with _TASK_CACHE_LOCK:
+        _TASK_CACHE.clear()
+        _TASK_CACHE[cache_key] = tasks
+    return [dict(task) for task in tasks]

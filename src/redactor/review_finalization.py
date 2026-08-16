@@ -65,6 +65,7 @@ def finalization_blockers(
     package_root: Path,
     case_id: str,
     session_dir: Path,
+    working_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     blockers: list[str] = []
     package_root = package_root.resolve()
@@ -72,7 +73,12 @@ def finalization_blockers(
     case_id = case_ids.validate_case_id(case_id)
     from redactor import review_working_state
 
-    working_state = review_working_state.derive_working_state(package_root, session_dir)
+    working_state = working_state or review_working_state.derive_working_state(
+        package_root,
+        session_dir,
+        copy_cached=False,
+        write_snapshot=False,
+    )
     tasks_payload = load_json(package_root / "reviewer_tasks.json")
     tasks = [
         task
@@ -157,6 +163,7 @@ def finalization_blockers(
                     package_root,
                     session_dir,
                     case_id=case_id,
+                    working_state=working_state,
                 )
             except Exception as exc:
                 blockers.append(f"{case_id}: Latest reviewed digest failed: {exc}")
@@ -484,6 +491,7 @@ def canonical_finalization_gate_blockers(
             case_id=case_id,
             session_dir=session_dir,
             require_blockers_resolved=False,
+            working_state=working_state,
         )
     except (FileNotFoundError, ValueError) as exc:
         return [f"{case_id}: stale_latest_reviewed: {exc}"]
@@ -814,6 +822,7 @@ def resolve_canonical_latest_reviewed_candidate(
     case_id: str,
     session_dir: Path,
     require_blockers_resolved: bool,
+    working_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from redactor import review_working_state, reviewed_regions
 
@@ -856,7 +865,12 @@ def resolve_canonical_latest_reviewed_candidate(
     source_sha256 = media.sha256_file(source_path)
     if manifest.source_video_hash and source_sha256 != manifest.source_video_hash:
         raise ValueError("source hash mismatch")
-    working_state = review_working_state.derive_working_state(package_root, session_dir)
+    working_state = working_state or review_working_state.derive_working_state(
+        package_root,
+        session_dir,
+        copy_cached=False,
+        write_snapshot=False,
+    )
     current_latest = dict(working_state.get("materialized_latest_reviewed") or {}).get(case_id)
     if not current_latest:
         raise ValueError("Latest reviewed is not current for the review state")
@@ -867,6 +881,7 @@ def resolve_canonical_latest_reviewed_candidate(
         session_dir,
         case_id=case_id,
         require_blockers_resolved=require_blockers_resolved,
+        working_state=working_state,
     )
     reviewed_region_set_sha256 = str(current_digest.get("effective_regions_hash") or "")
     published_region_set_sha256 = str(
@@ -1131,12 +1146,14 @@ def finalization_request_binding(
     package_root: Path,
     case_id: str,
     session_dir: Path,
+    working_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     candidate = resolve_canonical_latest_reviewed_candidate(
         package_root=package_root,
         case_id=case_id,
         session_dir=session_dir,
         require_blockers_resolved=True,
+        working_state=working_state,
     )
     sweep = require_canonical_sweep_acknowledgement(candidate, candidate["working_state"])
     return finalization_request_binding_from_candidate(candidate, sweep)
@@ -1615,6 +1632,8 @@ def current_final_role(
     session_dir: Path | None,
     *,
     case_id: str,
+    canonical_state_already_validated: bool = False,
+    working_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     package_root = package_root.resolve()
     case_id = case_ids.validate_case_id(case_id)
@@ -1632,33 +1651,42 @@ def current_final_role(
         session_dir = session_dir.resolve()
         if finalization_manifest.get("review_session_id") != session_dir.name:
             return {}
-        try:
-            candidate = resolve_canonical_latest_reviewed_candidate(
-                package_root=package_root,
+        if canonical_state_already_validated and working_state is not None:
+            if not final_manifest_matches_validated_working_state(
+                finalization_manifest,
+                working_state,
                 case_id=case_id,
-                session_dir=session_dir,
-                require_blockers_resolved=False,
-            )
-            sweep = require_canonical_sweep_acknowledgement(
-                candidate,
-                candidate["working_state"],
-            )
-        except (FileNotFoundError, ValueError):
-            return {}
-        if candidate["revision_id"] != finalization_manifest["latest_reviewed_revision_id"]:
-            return {}
-        if candidate["latest_video_sha256"] != finalization_manifest[
-            "latest_reviewed_video_sha256"
-        ]:
-            return {}
-        if candidate["reviewed_region_set_sha256"] != finalization_manifest[
-            "reviewed_region_set_sha256"
-        ]:
-            return {}
-        if sweep["sweep_acknowledgement_sha256"] != finalization_manifest[
-            "sweep_acknowledgement_sha256"
-        ]:
-            return {}
+            ):
+                return {}
+        else:
+            try:
+                candidate = resolve_canonical_latest_reviewed_candidate(
+                    package_root=package_root,
+                    case_id=case_id,
+                    session_dir=session_dir,
+                    require_blockers_resolved=False,
+                    working_state=working_state,
+                )
+                sweep = require_canonical_sweep_acknowledgement(
+                    candidate,
+                    candidate["working_state"],
+                )
+            except (FileNotFoundError, ValueError):
+                return {}
+            if candidate["revision_id"] != finalization_manifest["latest_reviewed_revision_id"]:
+                return {}
+            if candidate["latest_video_sha256"] != finalization_manifest[
+                "latest_reviewed_video_sha256"
+            ]:
+                return {}
+            if candidate["reviewed_region_set_sha256"] != finalization_manifest[
+                "reviewed_region_set_sha256"
+            ]:
+                return {}
+            if sweep["sweep_acknowledgement_sha256"] != finalization_manifest[
+                "sweep_acknowledgement_sha256"
+            ]:
+                return {}
     return {
         "current_status": "current",
         "final_video_sha256": finalization_manifest["final_video_sha256"],
@@ -1684,6 +1712,29 @@ def current_final_role(
         ],
         "validation_status": "passed",
     }
+
+
+def final_manifest_matches_validated_working_state(
+    finalization_manifest: dict[str, Any],
+    working_state: dict[str, Any],
+    *,
+    case_id: str,
+) -> bool:
+    latest = dict(dict(working_state.get("materialized_latest_reviewed") or {}).get(case_id) or {})
+    sweep = dict(dict(working_state.get("sweep_acknowledgements") or {}).get(case_id) or {})
+    if not latest or not sweep:
+        return False
+    expected = {
+        "latest_reviewed_revision_id": latest.get("revision_id"),
+        "latest_reviewed_video_sha256": latest.get("sha256"),
+        "reviewed_region_set_sha256": latest.get("effective_regions_hash")
+        or latest.get("reviewed_region_set_sha256"),
+        "sweep_acknowledgement_sha256": sweep_acknowledgement_sha256(sweep),
+    }
+    return all(
+        str(finalization_manifest.get(key) or "") == str(value or "")
+        for key, value in expected.items()
+    )
 
 
 def reopen_case_final_for_review(

@@ -3,8 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import shutil
 import subprocess
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -14,14 +16,43 @@ from redactor.models import AudioStreamInfo, MediaInfo, VideoStreamInfo
 SCHEMA_VERSION = "1.0"
 HASH_CHUNK_SIZE = 1024 * 1024
 CONTACT_SHEET_TILE_WIDTH = 320
+IMMUTABLE_CACHE_ENV = "REDACTOR_DISABLE_IMMUTABLE_MEDIA_CACHE"
+IMMUTABLE_CACHE_MAX_ENTRIES = 512
+
+FileStatKey = tuple[str, int, int, int]
+
+_CACHE_LOCK = threading.RLock()
+_SHA256_CACHE: dict[FileStatKey, str] = {}
+_FFPROBE_CACHE: dict[FileStatKey, dict[str, Any]] = {}
+_VERSION_CACHE: dict[tuple[str, str], str] = {}
+_CACHE_STATS: dict[str, int] = {
+    "ffprobe_hits": 0,
+    "ffprobe_misses": 0,
+    "sha256_hits": 0,
+    "sha256_misses": 0,
+    "version_hits": 0,
+    "version_misses": 0,
+}
 
 
 def sha256_file(path: Path, chunk_size: int = HASH_CHUNK_SIZE) -> str:
+    key = _file_stat_key(path)
+    if _cache_enabled():
+        with _CACHE_LOCK:
+            cached = _SHA256_CACHE.get(key)
+            if cached is not None:
+                _CACHE_STATS["sha256_hits"] += 1
+                return cached
+            _CACHE_STATS["sha256_misses"] += 1
     digest = hashlib.sha256()
-    with path.open("rb") as file:
+    with Path(key[0]).open("rb") as file:
         for chunk in iter(lambda: file.read(chunk_size), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    if _cache_enabled():
+        with _CACHE_LOCK:
+            _remember(_SHA256_CACHE, key, value)
+    return value
 
 
 def executable_path(name: str) -> str:
@@ -33,13 +64,43 @@ def executable_path(name: str) -> str:
 
 def version_line(name: str) -> str:
     executable = executable_path(name)
+    cache_key = (name, executable)
+    if _cache_enabled():
+        with _CACHE_LOCK:
+            cached = _VERSION_CACHE.get(cache_key)
+            if cached is not None:
+                _CACHE_STATS["version_hits"] += 1
+                return cached
+            _CACHE_STATS["version_misses"] += 1
     result = subprocess.run(
         [executable, "-version"],
         capture_output=True,
         text=True,
         check=True,
     )
-    return result.stdout.splitlines()[0] if result.stdout else f"{name} version unavailable"
+    value = result.stdout.splitlines()[0] if result.stdout else f"{name} version unavailable"
+    if _cache_enabled():
+        with _CACHE_LOCK:
+            _remember(_VERSION_CACHE, cache_key, value)
+    return value
+
+
+def immutable_cache_stats() -> dict[str, int]:
+    with _CACHE_LOCK:
+        return dict(_CACHE_STATS) | {
+            "ffprobe_entries": len(_FFPROBE_CACHE),
+            "sha256_entries": len(_SHA256_CACHE),
+            "version_entries": len(_VERSION_CACHE),
+        }
+
+
+def clear_immutable_media_cache() -> None:
+    with _CACHE_LOCK:
+        _SHA256_CACHE.clear()
+        _FFPROBE_CACHE.clear()
+        _VERSION_CACHE.clear()
+        for key in _CACHE_STATS:
+            _CACHE_STATS[key] = 0
 
 
 def utc_timestamp() -> str:
@@ -202,6 +263,17 @@ def create_contact_sheet(
 
 
 def _run_ffprobe(path: Path) -> dict[str, Any]:
+    try:
+        key = _file_stat_key(path)
+    except FileNotFoundError:
+        key = None
+    if key is not None and _cache_enabled():
+        with _CACHE_LOCK:
+            cached = _FFPROBE_CACHE.get(key)
+            if cached is not None:
+                _CACHE_STATS["ffprobe_hits"] += 1
+                return json.loads(json.dumps(cached))
+            _CACHE_STATS["ffprobe_misses"] += 1
     command = [
         executable_path("ffprobe"),
         "-v",
@@ -213,7 +285,34 @@ def _run_ffprobe(path: Path) -> dict[str, Any]:
         str(path),
     ]
     result = subprocess.run(command, capture_output=True, text=True, check=True)
-    return json.loads(result.stdout)
+    payload = json.loads(result.stdout)
+    if key is not None and _cache_enabled():
+        with _CACHE_LOCK:
+            _remember(_FFPROBE_CACHE, key, payload)
+    return payload
+
+
+def _cache_enabled() -> bool:
+    return os.environ.get(IMMUTABLE_CACHE_ENV, "").strip().lower() not in {"1", "true", "yes"}
+
+
+def _file_stat_key(path: Path) -> FileStatKey:
+    resolved = path.resolve(strict=True)
+    stat = resolved.stat()
+    return (
+        str(resolved),
+        int(stat.st_size),
+        int(stat.st_mtime_ns),
+        int(getattr(stat, "st_ino", 0)),
+    )
+
+
+def _remember(cache: dict[Any, Any], key: Any, value: Any) -> None:
+    cache[key] = value
+    if len(cache) <= IMMUTABLE_CACHE_MAX_ENTRIES:
+        return
+    for stale_key in list(cache)[: max(1, len(cache) - IMMUTABLE_CACHE_MAX_ENTRIES)]:
+        cache.pop(stale_key, None)
 
 
 def _has_audio_stream(path: Path) -> bool:

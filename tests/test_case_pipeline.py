@@ -310,6 +310,11 @@ def test_case_pipeline_writes_one_manifest_and_combined_render_plan(
     assert workspace_manifest["content_identities"]["automatic_baseline_regions"]["sha256"]
     assert workspace_manifest["latest_reviewed_publication"]["status"] == "supported"
     assert manifest["review"]["latest_reviewed_publication"]["status"] == "supported"
+    assert result["resumable_stage_manifest"]["status"] == case_pipeline.STATUS_SUCCEEDED
+    assert (
+        result["resumable_stage_manifest"]["schema_version"]
+        == case_pipeline.RESUMABLE_STAGE_MANIFEST_SCHEMA_VERSION
+    )
     entities = json.loads((workspace_root / "review_entities.json").read_text())
     tasks = json.loads((workspace_root / "reviewer_tasks.json").read_text())
     assert workspace_manifest["lifecycle"]["review_workspace"] == "ready"
@@ -320,6 +325,149 @@ def test_case_pipeline_writes_one_manifest_and_combined_render_plan(
     }
     assert {task["category"] for task in tasks["tasks"]} == {CATEGORY_FACE, CATEGORY_PLATE}
     assert all(task["entity_id"] for task in tasks["tasks"])
+
+
+def test_case_pipeline_reuses_completed_resumable_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source bytes")
+    calls = {"adapter": 0}
+    monkeypatch.setattr(case_pipeline.media, "probe_media", lambda _: fake_media_info())
+
+    def fake_combined_preview(
+        context: case_pipeline.CaseContext,
+        *,
+        effective_regions_path: Path,
+        overwrite: bool,
+    ) -> dict[str, Any]:
+        records = case_pipeline.load_privacy_region_records(effective_regions_path)
+        output_dir = context.output_dir / "combined_preview"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_video = output_dir / "automatic_preview.mp4"
+        render_manifest = output_dir / "render_manifest.json"
+        validation = output_dir / "validation.json"
+        summary = output_dir / "summary.json"
+        output_video.write_bytes(b"combined preview")
+        render_manifest.write_text("{}", encoding="utf-8")
+        validation.write_text("{}", encoding="utf-8")
+        summary.write_text("{}", encoding="utf-8")
+        return {
+            "artifacts": (
+                case_pipeline.artifact_reference(
+                    context.output_dir,
+                    output_video,
+                    role="combined_automatic_preview_video",
+                ),
+                case_pipeline.artifact_reference(
+                    context.output_dir,
+                    render_manifest,
+                    role="combined_automatic_preview_manifest",
+                ),
+                case_pipeline.artifact_reference(
+                    context.output_dir,
+                    validation,
+                    role="combined_automatic_preview_validation",
+                ),
+                case_pipeline.artifact_reference(
+                    context.output_dir,
+                    summary,
+                    role="combined_automatic_preview_summary",
+                ),
+            ),
+            "manifest": {
+                "output_video": "combined_preview/automatic_preview.mp4",
+                "output_video_hash": case_pipeline.media.sha256_file(output_video),
+                "rendered_region_count": len(records),
+                "source_video_hash": context.source_identity.sha256,
+            },
+            "summary": {
+                "rendered_frame_count": 2,
+                "rendered_region_count": len(records),
+                "schema_version": "test_combined_preview.v1",
+            },
+        }
+
+    class CountingAdapter(FakeAdapter):
+        def run(
+            self,
+            context: case_pipeline.CaseContext,
+            options: case_pipeline.CasePipelineOptions,
+        ) -> case_pipeline.CategoryRunResult:
+            calls["adapter"] += 1
+            return super().run(context, options)
+
+    monkeypatch.setattr(case_pipeline, "render_combined_automatic_preview", fake_combined_preview)
+    output_dir = tmp_path / "case"
+    first = case_pipeline.run_case_pipeline(
+        source,
+        output_dir=output_dir,
+        categories=(CATEGORY_FACE, CATEGORY_PLATE),
+        options=case_pipeline.CasePipelineOptions(overwrite=True),
+        adapters={
+            CATEGORY_FACE: CountingAdapter(CATEGORY_FACE, region(CATEGORY_FACE, 0, (1, 1, 6, 6))),
+            CATEGORY_PLATE: CountingAdapter(
+                CATEGORY_PLATE,
+                region(CATEGORY_PLATE, 1, (10, 10, 20, 20)),
+            ),
+        },
+    )
+    second = case_pipeline.run_case_pipeline(
+        source,
+        output_dir=output_dir,
+        categories=(CATEGORY_FACE, CATEGORY_PLATE),
+        options=case_pipeline.CasePipelineOptions(),
+        adapters={
+            CATEGORY_FACE: CountingAdapter(CATEGORY_FACE, region(CATEGORY_FACE, 0, (1, 1, 6, 6))),
+            CATEGORY_PLATE: CountingAdapter(
+                CATEGORY_PLATE,
+                region(CATEGORY_PLATE, 1, (10, 10, 20, 20)),
+            ),
+        },
+    )
+
+    assert calls["adapter"] == 2
+    assert second["resumable_reuse"] is True
+    assert second["manifest"] == first["manifest"]
+
+
+def test_resumable_stage_rejects_partial_or_hash_mismatched_manifest(tmp_path: Path) -> None:
+    context = fake_context(tmp_path)
+    case_manifest_path = context.output_dir / "case_manifest.json"
+    case_manifest = {
+        "artifacts": [],
+        "case_manifest_hash": "hash",
+        "schema_version": "test_case_manifest.v1",
+    }
+    case_manifest_path.write_text(json.dumps(case_manifest), encoding="utf-8")
+    stage_manifest = case_pipeline.write_case_pipeline_resumable_stage_manifest(
+        context=context,
+        options=case_pipeline.CasePipelineOptions(),
+        categories=context.selected_categories,
+        case_manifest=case_manifest,
+    )
+    manifest_path = context.output_dir / "case_pipeline_stage_manifest.json"
+    partial = dict(stage_manifest) | {"status": case_pipeline.STATUS_FAILED}
+    manifest_path.write_text(json.dumps(partial), encoding="utf-8")
+
+    rejected_partial = case_pipeline.resumable_stage_reuse_decision(
+        manifest_path,
+        expected_identity=stage_manifest["stage_identity"],
+        output_dir=context.output_dir,
+    )
+    assert rejected_partial["reusable"] is False
+    assert rejected_partial["reason"] == "stage incomplete"
+
+    manifest_path.write_text(json.dumps(stage_manifest), encoding="utf-8")
+    case_manifest_path.write_text(json.dumps(case_manifest | {"changed": True}), encoding="utf-8")
+    rejected_hash = case_pipeline.resumable_stage_reuse_decision(
+        manifest_path,
+        expected_identity=stage_manifest["stage_identity"],
+        output_dir=context.output_dir,
+    )
+    assert rejected_hash["reusable"] is False
+    assert rejected_hash["reason"] == "output hash mismatch"
 
 
 def test_manifest_artifact_references_fail_closed(tmp_path: Path) -> None:
