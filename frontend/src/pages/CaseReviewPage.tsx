@@ -35,6 +35,7 @@ import {
   ACTIONS,
   authoritativeWorkingStateAfterSweepApproval,
   bucketCounts,
+  needsCorrectionBlockerCount,
   optionalReviewGroups,
   requiredReviewGroups,
   tasksForCase,
@@ -221,11 +222,7 @@ export function CaseReviewPage({
   const materializationStatusText = activeMaterializationJobs[0]
     ? formatMaterializationStatus(activeMaterializationJobs[0].job)
     : undefined;
-  const correctionAttentionCount = manualTasks
-    .filter((task) => task.case_id === caseId)
-    .filter((task) => task.normal_task_class === 'correction_verification')
-    .filter((task) => task.actionable !== false && task.decision_state !== 'resolved')
-    .length + counts['Needs correction'];
+  const correctionAttentionCount = needsCorrectionBlockerCount(tasks);
   const reviewReady = correctionAttentionCount === 0;
   const allGuidanceAddressed = reviewReady && counts.Open === 0;
   const latestReviewedStatus = latestReviewedStatusText({

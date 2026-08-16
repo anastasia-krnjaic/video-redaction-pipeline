@@ -123,6 +123,10 @@ export function bucketCounts(tasks: TaskWithDecision[]): Record<QueueBucket, num
   };
 }
 
+export function needsCorrectionBlockerCount(tasks: TaskWithDecision[]): number {
+  return bucketCounts(tasks)['Needs correction'];
+}
+
 export function reviewGroupsForCase(tasks: TaskWithDecision[], includeOptional = false): ReviewGroup[] {
   const buckets = new Map<string, TaskWithDecision[]>();
   for (const task of tasks) {

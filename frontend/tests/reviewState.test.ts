@@ -7,6 +7,7 @@ import {
   effectiveEntities,
   filteredEntities,
   guidanceFamily,
+  needsCorrectionBlockerCount,
   optionalReviewGroups,
   requiredReviewGroups,
   taskBucket,
@@ -153,6 +154,64 @@ describe('review state helpers', () => {
     expect(Object.keys(counts)).not.toContain('Resolved');
     expect(Object.keys(counts)).not.toContain('Unsure / Escalated');
     expect(Object.keys(counts)).not.toContain('Completed');
+  });
+
+  it('does not count published correction verification evidence as a Needs-correction blocker', () => {
+    const verificationTasks: Task[] = [
+      {
+        ...task,
+        review_task_id: 'correction_verify_day_corr_valid_one',
+        correction_id: 'corr_valid_one',
+        normal_task_class: 'correction_verification',
+        publication_status: 'published',
+        decision_state: 'pending',
+        actionable: true,
+      },
+      {
+        ...task,
+        review_task_id: 'correction_verify_day_corr_valid_two',
+        correction_id: 'corr_valid_two',
+        normal_task_class: 'correction_verification',
+        publication_status: 'published',
+        decision_state: 'pending',
+        actionable: true,
+      },
+    ];
+
+    const queueRows = tasksForCase(verificationTasks, {}, 'day');
+    const required = requiredReviewGroups(queueRows);
+    const counts = bucketCounts(required);
+
+    expect(verificationTasks).toHaveLength(2);
+    expect(queueRows).toHaveLength(0);
+    expect(counts['Needs correction']).toBe(0);
+    expect(needsCorrectionBlockerCount(required)).toBe(0);
+  });
+
+  it('keeps top-level Needs-correction count aligned with visible queue blockers', () => {
+    const tasks = tasksForCase([
+      {
+        ...task,
+        review_task_id: 'correction_verify_day_corr_valid',
+        correction_id: 'corr_valid',
+        normal_task_class: 'correction_verification',
+        publication_status: 'published',
+        decision_state: 'pending',
+        actionable: true,
+      },
+      { ...task, review_task_id: 'real_blocker', source_frame_start: 30, source_frame_end: 40 },
+      { ...task, review_task_id: 'resolved', source_frame_start: 50, source_frame_end: 60 },
+    ], {
+      day: {
+        real_blocker: decision(ACTIONS.needsCorrection, 'day', 'real_blocker'),
+        resolved: decision(ACTIONS.looksCorrect, 'day', 'resolved'),
+      },
+    }, 'day');
+    const required = requiredReviewGroups(tasks);
+    const counts = bucketCounts(required);
+
+    expect(counts['Needs correction']).toBe(1);
+    expect(needsCorrectionBlockerCount(required)).toBe(counts['Needs correction']);
   });
 
   it('keeps duplicate task ids isolated across cases', () => {
