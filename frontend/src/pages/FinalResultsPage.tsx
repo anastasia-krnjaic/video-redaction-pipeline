@@ -37,6 +37,7 @@ export function FinalResultsPage({
   const [selectedRole, setSelectedRole] = usePersistentState<string>(`${finalUiScope}:${caseId}:version`, 'latest_reviewed');
   const [finalStatus, setFinalStatus] = useState<Record<string, FinalizationStatus>>({});
   const [busy, setBusy] = useState(false);
+  const [confirmingFinal, setConfirmingFinal] = useState(false);
   const status = finalStatus[caseId];
 
   if (!manifest) {
@@ -65,10 +66,13 @@ export function FinalResultsPage({
     roles[0];
   const controller = useVideoController(manifest, selectedVersion, caseFrame, setCaseFrame);
   const finalizationReady = Boolean(status?.ready);
+  const finalizationRequest = recordOrUndefined(status?.finalization_request);
+  const historicalFinal = recordOrUndefined(status?.historical_final);
 
   useEffect(() => {
     let cancelled = false;
     if (!session?.session_id || !caseId) return undefined;
+    setConfirmingFinal(false);
     const load = async () => {
       try {
         const result = await loadFinalizationStatus({
@@ -90,13 +94,17 @@ export function FinalResultsPage({
     };
   }, [caseId, session?.session_id, workingState?.active_projection_hash, workingState?.current_event_chain_head]);
 
-  const finalize = async () => {
+  const createFinal = async () => {
     if (!session) {
-      onError('Start review before checking finalization.');
+      onError('Start review before creating Final.');
       return;
     }
     if (!attribution?.display_name) {
       onRequireAttribution();
+      return;
+    }
+    if (!finalizationRequest) {
+      onError('Refresh finalization status before creating Final.');
       return;
     }
     setBusy(true);
@@ -106,15 +114,27 @@ export function FinalResultsPage({
         session_id: session.session_id,
         actor: attribution,
         case_id: caseId,
+        finalization_request: finalizationRequest,
       });
       setFinalStatus((current) => ({ ...current, [caseId]: result }));
       if (event) onEventsChange([...events, event]);
     } catch (err) {
-      onError(`Finalization check failed: ${err instanceof Error ? err.message : String(err)}`);
+      onError(`Could not create Final: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       setBusy(false);
+      setConfirmingFinal(false);
     }
   };
+
+  const lifecycleLine = finalRole
+    ? 'Final current'
+    : historicalFinal
+      ? 'Final historical — case reopened'
+      : finalizationReady
+        ? 'Ready to create Final'
+        : status
+          ? 'Full-video review required'
+          : 'Reviewed video not ready';
 
   return (
     <section className="case-panel active">
@@ -150,16 +170,49 @@ export function FinalResultsPage({
         <aside className="side-panel final-status">
           <h3>{manifest.display_name}</h3>
           <div className={`status-box ${finalizationReady ? 'success' : 'warning'}`}>
-            <strong>{finalizationReady ? 'Ready to finalize' : 'Finalization waits for current Latest reviewed and approved full-video review'}</strong>
+            <strong>{lifecycleLine}</strong>
           </div>
-          <div className="button-row">
-            <button type="button" className="primary" onClick={finalize} disabled={busy}>
-              Check finalization
-            </button>
-          </div>
+          {finalizationReady && !finalRole ? (
+            confirmingFinal ? (
+              <div className="status-box warning">
+                <strong>Create the immutable Final for {caseLabel(caseId, manifest.display_name)} from the current reviewed video and full-video approval?</strong>
+                <dl className="compact-facts">
+                  <dt>Latest revision</dt>
+                  <dd>{String(finalizationRequest?.['latest_reviewed_revision_id'] || '')}</dd>
+                  <dt>Reviewed regions</dt>
+                  <dd>{String(finalizationRequest?.['reviewed_region_set_sha256'] || '')}</dd>
+                  <dt>Full-video approval</dt>
+                  <dd>{String(finalizationRequest?.['sweep_acknowledgement_sha256'] || '')}</dd>
+                </dl>
+                <div className="button-row">
+                  <button type="button" onClick={() => setConfirmingFinal(false)} disabled={busy}>
+                    Cancel
+                  </button>
+                  <button type="button" className="primary" onClick={createFinal} disabled={busy}>
+                    {busy ? 'Creating Final…' : 'Create Final'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="button-row">
+                <button
+                  type="button"
+                  className="primary"
+                  onClick={() => setConfirmingFinal(true)}
+                  disabled={busy}
+                >
+                  Create Final
+                </button>
+              </div>
+            )
+          ) : null}
           {status ? (
             status.finalized ? (
               <div className="status-box success">Final media is available.</div>
+            ) : historicalFinal ? (
+              <div className="status-box warning">
+                Historical Final {String(historicalFinal['finalization_id'] || '')} is no longer current.
+              </div>
             ) : (
               <div className="status-box warning">
                 <strong>Final media unavailable</strong>
@@ -190,6 +243,11 @@ function caseLabel(caseId: string, displayName?: string): string {
   if (caseId === 'day') return 'Day';
   if (caseId === 'night') return 'Night';
   return displayName || caseId;
+}
+
+function recordOrUndefined(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
 }
 
 function publicVideoRoles(roles: MediaVersion[], latestRole?: MediaVersion, finalRole?: MediaVersion): MediaVersion[] {

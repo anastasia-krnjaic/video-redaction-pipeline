@@ -39,6 +39,7 @@ COMPILER_SCHEMA_VERSION = "reviewed_region_compiler.v1"
 REVISION_SCHEMA_VERSION = "latest_reviewed_revision.v1"
 PUBLICATION_SCHEMA_VERSION = "latest_reviewed_publication.v1"
 CURRENT_POINTER_SCHEMA_VERSION = "latest_reviewed_current_pointer.v1"
+CURRENT_POINTER_INDEX_SCHEMA_VERSION = "latest_reviewed_current_pointer_index.v1"
 SUPPORTED_PUBLICATION_STATUSES = {"supported", "ready"}
 WORKSPACE_PUBLICATION_IDENTITY_KEYS = {
     "publication_mode",
@@ -59,6 +60,19 @@ REVIEWED_REGION_SET_IDENTITY_RUNTIME_KEYS = {
     "workspace_manifest_input_sha256",
     "working_state_projection_hash",
 }
+REVIEWED_REGION_MEDIA_IDENTITY_KEYS = (
+    "automatic_baseline_region_set_sha256",
+    "case_id",
+    "category_run_manifest_identity_hash",
+    "compiler_schema_version",
+    "configuration_freeze_hash",
+    "renderer_configuration_sha256",
+    "reviewed_region_records_sha256",
+    "selected_categories",
+    "source_frame_end",
+    "source_frame_start",
+    "source_video_hash",
+)
 RUNTIME_REVIEW_STATE_KEYS = {
     "event_hash",
     "event_id",
@@ -104,6 +118,7 @@ def compile_reviewed_regions(
     case_id: str,
     include_unsaved_correction: ReviewCorrection | None = None,
     require_blockers_resolved: bool = True,
+    working_state: dict[str, Any] | None = None,
 ) -> tuple[list[PrivacyRegionRecord], dict[str, Any]]:
     from redactor import review_working_state
 
@@ -129,7 +144,12 @@ def compile_reviewed_regions(
         baseline_path=baseline_path,
         baseline_regions=baseline_regions,
     )
-    state = review_working_state.derive_working_state(package_root, session_dir)
+    state = (
+        dict(working_state)
+        if working_state is not None
+        else review_working_state.derive_working_state(package_root, session_dir)
+    )
+    state.setdefault("state_hash", review_working_state.state_hash(state))
     entities_by_case = review_working_state.load_entity_index(package_root)
     source_entities = list(entities_by_case.get(case_id, []))
     effective_entities = review_working_state.effective_case_entities(source_entities, state)
@@ -236,6 +256,7 @@ def reviewed_region_digest(
     *,
     case_id: str,
     require_blockers_resolved: bool = False,
+    working_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from redactor import review_working_state
 
@@ -245,6 +266,7 @@ def reviewed_region_digest(
         session_dir,
         case_id=case_id,
         require_blockers_resolved=require_blockers_resolved,
+        working_state=working_state,
     )
     digest = str(provenance["reviewed_region_set_sha256"])
     return {
@@ -1541,14 +1563,12 @@ def reviewed_region_identity(
     )
     active_decisions_hash = stable_hash(
         semantic_decision_payload(
-            review_working_state.task_decisions_by_case_from_payload(state)
+            review_working_state.media_affecting_decisions_by_case(
+                review_working_state.task_decisions_by_case_from_payload(state)
+            )
         )
     )
-    active_task_resolutions_hash = stable_hash(
-        semantic_decision_payload(
-            review_working_state.task_resolutions_by_case_from_payload(state)
-        )
-    )
+    active_task_resolutions_hash = stable_hash({})
     baseline_hash = semantic_region_set_hash(baseline_regions)
     object_policy_hash = stable_hash(object_policy_payload)
     merge_rejection_hash = stable_hash(merge_payload)
@@ -1608,6 +1628,54 @@ def reviewed_region_set_identity_hash(identity: dict[str, Any]) -> str:
             for key, value in identity.items()
             if key not in REVIEWED_REGION_SET_IDENTITY_RUNTIME_KEYS
         }
+    )
+
+
+def reviewed_region_media_identity_payload(identity: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: dict(identity).get(key)
+        for key in REVIEWED_REGION_MEDIA_IDENTITY_KEYS
+    }
+
+
+def reviewed_region_media_identity_hash(identity: dict[str, Any]) -> str:
+    return stable_hash(reviewed_region_media_identity_payload(identity))
+
+
+def reviewed_region_media_identity_matches(
+    current_identity: dict[str, Any],
+    published_identity: dict[str, Any],
+) -> bool:
+    return reviewed_region_media_identity_payload(
+        current_identity
+    ) == reviewed_region_media_identity_payload(published_identity)
+
+
+def latest_pointer_media_matches_current(
+    *,
+    package_root: Path,
+    session_dir: Path,
+    case_id: str,
+    validated_pointer: dict[str, Any],
+    working_state: dict[str, Any] | None,
+    require_blockers_resolved: bool = False,
+) -> bool:
+    if working_state is None:
+        return False
+    revision_manifest = dict(validated_pointer.get("revision_manifest_payload") or {})
+    published_identity = dict(revision_manifest.get("reviewed_region_identity") or {})
+    if not published_identity:
+        return False
+    current_digest = reviewed_region_digest(
+        package_root,
+        session_dir,
+        case_id=case_id,
+        require_blockers_resolved=require_blockers_resolved,
+        working_state=working_state,
+    )
+    return reviewed_region_media_identity_matches(
+        dict(current_digest.get("reviewed_region_identity") or {}),
+        published_identity,
     )
 
 
@@ -1825,7 +1893,6 @@ def assert_publication_guard_current(
         "object_policy_hash",
         "renderer_configuration_sha256",
         "reviewed_region_set_sha256",
-        "session_head_hash",
         "session_id",
         "working_state_projection_hash",
         "workspace_manifest_sha256",
@@ -2044,10 +2111,13 @@ def write_current_pointer(
         ),
         "workspace_manifest_sha256": publication_guard.get("workspace_manifest_sha256"),
     }
+    pointer_index = current_pointer_index_payload(package_root)
+    pointer_index["cases"][case_id] = pointer
+    pointer_index["updated_at_utc"] = media.utc_timestamp()
     maybe_inject_failure("during_current_pointer_update")
-    atomic_write_json(pointer_path, pointer)
-    reopened = load_current_pointer(package_root)
-    validated = validate_current_pointer(package_root, reopened)
+    atomic_write_json(pointer_path, pointer_index)
+    reopened = load_current_pointer(package_root, case_id=case_id)
+    validated = validate_current_pointer(package_root, reopened, case_id=case_id)
     pointer_sha256 = media.sha256_file(pointer_path)
     return {
         "path": pointer_path.relative_to(package_root).as_posix(),
@@ -2059,11 +2129,51 @@ def write_current_pointer(
     }
 
 
-def load_current_pointer(package_root: Path) -> dict[str, Any]:
+def load_current_pointer(package_root: Path, *, case_id: str | None = None) -> dict[str, Any]:
     path = current_pointer_path(package_root)
     if not path.exists():
         return {}
-    return json.loads(path.read_text(encoding="utf-8"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != CURRENT_POINTER_INDEX_SCHEMA_VERSION:
+        if case_id is None or str(payload.get("case_id") or "") == (
+            case_ids.validate_case_id(case_id)
+        ):
+            return payload
+        return {}
+    cases = dict(payload.get("cases") or {})
+    if case_id is not None:
+        return dict(cases.get(case_ids.validate_case_id(case_id)) or {})
+    current_cases = [
+        dict(pointer)
+        for pointer in cases.values()
+        if isinstance(pointer, dict) and pointer.get("current") is True
+    ]
+    if len(current_cases) == 1:
+        return current_cases[0]
+    return payload
+
+
+def current_pointer_index_payload(package_root: Path) -> dict[str, Any]:
+    path = current_pointer_path(package_root)
+    if not path.exists():
+        return {
+            "cases": {},
+            "schema_version": CURRENT_POINTER_INDEX_SCHEMA_VERSION,
+            "updated_at_utc": media.utc_timestamp(),
+        }
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") == CURRENT_POINTER_INDEX_SCHEMA_VERSION:
+        return {
+            "cases": dict(payload.get("cases") or {}),
+            "schema_version": CURRENT_POINTER_INDEX_SCHEMA_VERSION,
+            "updated_at_utc": payload.get("updated_at_utc") or media.utc_timestamp(),
+        }
+    case_id = case_ids.validate_case_id(str(payload.get("case_id") or ""))
+    return {
+        "cases": {case_id: payload},
+        "schema_version": CURRENT_POINTER_INDEX_SCHEMA_VERSION,
+        "updated_at_utc": media.utc_timestamp(),
+    }
 
 
 def current_latest_reviewed_role(
@@ -2072,14 +2182,15 @@ def current_latest_reviewed_role(
     *,
     case_id: str,
     active_projection_hashes: dict[str, str],
+    working_state: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     from redactor import review_working_state
 
-    pointer = load_current_pointer(package_root)
+    pointer = load_current_pointer(package_root, case_id=case_id)
     if not pointer:
         return {}
     try:
-        validated = validate_current_pointer(package_root, pointer)
+        validated = validate_current_pointer(package_root, pointer, case_id=case_id)
     except ReviewedRegionCompilationError:
         return {}
     if validated.get("case_id") != case_ids.validate_case_id(case_id):
@@ -2101,7 +2212,21 @@ def current_latest_reviewed_role(
     except ValueError:
         return {}
     if expected_revision and expected_revision not in current_revision_candidates:
-        return {}
+        if session_dir is None:
+            return {}
+        try:
+            media_current = latest_pointer_media_matches_current(
+                package_root=package_root,
+                session_dir=session_dir,
+                case_id=case_id,
+                validated_pointer=validated,
+                working_state=working_state,
+                require_blockers_resolved=False,
+            )
+        except ReviewedRegionCompilationError:
+            media_current = False
+        if not media_current:
+            return {}
     latest = dict(validated.get("latest_reviewed") or {})
     if latest:
         latest["current_pointer"] = CURRENT_POINTER_RELATIVE_PATH.as_posix()
@@ -2109,9 +2234,33 @@ def current_latest_reviewed_role(
     return latest
 
 
-def validate_current_pointer(package_root: Path, pointer: dict[str, Any]) -> dict[str, Any]:
+def validate_current_pointer(
+    package_root: Path,
+    pointer: dict[str, Any],
+    *,
+    case_id: str | None = None,
+) -> dict[str, Any]:
     from redactor import review_working_state
 
+    if pointer.get("schema_version") == CURRENT_POINTER_INDEX_SCHEMA_VERSION:
+        cases = dict(pointer.get("cases") or {})
+        if case_id is not None:
+            selected = dict(cases.get(case_ids.validate_case_id(case_id)) or {})
+            if not selected:
+                raise ReviewedRegionCompilationError(
+                    "Latest reviewed current pointer is missing for case"
+                )
+            return validate_current_pointer(package_root, selected, case_id=case_id)
+        current_cases = [
+            dict(case_pointer)
+            for case_pointer in cases.values()
+            if isinstance(case_pointer, dict) and case_pointer.get("current") is True
+        ]
+        if len(current_cases) != 1:
+            raise ReviewedRegionCompilationError(
+                "Latest reviewed current pointer index requires a case id"
+            )
+        return validate_current_pointer(package_root, current_cases[0])
     if pointer.get("schema_version") != CURRENT_POINTER_SCHEMA_VERSION:
         raise ReviewedRegionCompilationError("Latest reviewed current pointer schema mismatch")
     if pointer.get("status") != "ready" or pointer.get("current") is not True:
@@ -2120,7 +2269,9 @@ def validate_current_pointer(package_root: Path, pointer: dict[str, Any]) -> dic
         pointer_projection_schema = review_working_state.active_projection_pointer_schema(pointer)
     except ValueError as exc:
         raise ReviewedRegionCompilationError(str(exc)) from exc
-    case_id = case_ids.validate_case_id(str(pointer.get("case_id") or ""))
+    pointer_case_id = case_ids.validate_case_id(str(pointer.get("case_id") or ""))
+    if case_id is not None and pointer_case_id != case_ids.validate_case_id(case_id):
+        raise ReviewedRegionCompilationError("Latest reviewed pointer case mismatch")
     revision_manifest_path = case_ids.contained_path(
         package_root,
         *Path(str(pointer.get("revision_manifest") or "")).parts,
@@ -2155,7 +2306,7 @@ def validate_current_pointer(package_root: Path, pointer: dict[str, Any]) -> dic
         revision_value = revision_manifest.get(key)
         if str(pointer_value or "") != str(revision_value or ""):
             raise ReviewedRegionCompilationError(f"Latest reviewed pointer {key} mismatch")
-    if revision_manifest.get("case_id") != case_id:
+    if revision_manifest.get("case_id") != pointer_case_id:
         raise ReviewedRegionCompilationError("Latest reviewed pointer case mismatch")
     validate_revision_artifacts(revision_manifest_path.parent, revision_manifest)
     workspace_manifest_path = package_root / "workspace_manifest.json"
@@ -2173,7 +2324,7 @@ def validate_current_pointer(package_root: Path, pointer: dict[str, Any]) -> dic
     if latest.get("sha256") != media.sha256_file(latest_path):
         raise ReviewedRegionCompilationError("Latest reviewed media hash mismatch")
     return dict(pointer) | {
-        "case_id": case_id,
+        "case_id": pointer_case_id,
         "revision_manifest_payload": revision_manifest,
     }
 
@@ -2587,19 +2738,22 @@ def clear_current_publication(
     package_root = package_root.resolve()
     target_case_ids = [case_ids.validate_case_id(case_id) for case_id in case_ids_to_clear]
     pointer_path = current_pointer_path(package_root)
-    previous = load_current_pointer(package_root)
+    pointer_index = current_pointer_index_payload(package_root)
     cleared: list[dict[str, Any]] = []
-    if previous and previous.get("case_id") in target_case_ids:
+    for case_id in target_case_ids:
+        previous = dict(pointer_index["cases"].get(case_id) or {})
+        if not previous:
+            continue
         cleared.append(
             {
-                "case_id": previous.get("case_id"),
+                "case_id": previous.get("case_id") or case_id,
                 "previous_revision_id": previous.get("revision_id"),
                 "previous_reviewed_region_set_sha256": previous.get(
                     "reviewed_region_set_sha256"
                 ),
             }
         )
-        stale_pointer = {
+        pointer_index["cases"][case_id] = {
             **previous,
             "current": False,
             "reason": reason,
@@ -2607,7 +2761,9 @@ def clear_current_publication(
             "status": "not_current",
             "superseded_at_utc": media.utc_timestamp(),
         }
-        atomic_write_json(pointer_path, stale_pointer)
+    if cleared:
+        pointer_index["updated_at_utc"] = media.utc_timestamp()
+        atomic_write_json(pointer_path, pointer_index)
     return {
         "cleared": cleared,
         "reason": reason,

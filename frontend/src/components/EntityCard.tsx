@@ -69,7 +69,7 @@ export function EntityCard({ entity, onJump, onPolicy, onSelect, pending, select
         {pending ? (
           <>
             <span className="inline-spinner" aria-hidden="true" />
-            <span className="visually-hidden">Updating Latest reviewed for {entity.label}</span>
+            <span className="visually-hidden">Updating reviewed media for {entity.label}</span>
           </>
         ) : null}
       </div>

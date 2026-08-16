@@ -10,6 +10,7 @@ export interface WorkspaceSummary {
   "backend_workspace_schema_version"?: string;
   "cases": Record<string, Case>;
   "configuration_freeze_hash"?: string | null;
+  "current_session"?: Record<string, unknown>;
   "entities": EntityIndex;
   "frontend"?: Record<string, unknown>;
   "raw_signals": Record<string, unknown>;
@@ -20,14 +21,6 @@ export interface WorkspaceSummary {
 
 export interface Case {
   "blockers"?: string[];
-  "blocker_count"?: number;
-  "blocker_groups"?: {
-  "blockers"?: string[];
-  "count": number;
-  "key": string;
-  "label": string;
-  [key: string]: unknown;
-}[];
   "case_id": string;
   "display_name": string;
   "duration_seconds"?: number | null;
@@ -257,6 +250,7 @@ export interface WorkingState {
   "active_correction_ids"?: string[];
   "active_manual_tasks"?: Task[];
   "active_projection_hash"?: string;
+  "audit_projection_hash"?: string;
   "baseline": Record<string, unknown>;
   "checkpoints"?: Checkpoint[];
   "current_event_chain_head": string | null;
@@ -362,7 +356,6 @@ export interface FinalizationStatus {
   "final_video"?: string | null;
   "finalized": boolean;
   "media_validation_passed"?: boolean;
-  "ready"?: boolean;
   "schema_version": string;
   [key: string]: unknown;
 }

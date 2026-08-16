@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState } from 'react';
-import { loadSessionState, loadWorkspace } from '../api/client';
+import { loadCurrentSessionState, loadSessionState, loadWorkspace } from '../api/client';
 import type { AuditEvent, Session, TaskDecision, WorkspaceSummary, Attribution, WorkingState } from '../types/api';
 import { normalizeDecisionsByCase, normalizeTaskResolutionsByCase } from '../state/reviewState';
 import type { DecisionsByCase, TaskResolutionsByCase } from '../types/domain';
-import { readStoredString, removeStoredValue, writeStoredString } from './usePersistentState';
+import { removeStoredValue, writeStoredString } from './usePersistentState';
 
 function readUrlSessionId(): string | null {
   const params = new URLSearchParams(window.location.search);
@@ -132,18 +132,22 @@ export function useWorkspace(): WorkspaceLoadState {
         const storageKey = lastSessionStorageKey(loaded);
         setWorkspaceStorageKey(storageKey);
         const urlSessionId = readUrlSessionId();
-        const storedSessionId = readStoredString(storageKey);
-        setResumableSessionId(storedSessionId || undefined);
+        const currentSessionId = String((loaded.current_session as Record<string, unknown> | undefined)?.session_id || '');
+        setResumableSessionId(currentSessionId || undefined);
         if (urlSessionId) {
           try {
             const payload = await loadSessionState(urlSessionId);
             if (cancelled) return;
             applySessionPayload(payload, 'resumed', loaded);
+            return;
           } catch {
             removeStoredValue(storageKey);
             setResumableSessionId(undefined);
           }
         }
+        const payload = await loadCurrentSessionState();
+        if (cancelled) return;
+        applySessionPayload(payload, payload.events.length > 1 ? 'resumed' : 'new', loaded);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       } finally {

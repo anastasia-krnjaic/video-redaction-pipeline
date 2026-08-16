@@ -2614,11 +2614,14 @@ def serve_final_review_workspace(package_root: Path, port: int, open_browser: bo
 
     from redactor import review_workspace
 
-    server = review_workspace.serve_workspace(
-        package_root,
-        port=port,
-        open_browser=open_browser,
-    )
+    try:
+        server = review_workspace.serve_workspace(
+            package_root,
+            port=port,
+            open_browser=open_browser,
+        )
+    except review_workspace.WorkspaceWriterLockError as exc:
+        raise click.ClickException(str(exc)) from exc
     host, resolved_port = server.server_address
     click.echo(f"Serving {package_root} at http://{host}:{resolved_port}/index.html")
     click.echo("Press Ctrl+C to stop.")

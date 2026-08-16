@@ -53,9 +53,11 @@ FINAL_REGION_SCHEMA_VERSION = "final_region_provenance.v1"
 CANONICAL_FINALIZATION_SCHEMA_VERSION = "canonical_review_finalization.v1"
 FINALIZATION_REVISION_SCHEMA_VERSION = "finalization_revision.v1"
 FINAL_CURRENT_POINTER_SCHEMA_VERSION = "final_current_pointer.v1"
+FINAL_CURRENT_POINTER_INDEX_SCHEMA_VERSION = "final_current_pointer_index.v1"
 FULL_VIDEO_SWEEP_ACK_SCHEMA_VERSION = "full_video_sweep_acknowledgement.v3"
 FINAL_CURRENT_POINTER_RELATIVE_PATH = Path("final") / "current.json"
 FINALIZATION_FAILURE_INJECTION_ENV = "REDACTOR_FINALIZATION_FAIL_AT"
+EVENT_CASE_REOPENED_FOR_REVIEW = "case_reopened_for_review"
 
 
 def finalization_blockers(
@@ -162,7 +164,35 @@ def finalization_blockers(
                 published_hash = str(latest.get("effective_regions_hash") or "")
                 target_hash = str(target_digest.get("effective_regions_hash") or "")
                 if not published_hash or published_hash != target_hash:
-                    blockers.append(f"{case_id}: Latest reviewed is not current")
+                    from redactor import reviewed_regions
+
+                    try:
+                        pointer = reviewed_regions.validate_current_pointer(
+                            package_root,
+                            reviewed_regions.load_current_pointer(
+                                package_root,
+                                case_id=case_id,
+                            ),
+                            case_id=case_id,
+                        )
+                        revision_manifest = dict(
+                            pointer.get("revision_manifest_payload") or {}
+                        )
+                        media_current = (
+                            reviewed_regions.reviewed_region_media_identity_matches(
+                                dict(
+                                    target_digest.get("reviewed_region_identity") or {}
+                                ),
+                                dict(
+                                    revision_manifest.get("reviewed_region_identity")
+                                    or {}
+                                ),
+                            )
+                        )
+                    except (ValueError, reviewed_regions.ReviewedRegionCompilationError):
+                        media_current = False
+                    if not media_current:
+                        blockers.append(f"{case_id}: Latest reviewed is not current")
 
     chain = validate_event_hash_chain(session_dir)
     if not chain["passed"]:
@@ -279,6 +309,9 @@ def finalize_reviewed_case(
     session_dir: Path,
     actor: dict[str, Any] | None = None,
     overwrite: bool = False,
+    expected_latest_reviewed_revision_id: str | None = None,
+    expected_reviewed_region_set_sha256: str | None = None,
+    expected_sweep_acknowledgement_sha256: str | None = None,
 ) -> dict[str, Any]:
     package_root = package_root.resolve()
     case_id = case_ids.validate_case_id(case_id)
@@ -290,6 +323,9 @@ def finalize_reviewed_case(
             case_id=case_id,
             session_dir=session_dir,
             actor=actor,
+            expected_latest_reviewed_revision_id=expected_latest_reviewed_revision_id,
+            expected_reviewed_region_set_sha256=expected_reviewed_region_set_sha256,
+            expected_sweep_acknowledgement_sha256=expected_sweep_acknowledgement_sha256,
         )
 
     blockers = finalization_blockers(
@@ -464,6 +500,9 @@ def finalize_canonical_reviewed_case(
     case_id: str,
     session_dir: Path,
     actor: dict[str, Any] | None = None,
+    expected_latest_reviewed_revision_id: str | None = None,
+    expected_reviewed_region_set_sha256: str | None = None,
+    expected_sweep_acknowledgement_sha256: str | None = None,
 ) -> dict[str, Any]:
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
@@ -499,6 +538,27 @@ def finalize_canonical_reviewed_case(
     maybe_inject_finalization_failure("after_candidate_validation")
 
     sweep = require_canonical_sweep_acknowledgement(candidate, candidate["working_state"])
+    request_binding = finalization_request_binding_from_candidate(candidate, sweep)
+    expected = {
+        "latest_reviewed_revision_id": expected_latest_reviewed_revision_id,
+        "reviewed_region_set_sha256": expected_reviewed_region_set_sha256,
+        "sweep_acknowledgement_sha256": expected_sweep_acknowledgement_sha256,
+    }
+    mismatches = [
+        key
+        for key, value in expected.items()
+        if value is not None and str(value) != str(request_binding[key])
+    ]
+    if mismatches:
+        return {
+            "blockers": [
+                f"{case_id}: finalization request {key} mismatch" for key in mismatches
+            ],
+            "case_id": case_id,
+            "finalized": False,
+            "request_binding": request_binding,
+            "schema_version": CANONICAL_FINALIZATION_SCHEMA_VERSION,
+        }
     task_identity = required_task_resolution_identity(
         package_root,
         candidate["working_state"],
@@ -519,10 +579,14 @@ def finalize_canonical_reviewed_case(
     finalization_input_sha256 = stable_hash(finalization_input)
     finalization_id = f"finalization_{finalization_input_sha256[:16]}"
     revision_root = package_root / "final" / "revisions" / finalization_id
-    current_pointer = load_current_final_pointer(package_root)
+    current_pointer = load_current_final_pointer(package_root, case_id=case_id)
     if current_pointer:
         try:
-            current = validate_current_final_pointer(package_root, current_pointer)
+            current = validate_current_final_pointer(
+                package_root,
+                current_pointer,
+                case_id=case_id,
+            )
             if (
                 current.get("case_id") == case_id
                 and current.get("finalization_input_sha256")
@@ -757,10 +821,14 @@ def resolve_canonical_latest_reviewed_candidate(
     session_dir = session_dir.resolve()
     case_id = case_ids.validate_case_id(case_id)
     workspace = reviewed_regions.require_supported_workspace(package_root)
-    pointer = reviewed_regions.load_current_pointer(package_root)
+    pointer = reviewed_regions.load_current_pointer(package_root, case_id=case_id)
     if not pointer:
         raise ValueError("Latest reviewed current pointer is missing")
-    validated = reviewed_regions.validate_current_pointer(package_root, pointer)
+    validated = reviewed_regions.validate_current_pointer(
+        package_root,
+        pointer,
+        case_id=case_id,
+    )
     if validated.get("case_id") != case_id:
         raise ValueError("Latest reviewed pointer belongs to a different case")
     if validated.get("review_session_id") != session_dir.name:
@@ -801,8 +869,18 @@ def resolve_canonical_latest_reviewed_candidate(
         require_blockers_resolved=require_blockers_resolved,
     )
     reviewed_region_set_sha256 = str(current_digest.get("effective_regions_hash") or "")
-    if reviewed_region_set_sha256 != str(revision_manifest.get("reviewed_region_set_sha256") or ""):
-        raise ValueError("reviewed region hash mismatch")
+    published_region_set_sha256 = str(
+        revision_manifest.get("reviewed_region_set_sha256") or ""
+    )
+    media_identity_current = reviewed_regions.reviewed_region_media_identity_matches(
+        dict(current_digest.get("reviewed_region_identity") or {}),
+        dict(revision_manifest.get("reviewed_region_identity") or {}),
+    )
+    if reviewed_region_set_sha256 != published_region_set_sha256:
+        if media_identity_current:
+            reviewed_region_set_sha256 = published_region_set_sha256
+        else:
+            raise ValueError("reviewed region hash mismatch")
     pointer_projection_hash = str(
         validated.get("working_state_projection_hash")
         or validated.get("accepted_working_state_revision")
@@ -817,7 +895,11 @@ def resolve_canonical_latest_reviewed_candidate(
         )
     except ValueError as exc:
         raise ValueError(str(exc)) from exc
-    if pointer_projection_hash and pointer_projection_hash not in current_pointer_projection_hashes:
+    if (
+        pointer_projection_hash
+        and pointer_projection_hash not in current_pointer_projection_hashes
+        and not media_identity_current
+    ):
         raise ValueError("working-state generation mismatch")
     latest_video_sha256 = media.sha256_file(latest_video_path)
     if latest_video_sha256 != str(revision_manifest.get("video_artifact_sha256") or ""):
@@ -1025,6 +1107,39 @@ def validate_canonical_sweep_acknowledgement(
     if acknowledgement.get("explicit_reviewer_action") != "full_video_sweep_acknowledged":
         blockers.append(f"{case_id}: sweep_acknowledgement explicit reviewer action missing")
     return blockers
+
+
+def finalization_request_binding_from_candidate(
+    candidate: dict[str, Any],
+    sweep_acknowledgement: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "case_id": candidate["case_id"],
+        "latest_reviewed_revision_id": candidate["revision_id"],
+        "latest_reviewed_video_sha256": candidate["latest_video_sha256"],
+        "review_session_id": candidate["pointer"].get("review_session_id"),
+        "reviewed_region_set_sha256": candidate["reviewed_region_set_sha256"],
+        "schema_version": "finalization_request_binding.v1",
+        "sweep_acknowledgement_sha256": sweep_acknowledgement[
+            "sweep_acknowledgement_sha256"
+        ],
+    }
+
+
+def finalization_request_binding(
+    *,
+    package_root: Path,
+    case_id: str,
+    session_dir: Path,
+) -> dict[str, Any]:
+    candidate = resolve_canonical_latest_reviewed_candidate(
+        package_root=package_root,
+        case_id=case_id,
+        session_dir=session_dir,
+        require_blockers_resolved=True,
+    )
+    sweep = require_canonical_sweep_acknowledgement(candidate, candidate["working_state"])
+    return finalization_request_binding_from_candidate(candidate, sweep)
 
 
 def require_canonical_sweep_acknowledgement(
@@ -1258,11 +1373,51 @@ def final_current_pointer_path(package_root: Path) -> Path:
     return package_root.resolve() / FINAL_CURRENT_POINTER_RELATIVE_PATH
 
 
-def load_current_final_pointer(package_root: Path) -> dict[str, Any]:
+def load_current_final_pointer(package_root: Path, *, case_id: str | None = None) -> dict[str, Any]:
     path = final_current_pointer_path(package_root)
     if not path.exists():
         return {}
-    return load_json(path)
+    payload = load_json(path)
+    if payload.get("schema_version") != FINAL_CURRENT_POINTER_INDEX_SCHEMA_VERSION:
+        if case_id is None or str(payload.get("case_id") or "") == (
+            case_ids.validate_case_id(case_id)
+        ):
+            return payload
+        return {}
+    cases = dict(payload.get("cases") or {})
+    if case_id is not None:
+        return dict(cases.get(case_ids.validate_case_id(case_id)) or {})
+    current_cases = [
+        dict(pointer)
+        for pointer in cases.values()
+        if isinstance(pointer, dict) and pointer.get("current") is True
+    ]
+    if len(current_cases) == 1:
+        return current_cases[0]
+    return payload
+
+
+def final_current_pointer_index_payload(package_root: Path) -> dict[str, Any]:
+    path = final_current_pointer_path(package_root)
+    if not path.exists():
+        return {
+            "cases": {},
+            "schema_version": FINAL_CURRENT_POINTER_INDEX_SCHEMA_VERSION,
+            "updated_at_utc": media.utc_timestamp(),
+        }
+    payload = load_json(path)
+    if payload.get("schema_version") == FINAL_CURRENT_POINTER_INDEX_SCHEMA_VERSION:
+        return {
+            "cases": dict(payload.get("cases") or {}),
+            "schema_version": FINAL_CURRENT_POINTER_INDEX_SCHEMA_VERSION,
+            "updated_at_utc": payload.get("updated_at_utc") or media.utc_timestamp(),
+        }
+    pointer_case_id = case_ids.validate_case_id(str(payload.get("case_id") or ""))
+    return {
+        "cases": {pointer_case_id: payload},
+        "schema_version": FINAL_CURRENT_POINTER_INDEX_SCHEMA_VERSION,
+        "updated_at_utc": media.utc_timestamp(),
+    }
 
 
 def publish_final_current_pointer(
@@ -1304,9 +1459,19 @@ def publish_final_current_pointer(
         ],
         "workspace_manifest_sha256": finalization_manifest["workspace_manifest_sha256"],
     }
-    atomic_write_final_pointer(pointer_path, pointer)
-    reopened = load_current_final_pointer(package_root)
-    validated = validate_current_final_pointer(package_root, reopened)
+    pointer_index = final_current_pointer_index_payload(package_root)
+    pointer_index["cases"][finalization_manifest["case_id"]] = pointer
+    pointer_index["updated_at_utc"] = media.utc_timestamp()
+    atomic_write_final_pointer(pointer_path, pointer_index)
+    reopened = load_current_final_pointer(
+        package_root,
+        case_id=str(finalization_manifest["case_id"]),
+    )
+    validated = validate_current_final_pointer(
+        package_root,
+        reopened,
+        case_id=str(finalization_manifest["case_id"]),
+    )
     return {
         "current_pointer_sha256": media.sha256_file(pointer_path),
         "finalization_id": validated["finalization_id"],
@@ -1328,12 +1493,34 @@ def atomic_write_final_pointer(path: Path, payload: dict[str, Any]) -> None:
     os.replace(temp_path, path)
 
 
-def validate_current_final_pointer(package_root: Path, pointer: dict[str, Any]) -> dict[str, Any]:
+def validate_current_final_pointer(
+    package_root: Path,
+    pointer: dict[str, Any],
+    *,
+    case_id: str | None = None,
+) -> dict[str, Any]:
+    if pointer.get("schema_version") == FINAL_CURRENT_POINTER_INDEX_SCHEMA_VERSION:
+        cases = dict(pointer.get("cases") or {})
+        if case_id is not None:
+            selected = dict(cases.get(case_ids.validate_case_id(case_id)) or {})
+            if not selected:
+                raise ValueError("Final current pointer is missing for case")
+            return validate_current_final_pointer(package_root, selected, case_id=case_id)
+        current_cases = [
+            dict(case_pointer)
+            for case_pointer in cases.values()
+            if isinstance(case_pointer, dict) and case_pointer.get("current") is True
+        ]
+        if len(current_cases) != 1:
+            raise ValueError("Final current pointer index requires a case id")
+        return validate_current_final_pointer(package_root, current_cases[0])
     if pointer.get("schema_version") != FINAL_CURRENT_POINTER_SCHEMA_VERSION:
         raise ValueError("Final current pointer schema mismatch")
     if pointer.get("status") != "ready" or pointer.get("current") is not True:
         raise ValueError("Final current pointer is not ready")
-    case_id = case_ids.validate_case_id(str(pointer.get("case_id") or ""))
+    pointer_case_id = case_ids.validate_case_id(str(pointer.get("case_id") or ""))
+    if case_id is not None and pointer_case_id != case_ids.validate_case_id(case_id):
+        raise ValueError("Final pointer case mismatch")
     manifest_path = contained_package_path(
         package_root,
         str(pointer.get("finalization_manifest") or ""),
@@ -1372,7 +1559,7 @@ def validate_current_final_pointer(package_root: Path, pointer: dict[str, Any]) 
     ):
         raise ValueError("Final pointer Latest reviewed video mismatch")
     return dict(pointer) | {
-        "case_id": case_id,
+        "case_id": pointer_case_id,
         "finalization_manifest_payload": finalization_manifest,
     }
 
@@ -1431,11 +1618,11 @@ def current_final_role(
 ) -> dict[str, Any]:
     package_root = package_root.resolve()
     case_id = case_ids.validate_case_id(case_id)
-    pointer = load_current_final_pointer(package_root)
+    pointer = load_current_final_pointer(package_root, case_id=case_id)
     if not pointer:
         return {}
     try:
-        validated = validate_current_final_pointer(package_root, pointer)
+        validated = validate_current_final_pointer(package_root, pointer, case_id=case_id)
     except ValueError:
         return {}
     if validated.get("case_id") != case_id:
@@ -1496,6 +1683,92 @@ def current_final_role(
             "sweep_acknowledgement_sha256"
         ],
         "validation_status": "passed",
+    }
+
+
+def reopen_case_final_for_review(
+    *,
+    package_root: Path,
+    case_id: str,
+    session_dir: Path,
+    actor: dict[str, Any] | None = None,
+    reason: str,
+) -> dict[str, Any]:
+    package_root = package_root.resolve()
+    session_dir = session_dir.resolve()
+    case_id = case_ids.validate_case_id(case_id)
+    pointer_path = final_current_pointer_path(package_root)
+    pointer = load_current_final_pointer(package_root, case_id=case_id)
+    if not pointer:
+        raise ValueError(f"{case_id}: no current Final exists to reopen")
+    validated = validate_current_final_pointer(package_root, pointer, case_id=case_id)
+    finalization_manifest = dict(validated["finalization_manifest_payload"])
+    if finalization_manifest.get("review_session_id") != session_dir.name:
+        raise ValueError(f"{case_id}: Final belongs to a different review session")
+
+    from redactor import review_working_state
+
+    working_state = review_working_state.derive_working_state(
+        package_root,
+        session_dir,
+        write_snapshot=False,
+    )
+    sweep = dict(working_state.get("sweep_acknowledgements") or {}).get(case_id) or {}
+    event = append_event(
+        session_dir,
+        event_type=EVENT_CASE_REOPENED_FOR_REVIEW,
+        actor=actor or {"display_name": None, "role": "system_reopen"},
+        case_id=case_id,
+        task_id=None,
+        before_state={
+            "current_final_pointer": pointer,
+            "current_final_pointer_sha256": media.sha256_file(pointer_path),
+        },
+        after_state={
+            "case_id": case_id,
+            "historical_final_media_sha256": finalization_manifest["final_video_sha256"],
+            "historical_finalization_id": finalization_manifest["finalization_id"],
+            "historical_latest_revision_id": finalization_manifest[
+                "latest_reviewed_revision_id"
+            ],
+            "historical_sweep_event_hash": sweep.get("event_hash"),
+            "historical_sweep_event_id": sweep.get("event_id"),
+            "reason": reason,
+            "reopened_current_final_status": "historical_not_current",
+            "review_session_id": session_dir.name,
+        },
+        note=reason,
+        application_hashes={
+            "final_video_sha256": finalization_manifest["final_video_sha256"],
+            "finalization_input_sha256": finalization_manifest[
+                "finalization_input_sha256"
+            ],
+        },
+    )
+
+    pointer_index = final_current_pointer_index_payload(package_root)
+    historical_pointer = dict(pointer)
+    historical_pointer.update(
+        {
+            "current": False,
+            "historical_status": "case_reopened_for_review",
+            "reopened_at_utc": event["timestamp_utc"],
+            "reopened_by_event_hash": event["event_hash"],
+            "reopened_by_event_id": event["event_id"],
+            "reopened_reason": reason,
+            "status": "historical",
+        }
+    )
+    pointer_index["cases"][case_id] = historical_pointer
+    pointer_index["updated_at_utc"] = media.utc_timestamp()
+    atomic_write_final_pointer(pointer_path, pointer_index)
+    return {
+        "case_id": case_id,
+        "event": event,
+        "finalization_id": finalization_manifest["finalization_id"],
+        "historical_final_pointer": historical_pointer,
+        "ok": True,
+        "schema_version": "case_final_reopened_for_review.v1",
     }
 
 
@@ -1785,7 +2058,13 @@ def load_json(path: Path) -> dict[str, Any]:
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with temp_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, sort_keys=True)
+        file.write("\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temp_path, path)
 
 
 def ffprobe_validate(path: Path) -> dict[str, Any]:

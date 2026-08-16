@@ -177,38 +177,6 @@
           },
           "type": "array"
         },
-        "blocker_count": {
-          "type": "number"
-        },
-        "blocker_groups": {
-          "items": {
-            "additionalProperties": true,
-            "properties": {
-              "blockers": {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              "count": {
-                "type": "number"
-              },
-              "key": {
-                "type": "string"
-              },
-              "label": {
-                "type": "string"
-              }
-            },
-            "required": [
-              "count",
-              "key",
-              "label"
-            ],
-            "type": "object"
-          },
-          "type": "array"
-        },
         "case_id": {
           "type": "string"
         },
@@ -744,9 +712,6 @@
           "type": "boolean"
         },
         "media_validation_passed": {
-          "type": "boolean"
-        },
-        "ready": {
           "type": "boolean"
         },
         "schema_version": {
@@ -1452,6 +1417,9 @@
         "active_projection_hash": {
           "type": "string"
         },
+        "audit_projection_hash": {
+          "type": "string"
+        },
         "baseline": {
           "additionalProperties": true,
           "type": "object"
@@ -1559,6 +1527,10 @@
             "string",
             "null"
           ]
+        },
+        "current_session": {
+          "additionalProperties": true,
+          "type": "object"
         },
         "entities": {
           "$ref": "#/definitions/EntityIndex"

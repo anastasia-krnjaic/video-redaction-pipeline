@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import socket
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -58,6 +61,8 @@ GREEN_ACTIONS = {
 BLOCKING_ACTIONS = {
     ACTION_PRIVACY_LEAK,
 }
+
+_SESSION_WRITE_LOCK = threading.RLock()
 
 
 def allowed_actions_for_task(task: dict[str, Any]) -> tuple[str, ...]:
@@ -362,51 +367,93 @@ def append_decision_event(
     task_before_state: dict[str, Any] | None = None,
     application_hashes: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    if action not in DECISION_ACTIONS:
-        raise ValueError(f"unsupported decision action: {action}")
-    if task_before_state is not None:
-        validate_task_action(task_before_state, action)
-    current_by_case = load_current_decisions_by_case(session_dir)
-    before = current_decision_for_task(
-        current_by_case,
-        case_id=case_id,
-        task_id=task_id,
-    )
-    status = decision_status_for_action(action)
-    after = {
-        "action": action,
-        "case_id": case_id,
-        "decision_status": status,
-        "note": note,
-        "reviewed_at_utc": media.utc_timestamp(),
-        "task_id": task_id,
-    }
-    event = append_event(
-        session_dir,
-        event_type="decision_recorded",
-        actor=actor,
-        case_id=case_id,
-        task_id=task_id,
-        before_state=before or task_before_state,
-        after_state=after,
-        note=note,
-        application_hashes=application_hashes or {},
-    )
-    current_by_case.setdefault(case_id, {})[task_id] = after | {
-        "event_id": event["event_id"],
-        "event_hash": event["event_hash"],
-    }
-    write_json(
-        session_dir / "decisions_current.json",
-        {
-            "decision_identity": REVIEW_DECISION_IDENTITY_V2,
-            "decisions": flatten_decisions_by_case(current_by_case),
-            "decisions_by_case": current_by_case,
-            "schema_version": "review_decisions_current.v2",
-        },
-    )
-    refresh_session_summary(session_dir)
-    return event
+    with _SESSION_WRITE_LOCK:
+        events = append_decision_events(
+            session_dir,
+            actor=actor,
+            case_id=case_id,
+            decisions=[
+                {
+                    "action": action,
+                    "application_hashes": application_hashes or {},
+                    "note": note,
+                    "task_before_state": task_before_state,
+                    "task_id": task_id,
+                }
+            ],
+        )
+        return events[0]
+
+
+def append_decision_events(
+    session_dir: Path,
+    *,
+    actor: dict[str, Any],
+    case_id: str,
+    decisions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    with _SESSION_WRITE_LOCK:
+        if not decisions:
+            return []
+        current_by_case = load_current_decisions_by_case(session_dir)
+        events: list[dict[str, Any]] = []
+        previous_hash = last_event_hash(session_dir)
+        encoded_rows: list[str] = []
+        validated_case_id = case_ids.validate_case_id(case_id)
+        for decision in decisions:
+            action = str(decision.get("action") or "")
+            task_id = str(decision.get("task_id") or "")
+            task_before_state = (
+                dict(decision.get("task_before_state") or {})
+                if isinstance(decision.get("task_before_state"), dict)
+                else None
+            )
+            if action not in DECISION_ACTIONS:
+                raise ValueError(f"unsupported decision action: {action}")
+            if task_before_state is not None:
+                validate_task_action(task_before_state, action)
+            before = current_decision_for_task(
+                current_by_case,
+                case_id=validated_case_id,
+                task_id=task_id,
+            )
+            status = decision_status_for_action(action)
+            after = {
+                "action": action,
+                "case_id": validated_case_id,
+                "decision_status": status,
+                "note": str(decision.get("note") or ""),
+                "reviewed_at_utc": media.utc_timestamp(),
+                "task_id": task_id,
+            }
+            payload = {
+                "actor": actor,
+                "after_state": after,
+                "application_hashes": dict(
+                    sorted(dict(decision.get("application_hashes") or {}).items())
+                ),
+                "before_state": before or task_before_state,
+                "case_id": validated_case_id,
+                "event_id": f"event_{uuid.uuid4().hex}",
+                "event_type": "decision_recorded",
+                "note": str(decision.get("note") or ""),
+                "previous_event_hash": previous_hash,
+                "schema_version": EVENT_SCHEMA_VERSION,
+                "task_id": task_id,
+                "timestamp_utc": media.utc_timestamp(),
+            }
+            payload["event_hash"] = stable_hash(payload)
+            previous_hash = str(payload["event_hash"])
+            encoded_rows.append(json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n")
+            current_by_case.setdefault(validated_case_id, {})[task_id] = after | {
+                "event_id": payload["event_id"],
+                "event_hash": payload["event_hash"],
+            }
+            events.append(payload)
+        _append_encoded_event_rows(session_dir, encoded_rows)
+        write_decisions_snapshot(session_dir, current_by_case)
+        refresh_session_summary(session_dir)
+        return events
 
 
 def append_task_resolution_event(
@@ -543,31 +590,40 @@ def append_event(
     note: str | None,
     application_hashes: dict[str, str],
 ) -> dict[str, Any]:
-    validated_case_id = None if case_id is None else case_ids.validate_case_id(case_id)
-    previous_hash = last_event_hash(session_dir)
-    payload = {
-        "actor": actor,
-        "after_state": after_state,
-        "application_hashes": dict(sorted(application_hashes.items())),
-        "before_state": before_state,
-        "case_id": validated_case_id,
-        "event_id": f"event_{uuid.uuid4().hex}",
-        "event_type": event_type,
-        "note": note,
-        "previous_event_hash": previous_hash,
-        "schema_version": EVENT_SCHEMA_VERSION,
-        "task_id": task_id,
-        "timestamp_utc": media.utc_timestamp(),
-    }
-    payload["event_hash"] = stable_hash(payload)
-    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
-    events_path = session_dir / "events.jsonl"
-    with events_path.open("a", encoding="utf-8") as file:
-        file.write(encoded)
+    with _SESSION_WRITE_LOCK:
+        validated_case_id = None if case_id is None else case_ids.validate_case_id(case_id)
+        previous_hash = last_event_hash(session_dir)
+        payload = {
+            "actor": actor,
+            "after_state": after_state,
+            "application_hashes": dict(sorted(application_hashes.items())),
+            "before_state": before_state,
+            "case_id": validated_case_id,
+            "event_id": f"event_{uuid.uuid4().hex}",
+            "event_type": event_type,
+            "note": note,
+            "previous_event_hash": previous_hash,
+            "schema_version": EVENT_SCHEMA_VERSION,
+            "task_id": task_id,
+            "timestamp_utc": media.utc_timestamp(),
+        }
+        payload["event_hash"] = stable_hash(payload)
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n"
+        _append_encoded_event_rows(session_dir, [encoded])
+        return payload
+
+
+def _append_encoded_event_rows(session_dir: Path, encoded_rows: list[str]) -> None:
+    if not encoded_rows:
+        return
     ensure_session_layout(session_dir)
-    with (session_dir / "events" / "events.jsonl").open("a", encoding="utf-8") as file:
-        file.write(encoded)
-    return payload
+    encoded = "".join(encoded_rows)
+    for events_path in (session_dir / "events.jsonl", session_dir / "events" / "events.jsonl"):
+        events_path.parent.mkdir(parents=True, exist_ok=True)
+        with events_path.open("a", encoding="utf-8") as file:
+            file.write(encoded)
+            file.flush()
+            os.fsync(file.fileno())
 
 
 def validate_event_hash_chain(session_dir: Path) -> dict[str, Any]:
@@ -619,8 +675,75 @@ def load_current_decisions_by_case(session_dir: Path) -> dict[str, dict[str, dic
     path = session_dir / "decisions_current.json"
     if not path.exists():
         return {}
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        return rebuild_decisions_snapshot_from_events(session_dir, corrupt_reason=str(exc))
     return normalize_decisions_by_case(payload)
+
+
+def rebuild_decisions_snapshot_from_events(
+    session_dir: Path,
+    *,
+    corrupt_reason: str | None = None,
+) -> dict[str, dict[str, dict[str, Any]]]:
+    with _SESSION_WRITE_LOCK:
+        chain = validate_event_hash_chain(session_dir)
+        if not chain.get("passed"):
+            raise ValueError(
+                "decisions_current.json is malformed and the event chain is not valid: "
+                + "; ".join(str(item) for item in list(chain.get("errors") or []))
+            )
+        path = session_dir / "decisions_current.json"
+        if path.exists() and corrupt_reason:
+            evidence_dir = session_dir / "state" / "recovery_evidence"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            evidence_name = (
+                f"decisions_current."
+                f"{media.utc_timestamp().replace(':', '').replace('-', '')}."
+                f"{uuid.uuid4().hex}.corrupt.json"
+            )
+            evidence_path = (
+                evidence_dir
+                / evidence_name
+            )
+            shutil.copy2(path, evidence_path)
+        decisions_by_case: dict[str, dict[str, dict[str, Any]]] = {}
+        for event in load_events(session_dir):
+            if event.get("event_type") != "decision_recorded":
+                continue
+            after = dict(event.get("after_state") or {})
+            case_id = decision_case_id(after, str(event.get("case_id") or ""))
+            task_id = decision_task_id(after, str(event.get("task_id") or ""))
+            if not case_id or not task_id:
+                continue
+            decisions_by_case.setdefault(case_id, {})[task_id] = after | {
+                "case_id": case_id,
+                "event_hash": event.get("event_hash"),
+                "event_id": event.get("event_id"),
+                "task_id": task_id,
+            }
+        write_decisions_snapshot(session_dir, decisions_by_case)
+        refresh_session_summary(session_dir)
+        return decisions_by_case
+
+
+def write_decisions_snapshot(
+    session_dir: Path,
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+) -> None:
+    write_json(
+        session_dir / "decisions_current.json",
+        {
+            "decision_identity": REVIEW_DECISION_IDENTITY_V2,
+            "decisions": flatten_decisions_by_case(decisions_by_case),
+            "decisions_by_case": {
+                case_id: dict(sorted(case_decisions.items()))
+                for case_id, case_decisions in sorted(decisions_by_case.items())
+            },
+            "schema_version": "review_decisions_current.v2",
+        },
+    )
 
 
 def ensure_session_layout(session_dir: Path) -> None:
@@ -687,4 +810,10 @@ def load_reviewer_attribution(session_dir: Path) -> dict[str, Any] | None:
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with temp_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, sort_keys=True)
+        file.write("\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temp_path, path)

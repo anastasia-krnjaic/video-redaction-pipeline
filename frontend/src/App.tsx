@@ -92,6 +92,12 @@ export function App() {
 
   const startSession = async () => {
     if (!workspaceState.workspace) return;
+    if (
+      workspaceState.session &&
+      !window.confirm('Start a new clean review session? Your current session remains preserved, but new work will go into the new session.')
+    ) {
+      return;
+    }
     setBusy(true);
     workspaceState.setError(undefined);
     try {
@@ -164,11 +170,9 @@ export function App() {
         busy={busy}
         cases={caseTabs}
         error={workspaceState.error}
-        frontend={workspaceState.workspace.frontend}
         route={route}
         resumableSessionId={workspaceState.resumableSessionId}
         session={workspaceState.session}
-        sessionLoadKind={workspaceState.sessionLoadKind}
         onExport={exportSession}
         onOpenAttribution={() => setAttributionOpen(true)}
         onResumeSession={resumeSession}

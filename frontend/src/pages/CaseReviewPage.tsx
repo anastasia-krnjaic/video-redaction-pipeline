@@ -235,7 +235,7 @@ export function CaseReviewPage({
     reviewReady,
     workingState,
   });
-  const latestReviewedCurrent = latestReviewedStatus === 'Latest reviewed current';
+  const latestReviewedCurrent = latestReviewedStatus === 'Reviewed video ready';
   const sweepAcknowledgement = (workingState?.sweep_acknowledgements as Record<string, unknown> | undefined)?.[caseId] as Record<string, unknown> | undefined;
   const sweepAcknowledged = Boolean(sweepAcknowledgement);
   const sweepStale = sweepAcknowledged && (
@@ -246,7 +246,14 @@ export function CaseReviewPage({
     ? 'Ready to finalize'
     : latestReviewedCurrent
       ? 'Ready for final full-video review'
-      : 'Final full-video review waits for current Latest reviewed';
+      : reviewReady
+        ? 'Reviewed video is still updating'
+        : 'Needs correction must be cleared first';
+  const approveUnavailableReason = latestReviewedCurrent
+    ? undefined
+    : reviewReady
+      ? 'Reviewed video is still updating'
+      : 'Needs correction must be cleared first';
 
   useEffect(() => {
     eventsRef.current = events;
@@ -297,7 +304,7 @@ export function CaseReviewPage({
 
   useEffect(() => {
     if (mode !== 'review' || !session?.session_id || !reviewReady || activeMaterializationJobKey) return;
-    if (latestReviewedStatus !== 'Ready to build Latest reviewed' && latestReviewedStatus !== 'Latest reviewed stale — review changed') return;
+    if (latestReviewedStatus !== 'Ready to build reviewed video' && latestReviewedStatus !== 'Reviewed video changed — rebuilding...') return;
     const revision = String(workingState?.active_projection_hash || workingState?.state_hash || '');
     const requestKey = `${caseId}:${revision}:${latestReviewedStatus}`;
     if (!revision || autoBuildRequestRef.current === requestKey) return;
@@ -358,7 +365,6 @@ export function CaseReviewPage({
     editDraftContextRef.current = contextKey;
     setDraft((current) => {
       if (current.caseId === caseId && !shouldInitialize) return current;
-      if (current.caseId === caseId && current.keyframes.length) return current;
       return initialDraft(caseId, manifest, caseFrame, selectedTask);
     });
   }, [caseId, controller.pause, manifest, mode, selectedTask?.review_task_id]);
@@ -432,7 +438,7 @@ export function CaseReviewPage({
             setLatestRole(tracked.job.latest_reviewed);
             setSelectedRoleRef.current('latest_reviewed');
             seekToFrameRef.current(tracked.preserveFrame);
-            setCorrectionSaveStatus('Correction saved — Latest reviewed current');
+            setCorrectionSaveStatus('Correction saved — reviewed video ready');
           }
         }
         if (tracked.job.status === 'superseded') {
@@ -452,7 +458,7 @@ export function CaseReviewPage({
               return next;
             });
           }
-          setMaterializationError(tracked.job.error || 'Latest reviewed media update failed.');
+          setMaterializationError(tracked.job.error || 'Reviewed video update failed.');
           setCorrectionSaveStatus('Correction saved');
         }
       }
@@ -690,7 +696,7 @@ export function CaseReviewPage({
       return;
     }
     if (!latestReviewedCurrent) {
-      onError('Latest reviewed must be current before approving the full-video review.');
+      onError('Reviewed video must be current before approving the full-video review.');
       return;
     }
     setSweepBusy(true);
@@ -1043,7 +1049,7 @@ export function CaseReviewPage({
           {materializationError ? (
             <details className="materialization-blockers">
               <summary>
-                <strong>Latest reviewed not ready</strong>
+          <strong>Reviewed video not ready</strong>
                 <span>{counts.Open} guidance items remain optional</span>
                 <span>{correctionAttentionCount} corrections need attention</span>
                 <span>View technical blockers</span>
@@ -1108,12 +1114,12 @@ export function CaseReviewPage({
         </div>
       ) : null}
       <section className={`next-step-panel ${reviewReady ? 'complete' : 'progress'}`} aria-label={`${manifest.display_name} review progress`}>
-        <div>
-          <strong>{reviewReady ? (allGuidanceAddressed ? 'GUIDANCE CLEAR' : 'GUIDANCE READY') : 'NEEDS CORRECTION'}</strong>
-          <p className="muted">
-            Guidance remaining: {counts.Open} — optional · Needs correction: {counts['Needs correction']} — blocking · Correct {counts.Correct} · Not sensitive {counts['Not sensitive']}
-          </p>
-        </div>
+        {!reviewReady ? (
+          <div>
+            <strong>Needs correction: {correctionAttentionCount}</strong>
+            <p className="muted">Blocking reviewed video until cleared.</p>
+          </div>
+        ) : null}
         <div>
           <strong>{latestReviewedStatus}</strong>
           <p className="muted">{finalNextStep}</p>
@@ -1133,6 +1139,7 @@ export function CaseReviewPage({
               'Approve full-video review'
             )}
           </button>
+          {approveUnavailableReason ? <span className="muted">{approveUnavailableReason}</span> : null}
           {sweepAcknowledged && !sweepStale ? <span className="badge done">Current full-video review approved</span> : null}
           {sweepStale ? <span className="badge warn">Previous full-video approval stale</span> : null}
         </div>
@@ -1269,7 +1276,7 @@ export function CaseReviewPage({
           <div className="modal-card">
             <h2 id="reset-edits-title">Reset this case to Automatic baseline?</h2>
             <p className="muted">
-              This clears only {manifest.display_name}'s active decisions, object policies, merges, manual corrections, correction drafts, preview state, Latest reviewed currentness, and full-video sweep readiness. Source media, Automatic baseline, the other case, checkpoints, and historical audit events are preserved.
+              This clears only {manifest.display_name}'s active decisions, object policies, merges, manual corrections, correction drafts, preview state, reviewed-video currentness, and full-video sweep readiness. Source media, Automatic baseline, the other case, checkpoints, and historical audit events are preserved.
             </p>
             <div className="button-row">
               <button type="button" className="danger" onClick={() => void resetReviewState()} disabled={checkpointBusy === 'reset-edits'}>
@@ -1368,6 +1375,14 @@ function workspaceIdentityForUi(workspace: WorkspaceSummary): string {
   return String(identity).replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
+type ReviewedVideoStatus =
+  | 'Needs correction blocks reviewed video'
+  | 'Ready to build reviewed video'
+  | 'Updating reviewed video...'
+  | 'Reviewed video ready'
+  | 'Reviewed video changed — rebuilding...'
+  | 'Could not update reviewed video — Retry';
+
 function latestReviewedStatusText({
   activeJobs,
   latestRole,
@@ -1380,12 +1395,12 @@ function latestReviewedStatusText({
   materializationError?: string;
   reviewReady: boolean;
   workingState?: WorkingState;
-}): 'Needs correction blocks Latest reviewed' | 'Ready to build Latest reviewed' | 'Building Latest reviewed' | 'Latest reviewed current' | 'Latest reviewed stale — review changed' | 'Latest reviewed validation failed' {
-  if (materializationError) return 'Latest reviewed validation failed';
-  if (activeJobs.length) return 'Building Latest reviewed';
-  if (!reviewReady) return 'Needs correction blocks Latest reviewed';
-  if (!latestRole) return 'Ready to build Latest reviewed';
-  if (latestRole.media_validation_passed === false) return 'Latest reviewed validation failed';
+}): ReviewedVideoStatus {
+  if (materializationError) return 'Could not update reviewed video — Retry';
+  if (activeJobs.length) return 'Updating reviewed video...';
+  if (!reviewReady) return 'Needs correction blocks reviewed video';
+  if (!latestRole) return 'Ready to build reviewed video';
+  if (latestRole.media_validation_passed === false) return 'Could not update reviewed video — Retry';
   const activeRevision = String(workingState?.active_projection_hash || '');
   const publishedRevision = String(
     latestRole.published_working_state_revision ||
@@ -1394,9 +1409,9 @@ function latestReviewedStatusText({
       '',
   );
   if (activeRevision && publishedRevision && activeRevision !== publishedRevision) {
-    return 'Latest reviewed stale — review changed';
+    return 'Reviewed video changed — rebuilding...';
   }
-  return 'Latest reviewed current';
+  return 'Reviewed video ready';
 }
 
 function formatMaterializationStatus(job: MaterializationJob): string {
@@ -1404,7 +1419,7 @@ function formatMaterializationStatus(job: MaterializationJob): string {
   const changedFrames = typeof job.changed_source_frame_count === 'number'
     ? ` (${job.changed_source_frame_count} changed frames)`
     : '';
-  return `Updating Latest reviewed: ${rawStage}${changedFrames}`;
+  return `Updating reviewed video: ${rawStage}${changedFrames}`;
 }
 
 function pendingRegionsForSourceFrame(
@@ -1485,11 +1500,16 @@ function tupleBox(values: number[]): [number, number, number, number] {
 }
 
 function initialDraft(caseId: CaseId, manifest: WorkspaceSummary['cases'][string], caseFrame: number, task?: Task | null): CorrectionDraft {
+  const taskNeedsCorrection =
+    (task && 'bucket' in task && task.bucket === 'Needs correction') ||
+    task?.normal_task_class === 'correction_verification' ||
+    task?.correction_required === true ||
+    task?.decision_state === 'needs_correction';
   const sourceFrame =
-    typeof task?.source_frame_start === 'number'
+    taskNeedsCorrection && typeof task?.source_frame_start === 'number'
       ? task.source_frame_start
       : caseToSourceFrame(manifest, caseFrame);
-  const endFrame = typeof task?.source_frame_end === 'number' ? task.source_frame_end : sourceFrame;
+  const endFrame = taskNeedsCorrection && typeof task?.source_frame_end === 'number' ? task.source_frame_end : sourceFrame;
   const mode = endFrame === sourceFrame ? 'single_frame' : 'fixed_box';
   return withDraftHash({
     caseId,

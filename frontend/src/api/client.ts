@@ -74,6 +74,10 @@ export function loadSessionState(sessionId: string): Promise<SessionState> {
   return getJson<SessionState>(`${API_PREFIX}/session-state?session_id=${encodeURIComponent(sessionId)}`);
 }
 
+export function loadCurrentSessionState(): Promise<SessionState> {
+  return getJson<SessionState>(`${API_PREFIX}/session-state`);
+}
+
 export function loadWorkingState(sessionId: string): Promise<{ ok: true; working_state: WorkingState }> {
   return getJson<{ ok: true; working_state: WorkingState }>(`${API_PREFIX}/working-state?session_id=${encodeURIComponent(sessionId)}`);
 }
@@ -387,6 +391,7 @@ export async function finalizeCase(payload: {
   session_id: string;
   actor: Attribution | Record<string, unknown>;
   case_id: CaseId;
+  finalization_request: Record<string, unknown>;
 }): Promise<{ result: FinalizationStatus; event?: AuditEvent }> {
   const response = await fetch(`${API_PREFIX}/finalize`, {
     method: 'POST',

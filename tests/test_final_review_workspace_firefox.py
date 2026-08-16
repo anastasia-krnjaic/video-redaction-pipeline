@@ -16,7 +16,7 @@ from redactor import case_manifests, media, review_workspace
 from redactor.privacy_records import stable_hash
 
 SESSION_READY_JS = (
-    "() => document.querySelector('#sessionBanner')?.textContent.includes('Resumed review session')"
+    "() => document.querySelector('#sessionBanner')?.textContent.includes('Review session active')"
 )
 
 CANONICAL_ACTIONS = ["looks_correct", "privacy_leak", "not_sensitive"]
@@ -232,7 +232,101 @@ def review_task(
 def write_grouped_firefox_workspace(package: Path) -> str:
     day = write_case(package, "day")
     night = write_case(package, "night")
+    automatic_preview_by_case: dict[str, dict[str, object]] = {}
+    category_configuration_by_case: dict[str, dict[str, object]] = {}
+    category_identity_hash_by_case: dict[str, str] = {}
+    category_identities_by_case: dict[str, dict[str, object]] = {}
+    content_identities_by_case: dict[str, dict[str, object]] = {}
+    source_identity_by_case: dict[str, dict[str, object]] = {}
+    source_metadata_by_case: dict[str, dict[str, object]] = {}
+    for manifest in (day, night):
+        baseline_path = package / "regions" / f"{manifest.case_id}_current_regions.jsonl"
+        baseline_path.parent.mkdir(parents=True, exist_ok=True)
+        baseline_path.write_text("", encoding="utf-8")
+        automatic_role = next(role for role in manifest.video_roles if role.role == "automatic")
+        automatic_preview_by_case[manifest.case_id] = {
+            "automatic_preview_sha256": media.sha256_file(package / automatic_role.path),
+            "region_count": 0,
+            "source_sha256": manifest.source_video_hash,
+        }
+        content_identities_by_case[manifest.case_id] = {
+            "automatic_baseline_regions": {
+                "path": baseline_path.relative_to(package).as_posix(),
+                "role": "automatic_baseline_regions",
+                "schema_version": "artifact_reference.v1",
+                "sha256": media.sha256_file(baseline_path),
+                "size_bytes": baseline_path.stat().st_size,
+            }
+        }
+        configuration_hash = stable_hash(
+            {
+                "case_id": manifest.case_id,
+                "category": "license_plate",
+                "fixture": "firefox_grouped_review",
+            }
+        )
+        processed_span = {
+            "first_processed_frame": manifest.source_frame_start,
+            "last_processed_frame": manifest.source_frame_end,
+            "source_frame_count": manifest.frame_count,
+        }
+        content_hash = stable_hash(
+            {
+                "case_id": manifest.case_id,
+                "category": "license_plate",
+                "processed_span": processed_span,
+                "source_sha256": manifest.source_video_hash,
+            }
+        )
+        run_manifest_path = package / "technical" / f"{manifest.case_id}_license_plate_run.json"
+        write_json(
+            run_manifest_path,
+            {
+                "case_id": manifest.case_id,
+                "category": "license_plate",
+                "category_run_content_sha256": content_hash,
+                "configuration_identity": {
+                    "category": "license_plate",
+                    "configuration_hash": configuration_hash,
+                    "schema_version": "category_configuration_identity.v1",
+                    "source_sha256": manifest.source_video_hash,
+                },
+                "schema_version": "category_run_manifest.fixture.v1",
+                "source_lineage": {
+                    "processed_span": processed_span,
+                    "source_sha256": manifest.source_video_hash,
+                },
+                "stage_outcomes": [],
+            },
+        )
+        category_identities = {
+            "license_plate": {
+                "artifact_id": f"{manifest.case_id}_license_plate_run",
+                "category": "license_plate",
+                "category_run_content_sha256": content_hash,
+                "configuration_hash": configuration_hash,
+                "path": run_manifest_path.relative_to(package).as_posix(),
+                "processed_span": processed_span,
+                "schema_version": "category_run_manifest_identity.v1",
+                "sha256": media.sha256_file(run_manifest_path),
+                "source_sha256": manifest.source_video_hash,
+            }
+        }
+        category_identities_by_case[manifest.case_id] = category_identities
+        category_identity_hash_by_case[manifest.case_id] = stable_hash(category_identities)
+        category_configuration_by_case[manifest.case_id] = {
+            "license_plate": {
+                "category": "license_plate",
+                "configuration_hash": configuration_hash,
+                "schema_version": "category_configuration_identity.v1",
+                "source_sha256": manifest.source_video_hash,
+            }
+        }
+        source_identity_by_case[manifest.case_id] = {"sha256": manifest.source_video_hash}
+        source_metadata_by_case[manifest.case_id] = {"sha256": manifest.source_video_hash}
     freeze = {
+        "category_configuration_identities_by_case": category_configuration_by_case,
+        "category_run_manifest_identities_by_case": category_identities_by_case,
         "schema_version": "firefox_grouped_review_fixture.v1",
         "selected_categories": ["license_plate"],
     }
@@ -240,12 +334,17 @@ def write_grouped_firefox_workspace(package: Path) -> str:
     write_json(
         package / "workspace_manifest.json",
         {
+            "automatic_preview_by_case": automatic_preview_by_case,
             "cases": {
                 "day": "cases/day.json",
                 "night": "cases/night.json",
             },
+            "category_configuration_identities_by_case": category_configuration_by_case,
+            "category_run_manifest_identities_by_case": category_identities_by_case,
+            "category_run_manifest_identity_hash_by_case": category_identity_hash_by_case,
             "configuration_freeze": "configuration_freeze.json",
             "configuration_freeze_hash": stable_hash(freeze),
+            "content_identities_by_case": content_identities_by_case,
             "latest_reviewed_publication": {
                 "publication_mode": "reviewed_region_compiler.v1",
                 "schema_version": "latest_reviewed_publication_capability.v1",
@@ -255,6 +354,8 @@ def write_grouped_firefox_workspace(package: Path) -> str:
             "review_tasks": "reviewer_tasks.json",
             "schema_version": "final_review_workspace.v2.3.4",
             "selected_categories": ["license_plate"],
+            "source_identity_by_case": source_identity_by_case,
+            "source_metadata_by_case": source_metadata_by_case,
             "workspace_kind": "unified_case_review_workspace",
             "workspace_status": "ready",
         },
@@ -394,7 +495,7 @@ def test_final_review_workspace_firefox_entity_timeline_smoke(tmp_path: Path) ->
                 )
                 day_panel = active_case_panel(page, "day")
                 page.wait_for_function(SESSION_READY_JS, timeout=10_000)
-                assert "Resumed review session" in page.locator("#sessionBanner").inner_text()
+                assert "Review session active" in page.locator("#sessionBanner").inner_text()
                 assert session_id in page.locator("#sessionBanner").inner_text()
                 assert "Unsure" not in page.locator("body").inner_text()
                 assert "Uncertain" not in page.locator("body").inner_text()

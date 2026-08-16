@@ -116,6 +116,7 @@ def final_review_workspace_schema() -> dict[str, Any]:
                     "api_schema_version": {"const": API_SCHEMA_VERSION},
                     "backend_workspace_schema_version": {"type": "string"},
                     "configuration_freeze_hash": string_or_null,
+                    "current_session": dict_value,
                     "cases": {
                         "type": "object",
                         "additionalProperties": {"$ref": "#/definitions/Case"},
@@ -544,6 +545,7 @@ def final_review_workspace_schema() -> dict[str, Any]:
                         "items": {"$ref": "#/definitions/Task"},
                     },
                     "active_projection_hash": {"type": "string"},
+                    "audit_projection_hash": {"type": "string"},
                     "baseline": dict_value,
                     "checkpoints": {"type": "array", "items": {"$ref": "#/definitions/Checkpoint"}},
                     "current_event_chain_head": string_or_null,
@@ -789,6 +791,7 @@ def workspace_summary(package_root: Path) -> dict[str, Any]:
         else None,
         "entities": load_optional_json(package_root / "review_entities.json", {"cases": {}}),
         "frontend": frontend_runtime_manifest(package_root),
+        "current_session": load_optional_json(package_root / "current_session.json", {}),
         "raw_signals": load_optional_json(package_root / "raw_audit_signals.json", {}),
         "tasks": tasks,
         "timeline": load_optional_json(package_root / "timeline_marker_audit.json", {}),

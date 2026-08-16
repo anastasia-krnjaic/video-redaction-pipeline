@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 import uuid
@@ -29,6 +30,7 @@ from redactor.review_corrections import (
     load_corrections_jsonl,
 )
 from redactor.review_sessions import (
+    ACTION_NOT_SENSITIVE,
     CANONICAL_REVIEW_ACTIONS,
     EVENT_CORRECTION_SAVED_LEGACY,
     EVENT_MANUAL_CORRECTION_SAVED,
@@ -189,6 +191,21 @@ def non_durable_resolutions_by_case(
     return non_durable_decisions_by_case(resolutions_by_case)
 
 
+def media_affecting_decisions_by_case(
+    decisions_by_case: dict[str, dict[str, dict[str, Any]]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    filtered: dict[str, dict[str, dict[str, Any]]] = {}
+    for case_id, case_decisions in sorted(non_durable_decisions_by_case(decisions_by_case).items()):
+        rows = {
+            task_id: dict(decision)
+            for task_id, decision in sorted(case_decisions.items())
+            if str(dict(decision).get("action") or "") == ACTION_NOT_SENSITIVE
+        }
+        if rows:
+            filtered[case_id] = rows
+    return filtered
+
+
 def safe_case_manifest_path(package_root: Path, case_id: str) -> Path:
     return case_ids.case_manifest_path(package_root, case_id)
 
@@ -304,16 +321,33 @@ def derive_working_state(
     )
     checkpoints = load_checkpoints(session_dir)
     chain_head = current_event_chain_head(session_dir)
+    audit_projection_hash = stable_hash(
+        {
+            "active_correction_ids": sorted(
+                str(item) for item in list(projection.get("active_correction_ids") or [])
+            ),
+            "active_manual_tasks": sorted(
+                list(projection.get("active_manual_tasks") or []),
+                key=stable_hash,
+            ),
+            "object_policy_overrides": dict(projection.get("object_policy_overrides") or {}),
+            "sweep_acknowledgements": dict(projection.get("sweep_acknowledgements") or {}),
+            "task_decisions_by_case": task_decisions_by_case_from_payload(projection),
+            "task_resolutions_by_case": task_resolutions_by_case_from_payload(projection),
+        }
+    )
     state = {
         "active_correction_ids": sorted(correction.correction_id for correction in corrections),
         "active_manual_tasks": projection["active_manual_tasks"],
         "active_projection_hash": projection_hash,
         "active_projection_hash_schema_version": ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
         "active_projection_hashes": projection_hashes,
+        "audit_projection_hash": audit_projection_hash,
         "baseline": baseline,
         "checkpoints": checkpoints,
         "current_event_chain_head": chain_head,
         "deterministic_state_inputs": {
+            "audit_projection_hash": audit_projection_hash,
             "correction_hashes": sorted(correction.correction_hash() for correction in corrections),
             "decision_hash": stable_hash(projection["task_decisions_by_case"]),
             "decision_identity": "case_id_task_id.v1",
@@ -566,6 +600,9 @@ def derive_active_review_projection(
                 "event_id": event.get("event_id"),
             }
             continue
+        if event_type == "case_reopened_for_review" and case_id:
+            sweep_acknowledgements.pop(case_id, None)
+            continue
         if event_type == "manual_issue_created":
             task = dict(after.get("task") or {})
             task_id = str(task.get("review_task_id") or event.get("task_id") or "")
@@ -808,12 +845,19 @@ def projection_with_authoritative_latest_reviewed(
     from redactor import reviewed_regions
 
     materialized: dict[str, dict[str, Any]] = {}
+    projection_state = dict(projection) | {
+        "active_projection_hash": projection_hashes[ACTIVE_PROJECTION_HASH_SCHEMA_VERSION],
+        "active_projection_hash_schema_version": ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
+        "active_projection_hashes": projection_hashes,
+    }
+    projection_state.setdefault("state_hash", state_hash(projection_state))
     for case_id in sorted((dict(package_baseline(package_root).get("cases") or {})).keys()):
         latest = reviewed_regions.current_latest_reviewed_role(
             package_root,
             session_dir,
             case_id=case_id,
             active_projection_hashes=projection_hashes,
+            working_state=projection_state,
         )
         if latest:
             materialized[case_id] = latest
@@ -833,12 +877,10 @@ def active_projection_payload(
         for task in list(projection.get("active_manual_tasks") or [])
         if not durable_edit_verification_task_id(str(dict(task).get("review_task_id") or ""))
     ]
-    render_decisions_by_case = non_durable_decisions_by_case(
+    render_decisions_by_case = media_affecting_decisions_by_case(
         task_decisions_by_case_from_payload(projection)
     )
-    render_resolutions_by_case = non_durable_resolutions_by_case(
-        task_resolutions_by_case_from_payload(projection)
-    )
+    render_resolutions_by_case: dict[str, dict[str, dict[str, Any]]] = {}
     payload = {
         "active_correction_ids": sorted(
             str(item) for item in list(projection.get("active_correction_ids") or [])
@@ -3346,7 +3388,13 @@ def read_json(path: Path) -> dict[str, Any]:
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with temp_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, sort_keys=True)
+        file.write("\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temp_path, path)
 
 
 def load_jsonl(path: Path) -> list[dict[str, Any]]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import urllib.error
@@ -1543,7 +1544,7 @@ def rewrite_latest_reviewed_pointer_as_legacy_projection_v1(
         schema_version=review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION,
     )
     pointer_path = package / "latest_reviewed" / "current.json"
-    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer = reviewed_regions.load_current_pointer(package, case_id=case_id)
     revision_manifest_path = package / pointer["revision_manifest"]
     revision_manifest = json.loads(revision_manifest_path.read_text(encoding="utf-8"))
     publication_guard = dict(revision_manifest.get("publication_guard") or {})
@@ -1958,6 +1959,99 @@ def test_workspace_server_serves_mp4_range_and_rejects_traversal(tmp_path: Path)
         server.server_close()
 
 
+def test_workspace_writer_lock_prevents_multiple_live_writers(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    write_policy_entity_package(package)
+    other_package = tmp_path / "other_package"
+    write_policy_entity_package(other_package)
+
+    server = review_workspace.serve_workspace(package, port=0)
+    other_server: review_workspace.FinalReviewWorkspaceServer | None = None
+    try:
+        owner = json.loads(
+            (package / review_workspace.WORKSPACE_WRITER_LOCK_NAME).read_text(encoding="utf-8")
+        )
+        assert owner["pid"] == os.getpid()
+        assert owner["port"] == server.server_address[1]
+
+        with pytest.raises(
+            review_workspace.WorkspaceWriterLockError,
+            match="already open for editing",
+        ):
+            review_workspace.serve_workspace(package, port=0)
+
+        (package / review_workspace.WORKSPACE_WRITER_LOCK_NAME).unlink()
+        with pytest.raises(
+            review_workspace.WorkspaceWriterLockError,
+            match="already open for editing",
+        ):
+            review_workspace.serve_workspace(package, port=0)
+
+        other_server = review_workspace.serve_workspace(other_package, port=0)
+        assert other_server.server_address[1] != server.server_address[1]
+    finally:
+        if other_server is not None:
+            other_server.shutdown()
+            other_server.server_close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_workspace_writer_lock_reclaims_dead_pid_metadata(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    write_policy_entity_package(package)
+    stale_owner = {
+        "host": "127.0.0.1",
+        "pid": 99999999,
+        "port": 8766,
+        "schema_version": "review_workspace_writer_lock.v1",
+        "workspace_path": package.resolve().as_posix(),
+    }
+    write_json(package / review_workspace.WORKSPACE_WRITER_LOCK_NAME, stale_owner)
+    os_lock = review_workspace.workspace_writer_os_lock_path(package)
+    os_lock.parent.mkdir(parents=True, exist_ok=True)
+    os_lock.write_text(json.dumps(stale_owner), encoding="utf-8")
+
+    server = review_workspace.serve_workspace(package, port=0)
+    try:
+        owner = json.loads(
+            (package / review_workspace.WORKSPACE_WRITER_LOCK_NAME).read_text(encoding="utf-8")
+        )
+        assert owner["pid"] == os.getpid()
+        assert owner["port"] == server.server_address[1]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_session_state_auto_resumes_server_current_session_pointer(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    write_json(package / "reviewer_tasks.json", {"actions": [], "task_count": 0, "tasks": []})
+    write_json(package / "workspace_manifest.json", {"case_count": 1})
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        first = post_json(f"{base_url}/api/v1/sessions", {})
+        second = post_json(f"{base_url}/api/v1/sessions", {})
+        first_id = str(first["session"]["session_id"])
+        second_id = str(second["session"]["session_id"])
+
+        current = get_json(f"{base_url}/api/v1/session-state")
+        assert current["session"]["session_id"] == second_id
+        assert current["current_session"]["session_id"] == second_id
+
+        explicit = get_json(f"{base_url}/api/v1/session-state?session_id={first_id}")
+        assert explicit["session"]["session_id"] == first_id
+        pointer = json.loads((package / "current_session.json").read_text(encoding="utf-8"))
+        assert pointer["session_id"] == first_id
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_workspace_server_creates_anonymous_session_and_late_attribution(
     tmp_path: Path,
 ) -> None:
@@ -2028,7 +2122,9 @@ def test_workspace_server_exposes_versioned_api_contract(tmp_path: Path) -> None
             case_payload = json.loads(response.read().decode("utf-8"))
 
         assert schema["x-api-schema-version"] == "final_review_workspace_api.v1"
+        assert "current_session" in schema["definitions"]["WorkspaceSummary"]["properties"]
         assert summary["api_schema_version"] == "final_review_workspace_api.v1"
+        assert summary["current_session"] == {}
         assert summary["cases"]["synthetic"]["case_id"] == "synthetic"
         assert case_payload["source_frame_start"] == manifest.source_frame_start
     finally:
@@ -2559,6 +2655,7 @@ def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> N
         },
     )
     session_dir = create_session(package, manifest)
+    before_state = review_working_state.derive_working_state(package, session_dir)
     server = review_workspace.serve_workspace(package, port=0)
     base_url = f"http://127.0.0.1:{server.server_address[1]}"
     try:
@@ -2573,9 +2670,12 @@ def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> N
                 "task_id": "task_1",
             },
         )
+        after_state = response["working_state"]
 
         assert response["ok"] is True
         assert server.materialization_jobs.jobs == {}
+        assert after_state["active_projection_hash"] == before_state["active_projection_hash"]
+        assert after_state["audit_projection_hash"] != before_state["audit_projection_hash"]
     finally:
         server.shutdown()
         server.server_close()
@@ -2716,6 +2816,91 @@ def test_review_decision_api_enforces_authoritative_task_allowed_actions(
         assert legal_privacy["ok"] is True
         assert legal_not_sensitive["ok"] is True
         assert entity_green["ok"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_corrupt_decision_snapshot_is_rebuilt_from_event_log(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = synthetic_case_manifest(package)
+    write_json(package / "configuration_freeze.json", {"schema_version": "test"})
+    write_json(package / "workspace_manifest.json", {"case_count": 1})
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": list(review_sessions.CANONICAL_REVIEW_ACTIONS),
+                    "blocking": False,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "correction_required": False,
+                    "review_task_id": "task_1",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "technical_only": False,
+                },
+                {
+                    "allowed_actions": list(review_sessions.CANONICAL_REVIEW_ACTIONS),
+                    "blocking": False,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "correction_required": False,
+                    "review_task_id": "task_2",
+                    "source_frame_end": 1,
+                    "source_frame_start": 1,
+                    "technical_only": False,
+                },
+            ]
+        },
+    )
+    session_dir = create_session(package, manifest)
+    review_sessions.append_decision_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id="task_1",
+        action=review_sessions.ACTION_LOOKS_CORRECT,
+        note="first decision",
+    )
+    snapshot_path = session_dir / "decisions_current.json"
+    snapshot_path.write_text(
+        snapshot_path.read_text(encoding="utf-8") + '{"extra": true}\n',
+        encoding="utf-8",
+    )
+
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = post_json(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_NOT_SENSITIVE,
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "note": "second decision",
+                "session_id": session_dir.name,
+                "task_id": "task_2",
+            },
+        )
+        recovered = review_sessions.load_current_decisions_by_case(session_dir)
+        evidence_dir = session_dir / "state" / "recovery_evidence"
+
+        assert response["ok"] is True
+        assert response["working_state"]["task_decisions_by_case"][manifest.case_id]["task_2"][
+            "action"
+        ] == review_sessions.ACTION_NOT_SENSITIVE
+        assert (
+            recovered[manifest.case_id]["task_1"]["action"]
+            == review_sessions.ACTION_LOOKS_CORRECT
+        )
+        assert (
+            recovered[manifest.case_id]["task_2"]["action"]
+            == review_sessions.ACTION_NOT_SENSITIVE
+        )
+        assert list(evidence_dir.glob("decisions_current.*.corrupt.json"))
+        assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
     finally:
         server.shutdown()
         server.server_close()
@@ -5345,9 +5530,10 @@ def test_supported_canonical_publication_failure_never_writes_current_pointer(
     )
 
     assert retry["latest_reviewed"]["revision_id"].startswith("latest_reviewed_")
-    assert json.loads((package / "latest_reviewed" / "current.json").read_text())[
-        "status"
-    ] == "ready"
+    assert (
+        reviewed_regions.load_current_pointer(package, case_id=manifest.case_id)["status"]
+        == "ready"
+    )
 
 
 def test_generated_browser_code_keeps_correction_preview_distinct() -> None:
@@ -5512,7 +5698,10 @@ def test_supported_canonical_public_workflow_publishes_authoritative_latest_only
             .read()
             .decode("utf-8")
         )
-        pointer = json.loads((package / "latest_reviewed" / "current.json").read_text())
+        pointer = reviewed_regions.load_current_pointer(
+            package,
+            case_id=manifest.case_id,
+        )
         latest = next(role for role in after_versions if role["role"] == "latest_reviewed")
         finalization = json.loads((package / "workspace_manifest.json").read_text())[
             "lifecycle"
@@ -5590,11 +5779,31 @@ def test_supported_canonical_public_sweep_finalize_and_versions(
                 "viewed_ranges": [{"start": 0, "end": 4}],
             },
         )
+        missing_status, missing_body = post_json_error(
+            f"{base_url}/api/finalize",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "session_id": session["session_id"],
+            },
+        )
+        finalization_status = json.loads(
+            urllib.request.urlopen(
+                (
+                    f"{base_url}/api/v1/finalization-status"
+                    f"?case_id={manifest.case_id}&session_id={session['session_id']}"
+                ),
+                timeout=5,
+            )
+            .read()
+            .decode("utf-8")
+        )["result"]
         finalize_response = post_json(
             f"{base_url}/api/finalize",
             {
                 "actor": {"reviewer_id": "analyst@example.test"},
                 "case_id": manifest.case_id,
+                "finalization_request": finalization_status["finalization_request"],
                 "session_id": session["session_id"],
             },
         )
@@ -5624,12 +5833,210 @@ def test_supported_canonical_public_sweep_finalize_and_versions(
         assert sweep_response["working_state"]["sweep_acknowledgements"][manifest.case_id][
             "latest_reviewed_revision_id"
         ] == materialization["revision_id"]
+        assert missing_status == 409
+        assert missing_body["ok"] is False
+        assert finalization_status["ready"] is True
+        assert finalization_status["finalization_request"]["latest_reviewed_revision_id"] == (
+            materialization["revision_id"]
+        )
         assert finalize_response["ok"] is True
         assert finalize_response["result"]["final_video_sha256"] == materialization["video_sha256"]
         assert "final_reviewed" in {role["role"] for role in after_finalize}
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_finalization_status_read_only_and_bound_finalize_fail_closed(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        session_dir = review_sessions.session_directory(package, session["session_id"])
+        state = review_working_state.derive_working_state(package, session_dir)
+        review_working_state.materialize_latest_reviewed(
+            package,
+            session_dir,
+            case_id=manifest.case_id,
+            accepted_revision=state["active_projection_hash"],
+        )
+        post_json(
+            f"{base_url}/api/events/sweep",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "session_id": session["session_id"],
+                "viewed_ranges": [{"start": 0, "end": 4}],
+            },
+        )
+        before_events = review_sessions.load_events(session_dir)
+        status = get_json(
+            f"{base_url}/api/v1/finalization-status"
+            f"?case_id={manifest.case_id}&session_id={session['session_id']}"
+        )["result"]
+        after_status_events = review_sessions.load_events(session_dir)
+        missing_status, missing_body = post_json_error(
+            f"{base_url}/api/finalize",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "session_id": session["session_id"],
+            },
+        )
+        after_missing_events = review_sessions.load_events(session_dir)
+        wrong_request = dict(status["finalization_request"]) | {
+            "latest_reviewed_revision_id": "latest_reviewed_wrong"
+        }
+        mismatch_response = post_json(
+            f"{base_url}/api/finalize",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "finalization_request": wrong_request,
+                "session_id": session["session_id"],
+            },
+        )
+        after_mismatch_events = review_sessions.load_events(session_dir)
+
+        assert status["ready"] is True
+        assert status["finalized"] is False
+        assert status["finalization_request"]["latest_reviewed_revision_id"].startswith(
+            "latest_reviewed_"
+        )
+        assert after_status_events == before_events
+        assert missing_status == 409
+        assert missing_body["ok"] is False
+        assert after_missing_events == before_events
+        assert mismatch_response["ok"] is False
+        assert mismatch_response["result"]["finalized"] is False
+        assert after_mismatch_events[-1]["event_type"] == "finalization_attempt_blocked"
+        assert not list((package / "final" / "revisions").glob("finalization_*"))
+        assert not review_finalization.current_final_role(
+            package,
+            session_dir,
+            case_id=manifest.case_id,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_day_night_latest_final_sweep_and_reopen_are_case_scoped(
+    tmp_path: Path,
+) -> None:
+    package, day, night, session_dir = write_duplicate_task_case_package(tmp_path)
+
+    day_materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=day.case_id,
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+    night_materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=night.case_id,
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+    after_latest = review_working_state.derive_working_state(package, session_dir)
+
+    day_sweep = acknowledge_current_latest_reviewed(package, session_dir, day.case_id)
+    night_sweep = acknowledge_current_latest_reviewed(package, session_dir, night.case_id)
+    after_sweeps = review_working_state.derive_working_state(package, session_dir)
+    day_final = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=day.case_id,
+        session_dir=session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+    )
+    night_final = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=night.case_id,
+        session_dir=session_dir,
+        actor={"reviewer_id": "analyst@example.test"},
+    )
+    reopen = review_finalization.reopen_case_final_for_review(
+        package_root=package,
+        case_id=day.case_id,
+        session_dir=session_dir,
+        actor={"role": "system_reopen"},
+        reason="review workflow stabilization after unintended finalization",
+    )
+    after_reopen = review_working_state.derive_working_state(
+        package,
+        session_dir,
+        write_snapshot=False,
+    )
+
+    assert set(after_latest["materialized_latest_reviewed"]) == {"day", "night"}
+    assert reviewed_regions.load_current_pointer(package, case_id=day.case_id)[
+        "revision_id"
+    ] == day_materialization["revision_id"]
+    assert reviewed_regions.load_current_pointer(package, case_id=night.case_id)[
+        "revision_id"
+    ] == night_materialization["revision_id"]
+    assert set(after_sweeps["sweep_acknowledgements"]) == {"day", "night"}
+    assert day_sweep["after_state"]["latest_reviewed_revision_id"] == (
+        day_materialization["revision_id"]
+    )
+    assert night_sweep["after_state"]["latest_reviewed_revision_id"] == (
+        night_materialization["revision_id"]
+    )
+    assert day_final["finalized"] is True
+    assert night_final["finalized"] is True
+    assert review_finalization.current_final_role(
+        package,
+        session_dir,
+        case_id=night.case_id,
+    )["finalization_id"] == night_final["finalization_id"]
+    assert reopen["finalization_id"] == day_final["finalization_id"]
+    assert review_finalization.load_current_final_pointer(
+        package,
+        case_id=day.case_id,
+    )["status"] == "historical"
+    assert not review_finalization.current_final_role(
+        package,
+        session_dir,
+        case_id=day.case_id,
+    )
+    assert review_finalization.current_final_role(
+        package,
+        session_dir,
+        case_id=night.case_id,
+    )["finalization_id"] == night_final["finalization_id"]
+    assert set(after_reopen["materialized_latest_reviewed"]) == {"day", "night"}
+    assert set(after_reopen["sweep_acknowledgements"]) == {"night"}
+    assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
+    assert (
+        package
+        / "final"
+        / "revisions"
+        / day_final["finalization_id"]
+        / "final_reviewed.mp4"
+    ).exists()
 
 
 def test_supported_canonical_legacy_projection_pointer_survives_sweep_and_finalization(
@@ -5782,9 +6189,11 @@ def test_supported_canonical_unknown_projection_schema_blocks_pointer(
         accepted_revision=state["active_projection_hash"],
     )
     pointer_path = package / "latest_reviewed" / "current.json"
-    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer = reviewed_regions.load_current_pointer(package, case_id=manifest.case_id)
     pointer["active_projection_hash_schema_version"] = "active_projection.future"
-    write_json(pointer_path, pointer)
+    pointer_index = reviewed_regions.current_pointer_index_payload(package)
+    pointer_index["cases"][manifest.case_id] = pointer
+    write_json(pointer_path, pointer_index)
 
     stale_state = review_working_state.derive_working_state(package, session_dir)
     result = review_finalization.finalize_reviewed_case(
@@ -5825,10 +6234,13 @@ def test_supported_canonical_projection_hash_is_copy_independent_and_corrupt_has
     original = review_working_state.derive_working_state(package, session_dir)
     copied_state = review_working_state.derive_working_state(copied, copied_session_dir)
     pointer_path = copied / "latest_reviewed" / "current.json"
-    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    pointer = reviewed_regions.load_current_pointer(copied, case_id=manifest.case_id)
     pointer["working_state_projection_hash"] = "0" * 64
     pointer["accepted_working_state_revision"] = "0" * 64
-    write_json(pointer_path, pointer)
+    pointer["reviewed_region_set_sha256"] = "0" * 64
+    pointer_index = reviewed_regions.current_pointer_index_payload(copied)
+    pointer_index["cases"][manifest.case_id] = pointer
+    write_json(pointer_path, pointer_index)
     corrupted = review_working_state.derive_working_state(copied, copied_session_dir)
 
     assert original["active_projection_hashes"] == copied_state["active_projection_hashes"]
@@ -5953,10 +6365,6 @@ def test_supported_canonical_public_guidance_does_not_block_publication(
             },
         )
         retry_response = post_json(f"{base_url}/api/corrections", save_payload)
-        retry_job = wait_for_materialization_job(
-            server,
-            str(retry_response["materialization_job"]["job_id"]),
-        )
         after_versions = json.loads(
             urllib.request.urlopen(
                 (
@@ -5968,7 +6376,10 @@ def test_supported_canonical_public_guidance_does_not_block_publication(
             .read()
             .decode("utf-8")
         )["versions"]
-        pointer = json.loads((package / "latest_reviewed" / "current.json").read_text())
+        pointer = reviewed_regions.load_current_pointer(
+            package,
+            case_id=manifest.case_id,
+        )
         latest = next(role for role in after_versions if role["role"] == "latest_reviewed")
         lifecycle = json.loads((package / "workspace_manifest.json").read_text())[
             "lifecycle"
@@ -5980,7 +6391,9 @@ def test_supported_canonical_public_guidance_does_not_block_publication(
         assert guidance_snapshot["guidance_unreviewed_task_ids"] == ["plate_task_1"]
         assert decision_response["ok"] is True
         assert retry_response["idempotent_retry"] is True
-        assert retry_job["status"] == "completed"
+        assert retry_response["materialization_required"] is False
+        assert retry_response["materialization_job"] is None
+        assert retry_response["materialization_plan"]["materialization_strategy"] == "no_op"
         assert pointer["status"] == "ready"
         assert latest["revision_id"] == pointer["revision_id"]
         assert lifecycle["finalization"]["status"] == "not_run"
@@ -6028,7 +6441,10 @@ def test_supported_canonical_materializes_revision_versions_and_reset(
     case_manifest = case_manifests.load_case_manifest(
         package / "cases" / f"{manifest.case_id}.json"
     )
-    current_pointer = json.loads((package / "latest_reviewed" / "current.json").read_text())
+    current_pointer = reviewed_regions.load_current_pointer(
+        package,
+        case_id=manifest.case_id,
+    )
 
     assert "latest_reviewed" not in {role["role"] for role in before_versions}
     assert "latest_reviewed" in {role["role"] for role in after_versions}
@@ -6058,7 +6474,10 @@ def test_supported_canonical_materializes_revision_versions_and_reset(
         case_id=manifest.case_id,
     )["versions"]
     reset_manifest = json.loads((package / "workspace_manifest.json").read_text())
-    reset_pointer = json.loads((package / "latest_reviewed" / "current.json").read_text())
+    reset_pointer = reviewed_regions.load_current_pointer(
+        package,
+        case_id=manifest.case_id,
+    )
 
     assert reset_state["materialized_latest_reviewed"] == {}
     assert "latest_reviewed" not in {role["role"] for role in reset_versions}
@@ -6110,7 +6529,10 @@ def test_supported_canonical_finalization_approves_latest_reviewed_bytes(
         session_dir,
         case_id=manifest.case_id,
     )["versions"]
-    pointer = json.loads((package / "final" / "current.json").read_text(encoding="utf-8"))
+    pointer = review_finalization.load_current_final_pointer(
+        package,
+        case_id=manifest.case_id,
+    )
     repeat = review_finalization.finalize_reviewed_case(
         package_root=package,
         case_id=manifest.case_id,
@@ -6270,7 +6692,10 @@ def test_supported_canonical_review_change_invalidates_current_final(
         session_dir,
         case_id=manifest.case_id,
     )["versions"]
-    pointer = json.loads((package / "final" / "current.json").read_text(encoding="utf-8"))
+    pointer = review_finalization.load_current_final_pointer(
+        package,
+        case_id=manifest.case_id,
+    )
 
     assert finalized["finalized"] is True
     assert "final_reviewed" in {role["role"] for role in current_versions}
@@ -6379,8 +6804,9 @@ def test_supported_canonical_new_event_invalidates_current_latest_until_republis
         case_id=manifest.case_id,
         session_dir=session_dir,
     )
-    pointer_after_change = json.loads(
-        (package / "latest_reviewed" / "current.json").read_text()
+    pointer_after_change = reviewed_regions.load_current_pointer(
+        package,
+        case_id=manifest.case_id,
     )
 
     republished = review_working_state.materialize_latest_reviewed(

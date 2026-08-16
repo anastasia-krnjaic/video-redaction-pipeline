@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import uuid
@@ -74,6 +75,8 @@ DECISION_LABELS = {
 }
 
 REQUIRED_ACTIONS = review_sessions.CANONICAL_REVIEW_ACTIONS
+WORKSPACE_WRITER_LOCK_NAME = ".review_workspace_writer.lock"
+CURRENT_SESSION_POINTER_NAME = "current_session.json"
 
 
 @dataclass(frozen=True)
@@ -4844,9 +4847,122 @@ def finalization_blocker_group_label(key: str) -> str:
     return "Technical finalization blocker"
 
 
-class FinalReviewWorkspaceServer(ThreadingHTTPServer):
-    def __init__(self, server_address: tuple[str, int], package_root: Path) -> None:
+class WorkspaceWriterLockError(RuntimeError):
+    """Raised when a writable review workspace is already owned by another process."""
+
+
+class WorkspaceWriterLock:
+    def __init__(self, package_root: Path, *, host: str, port: int) -> None:
         self.package_root = package_root.resolve()
+        self.host = host
+        self.port = int(port)
+        self.path = self.package_root / WORKSPACE_WRITER_LOCK_NAME
+        self.lock_path = workspace_writer_os_lock_path(self.package_root)
+        self._file: Any | None = None
+
+    def acquire(self) -> None:
+        import fcntl
+        import socket
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        file = self.lock_path.open("a+", encoding="utf-8")
+        try:
+            fcntl.flock(file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            owner = self._read_owner_from_path(self.path) or self._read_owner_from_file(file)
+            endpoint = owner_endpoint(owner)
+            file.close()
+            raise WorkspaceWriterLockError(
+                f"This review workspace is already open for editing at {endpoint}."
+            ) from exc
+        self._file = file
+        self._write_owner(
+            {
+                "host": self.host,
+                "hostname": socket.gethostname(),
+                "pid": os.getpid(),
+                "port": self.port,
+                "schema_version": "review_workspace_writer_lock.v1",
+                "start_time_utc": media.utc_timestamp(),
+                "workspace_hash": stable_hash(workspace_identity_hashes(self.package_root)),
+                "workspace_path": self.package_root.as_posix(),
+            }
+        )
+
+    def update_port(self, port: int) -> None:
+        if self._file is None:
+            return
+        owner = self.owner() | {"port": int(port)}
+        self.port = int(port)
+        self._write_owner(owner)
+
+    def owner(self) -> dict[str, Any]:
+        if self._file is None:
+            return {}
+        return self._read_owner_from_file(self._file)
+
+    def release(self) -> None:
+        if self._file is None:
+            return
+        import fcntl
+
+        file = self._file
+        self._file = None
+        try:
+            fcntl.flock(file.fileno(), fcntl.LOCK_UN)
+        finally:
+            file.close()
+
+    def _write_owner(self, owner: dict[str, Any]) -> None:
+        if self._file is None:
+            return
+        self._file.seek(0)
+        self._file.truncate()
+        json.dump(owner, self._file, indent=2, sort_keys=True)
+        self._file.write("\n")
+        self._file.flush()
+        os.fsync(self._file.fileno())
+        write_json(self.path, owner)
+
+    @staticmethod
+    def _read_owner_from_file(file: Any) -> dict[str, Any]:
+        try:
+            file.seek(0)
+            text = file.read()
+            return dict(json.loads(text)) if text.strip() else {}
+        except (OSError, TypeError, json.JSONDecodeError):
+            return {}
+
+    @staticmethod
+    def _read_owner_from_path(path: Path) -> dict[str, Any]:
+        try:
+            return read_json_file(path)
+        except (OSError, TypeError, json.JSONDecodeError, FileNotFoundError):
+            return {}
+
+
+def owner_endpoint(owner: dict[str, Any]) -> str:
+    host = str(owner.get("host") or owner.get("hostname") or "unknown-host")
+    port = owner.get("port")
+    return f"{host}:{port}" if port not in {None, ""} else host
+
+
+def workspace_writer_os_lock_path(package_root: Path) -> Path:
+    lock_key = stable_hash({"workspace_path": package_root.resolve().as_posix()})
+    return Path(tempfile.gettempdir()) / "video_redaction_review_workspace_locks" / f"{lock_key}.lock"
+
+
+class FinalReviewWorkspaceServer(ThreadingHTTPServer):
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        package_root: Path,
+        *,
+        writer_lock: WorkspaceWriterLock,
+    ) -> None:
+        self.package_root = package_root.resolve()
+        self.writer_lock = writer_lock
         self.materialization_jobs = MaterializationJobManager(self.package_root)
         super().__init__(server_address, FinalReviewWorkspaceHandler)
 
@@ -4856,7 +4972,10 @@ class FinalReviewWorkspaceServer(ThreadingHTTPServer):
 
     def server_close(self) -> None:
         self.materialization_jobs.shutdown()
-        super().server_close()
+        try:
+            super().server_close()
+        finally:
+            self.writer_lock.release()
 
 
 class MaterializationJobManager:
@@ -6063,6 +6182,41 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     case_id=case_id,
                     session_dir=session_dir,
                 )
+                final_role = review_finalization.current_final_role(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=case_id,
+                )
+                historical_final = {}
+                final_pointer = review_finalization.load_current_final_pointer(
+                    self.server.package_root,
+                    case_id=case_id,
+                )
+                if final_pointer and final_pointer.get("current") is not True:
+                    historical_final = {
+                        "final_video": final_pointer.get("final_video"),
+                        "final_video_sha256": final_pointer.get("final_video_sha256"),
+                        "finalization_id": final_pointer.get("finalization_id"),
+                        "historical_status": final_pointer.get("historical_status"),
+                        "latest_reviewed_revision_id": final_pointer.get(
+                            "approved_latest_reviewed_revision_id"
+                        ),
+                        "reopened_at_utc": final_pointer.get("reopened_at_utc"),
+                        "reopened_by_event_hash": final_pointer.get(
+                            "reopened_by_event_hash"
+                        ),
+                        "status": final_pointer.get("status"),
+                    }
+                request_binding = None
+                if blockers["ready"] and not final_role:
+                    try:
+                        request_binding = review_finalization.finalization_request_binding(
+                            package_root=self.server.package_root,
+                            case_id=case_id,
+                            session_dir=session_dir,
+                        )
+                    except (FileNotFoundError, KeyError, ValueError):
+                        request_binding = None
             except (FileNotFoundError, KeyError, ValueError) as exc:
                 self.send_json(
                     {"error": str(exc), "ok": False},
@@ -6077,7 +6231,12 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                         "blocker_groups": finalization_blocker_groups(blockers["blockers"]),
                         "blockers": blockers["blockers"],
                         "case_id": case_id,
-                        "finalized": False,
+                        "final_video": final_role.get("path"),
+                        "final_video_sha256": final_role.get("sha256"),
+                        "finalization_id": final_role.get("finalization_id"),
+                        "finalization_request": request_binding,
+                        "finalized": bool(final_role),
+                        "historical_final": historical_final,
                         "ready": blockers["ready"],
                         "review_guidance_policy_version": blockers.get(
                             "review_guidance_policy_version"
@@ -6102,7 +6261,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         if path == "/api/session-state":
             query = parse_qs(parsed.query)
             session_id = str((query.get("session_id") or [""])[0])
-            session_dir = review_sessions.session_directory(self.server.package_root, session_id)
+            session_dir = (
+                review_sessions.session_directory(self.server.package_root, session_id)
+                if session_id
+                else self.current_or_new_session_dir()
+            )
             if not session_dir.exists():
                 self.send_json(
                     {"error": "review session not found", "ok": False},
@@ -6120,11 +6283,13 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 self.server.package_root,
                 session_dir,
             )
+            pointer = write_current_session_pointer(self.server.package_root, session_dir)
             self.send_json(
                 {
                     "attribution": review_sessions.load_reviewer_attribution(session_dir),
                     "chain": review_sessions.validate_event_hash_chain(session_dir),
                     "corrections": list(working_state.get("manual_corrections") or []),
+                    "current_session": pointer,
                     "decisions": dict(working_state.get("task_decisions") or {}),
                     "decisions_by_case": dict(
                         working_state.get("task_decisions_by_case") or {}
@@ -6155,39 +6320,23 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         payload = self.read_json_body()
         path = legacy_api_path(urlparse(self.path).path)
         if path == "/api/sessions":
-            freeze_hash = stable_hash(
-                json.loads(
-                    (self.server.package_root / "configuration_freeze.json").read_text(
-                        encoding="utf-8"
-                    )
-                )
-            )
-            case_hashes: dict[str, str] = {}
-            source_hashes: dict[str, str] = {}
-            for case_id in workspace_case_ids(self.server.package_root):
-                case_path = workspace_case_manifest_path(self.server.package_root, case_id)
-                if case_path.exists():
-                    case_payload = json.loads(case_path.read_text(encoding="utf-8"))
-                    case_hashes[case_id] = stable_hash(case_payload)
-                    if case_payload.get("source_video_hash"):
-                        source_hashes[case_id] = str(case_payload["source_video_hash"])
-            session = review_sessions.create_review_session(
-                package_root=self.server.package_root,
-                reviewer=review_sessions.reviewer_identity_from_dict(payload.get("reviewer") or {}),
-                source_revision=payload.get("source_revision"),
-                configuration_freeze_hash=freeze_hash,
-                case_manifest_hashes=case_hashes,
-                source_hashes=source_hashes,
-                workspace_identity_hashes=workspace_identity_hashes(self.server.package_root),
-                user_agent=self.headers.get("User-Agent"),
-                include_hostname=bool(payload.get("include_hostname")),
+            session = self.create_workspace_session(payload)
+            session_dir = review_sessions.session_directory(
+                self.server.package_root,
+                session.session_id,
             )
             working_state = review_working_state.derive_working_state(
                 self.server.package_root,
-                review_sessions.session_directory(self.server.package_root, session.session_id),
+                session_dir,
             )
+            pointer = write_current_session_pointer(self.server.package_root, session_dir)
             self.send_json(
-                {"ok": True, "session": session.to_dict(), "working_state": working_state}
+                {
+                    "current_session": pointer,
+                    "ok": True,
+                    "session": session.to_dict(),
+                    "working_state": working_state,
+                }
             )
             return
         session_dir = review_sessions.session_directory(
@@ -6326,23 +6475,25 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     return
                 tasks.append(task)
             group_id = str(payload.get("review_group_id") or payload.get("group_id") or "")
-            events = [
-                review_sessions.append_decision_event(
-                    session_dir,
-                    actor=actor,
-                    case_id=decision_case_id,
-                    task_id=str(task["review_task_id"]),
-                    action=action,
-                    note=str(payload.get("note") or "Review group action."),
-                    task_before_state=task,
-                    application_hashes={
-                        "child_task_count": str(len(task_ids)),
-                        "child_task_set_hash": stable_hash(task_ids),
-                        "review_group_id": group_id,
-                    },
-                )
+            events = review_sessions.append_decision_events(
+                session_dir,
+                actor=actor,
+                case_id=decision_case_id,
+                decisions=[
+                    {
+                        "action": action,
+                        "application_hashes": {
+                            "child_task_count": str(len(task_ids)),
+                            "child_task_set_hash": stable_hash(task_ids),
+                            "review_group_id": group_id,
+                        },
+                        "note": str(payload.get("note") or "Review group action."),
+                        "task_before_state": task,
+                        "task_id": str(task["review_task_id"]),
+                    }
                 for task in tasks
-            ]
+                ],
+            )
             self.send_json(
                 {
                     "events": events,
@@ -6947,12 +7098,56 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 self.server.package_root,
                 str(payload["case_id"]),
             )
+            expected_payload = dict(
+                payload.get("finalization_request")
+                or payload.get("request_binding")
+                or payload
+            )
+            required_expected = {
+                "expected_latest_reviewed_revision_id": (
+                    expected_payload.get("expected_latest_reviewed_revision_id")
+                    or expected_payload.get("latest_reviewed_revision_id")
+                ),
+                "expected_reviewed_region_set_sha256": (
+                    expected_payload.get("expected_reviewed_region_set_sha256")
+                    or expected_payload.get("reviewed_region_set_sha256")
+                ),
+                "expected_sweep_acknowledgement_sha256": (
+                    expected_payload.get("expected_sweep_acknowledgement_sha256")
+                    or expected_payload.get("sweep_acknowledgement_sha256")
+                ),
+            }
+            missing_expected = [
+                key for key, value in required_expected.items() if not value
+            ]
+            if missing_expected:
+                self.send_json(
+                    {
+                        "error": (
+                            "finalize requires exact current Latest, reviewed-region, "
+                            "and sweep identities"
+                        ),
+                        "missing": missing_expected,
+                        "ok": False,
+                    },
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
             result = review_finalization.finalize_reviewed_case(
                 package_root=self.server.package_root,
                 case_id=finalize_case_id,
                 session_dir=session_dir,
                 actor=actor,
                 overwrite=bool(payload.get("overwrite")),
+                expected_latest_reviewed_revision_id=str(
+                    required_expected["expected_latest_reviewed_revision_id"]
+                ),
+                expected_reviewed_region_set_sha256=str(
+                    required_expected["expected_reviewed_region_set_sha256"]
+                ),
+                expected_sweep_acknowledgement_sha256=str(
+                    required_expected["expected_sweep_acknowledgement_sha256"]
+                ),
             )
             attempt_event = None
             if result.get("finalized", False):
@@ -7003,6 +7198,42 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             )
             return None
         return session_dir
+
+    def current_or_new_session_dir(self) -> Path:
+        current = valid_current_session_dir(self.server.package_root)
+        if current is not None:
+            return current
+        session = self.create_workspace_session({})
+        return review_sessions.session_directory(self.server.package_root, session.session_id)
+
+    def create_workspace_session(self, payload: dict[str, Any]) -> review_sessions.ReviewSession:
+        freeze_hash = stable_hash(
+            json.loads(
+                (self.server.package_root / "configuration_freeze.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        )
+        case_hashes: dict[str, str] = {}
+        source_hashes: dict[str, str] = {}
+        for case_id in workspace_case_ids(self.server.package_root):
+            case_path = workspace_case_manifest_path(self.server.package_root, case_id)
+            if case_path.exists():
+                case_payload = json.loads(case_path.read_text(encoding="utf-8"))
+                case_hashes[case_id] = stable_hash(case_payload)
+                if case_payload.get("source_video_hash"):
+                    source_hashes[case_id] = str(case_payload["source_video_hash"])
+        return review_sessions.create_review_session(
+            package_root=self.server.package_root,
+            reviewer=review_sessions.reviewer_identity_from_dict(payload.get("reviewer") or {}),
+            source_revision=payload.get("source_revision"),
+            configuration_freeze_hash=freeze_hash,
+            case_manifest_hashes=case_hashes,
+            source_hashes=source_hashes,
+            workspace_identity_hashes=workspace_identity_hashes(self.server.package_root),
+            user_agent=self.headers.get("User-Agent"),
+            include_hostname=bool(payload.get("include_hostname")),
+        )
 
     def plan_materialization_for_case(
         self,
@@ -7503,11 +7734,26 @@ def serve_workspace(
     open_browser: bool = False,
 ) -> FinalReviewWorkspaceServer:
     mimetypes.add_type("video/mp4", ".mp4")
-    server = FinalReviewWorkspaceServer(("127.0.0.1", port), package_root)
+    writer_lock = WorkspaceWriterLock(package_root, host="127.0.0.1", port=port)
+    writer_lock.acquire()
+    try:
+        server = FinalReviewWorkspaceServer(
+            ("127.0.0.1", port),
+            package_root,
+            writer_lock=writer_lock,
+        )
+        writer_lock.update_port(int(server.server_address[1]))
+    except Exception:
+        writer_lock.release()
+        raise
     if open_browser:
         webbrowser.open(f"http://127.0.0.1:{server.server_address[1]}/index.html")
     thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    try:
+        thread.start()
+    except Exception:
+        server.server_close()
+        raise
     return server
 
 
@@ -8177,7 +8423,13 @@ def day_lineage_report_text(lineage: dict[str, Any], blockers: list[str]) -> str
 
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    with temp_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, sort_keys=True)
+        file.write("\n")
+        file.flush()
+        os.fsync(file.fileno())
+    os.replace(temp_path, path)
 
 
 def write_text(path: Path, text: str) -> None:
@@ -8332,6 +8584,57 @@ def validate_session_workspace_binding(package_root: Path, session_dir: Path) ->
             "schema_version": "workspace_session_binding_validation.v1",
         }
     return {"ok": True, "schema_version": "workspace_session_binding_validation.v1"}
+
+
+def current_session_pointer_path(package_root: Path) -> Path:
+    return package_root.resolve() / CURRENT_SESSION_POINTER_NAME
+
+
+def read_current_session_pointer(package_root: Path) -> dict[str, Any] | None:
+    path = current_session_pointer_path(package_root)
+    if not path.exists():
+        return None
+    payload = read_json_file(path)
+    if payload.get("schema_version") != "review_workspace_current_session.v1":
+        return None
+    return payload
+
+
+def valid_current_session_dir(package_root: Path) -> Path | None:
+    pointer = read_current_session_pointer(package_root)
+    if not pointer:
+        return None
+    session_id = str(pointer.get("session_id") or "")
+    if not session_id:
+        return None
+    try:
+        session_dir = review_sessions.session_directory(package_root, session_id)
+    except ValueError:
+        return None
+    if not session_dir.exists():
+        return None
+    binding = validate_session_workspace_binding(package_root, session_dir)
+    if not binding.get("ok"):
+        return None
+    return session_dir
+
+
+def write_current_session_pointer(package_root: Path, session_dir: Path) -> dict[str, Any]:
+    package_root = package_root.resolve()
+    session_dir = session_dir.resolve()
+    session = read_json_file(session_dir / "review_session.json")
+    pointer = {
+        "case_manifest_hashes": dict(session.get("case_manifest_hashes") or {}),
+        "event_chain_head": review_sessions.last_event_hash(session_dir),
+        "schema_version": "review_workspace_current_session.v1",
+        "session_id": session_dir.name,
+        "source_hashes": dict(session.get("source_hashes") or {}),
+        "updated_at_utc": media.utc_timestamp(),
+        "workspace_identity_hashes": workspace_identity_hashes(package_root),
+        "workspace_path": package_root.as_posix(),
+    }
+    write_json(current_session_pointer_path(package_root), pointer)
+    return pointer
 
 
 def load_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
@@ -8827,8 +9130,8 @@ function closeAttributionModal() { document.getElementById('attributionModal').c
 async function submitAttribution() { if (!state.session) return showSessionError('Start review before setting attribution.'); const name = document.getElementById('reviewerName').value.trim(); if (!name) { document.getElementById('attributionError').textContent = 'Reviewer name is required.'; return; } try { const res = await postJson('/api/reviewer-attribution', { session_id: state.session.session_id, display_name: name, actor: currentActor(), note: 'Reviewer attribution set.' }); state.attribution = res.attribution; await loadSessionState(state.session.session_id, state.sessionLoadKind || 'resumed'); closeAttributionModal(); renderApp(); } catch (err) { document.getElementById('attributionError').textContent = err.message; } }
 function exportSession() { if (!state.session) return showSessionError('Start review before exporting.'); if (!state.attribution?.display_name) { openAttributionModal(); return; } window.open(`sessions/${state.session.session_id}/review_summary.json`, '_blank'); }
 function renderAudit() { const panel = document.getElementById('case-audit'); panel.innerHTML = `<h2>Audit Trail</h2><p class="case-subtitle">Append-only events with hash-chain validation.</p><div class="audit-list">${(state.events || []).map(e => `<article class="audit-card"><strong>${esc(e.event_type)}</strong><p class="task-meta">${esc(e.timestamp_utc)} · ${esc(e.case_id || 'workspace')}</p><p>${esc(e.note || '')}</p><details><summary>Technical JSON</summary><pre>${esc(JSON.stringify(e, null, 2))}</pre></details></article>`).join('') || '<p class="muted">No events yet.</p>'}</div><details class="technical"><summary>Raw audit signals preserved outside the normal queue (${(DATA.rawSignals?.raw_signals || []).length})</summary><pre>${esc(JSON.stringify(DATA.rawSignals, null, 2))}</pre></details>`; }
-function renderFinal() { const panel = document.getElementById('case-final'); const buttons = caseIds().map(id => `<button data-finalize-case="${esc(id)}">Check ${esc(caseLabel(id))} finalization</button>`).join(''); panel.innerHTML = `<h2>Final Results</h2><p class="case-subtitle">Reviewed-final outputs remain unavailable until finalization gates pass.</p><div class="final-card"><p class="muted">Finalization is currently controlled by the same validated backend gates. Use Review/Edit to resolve blockers, then finalize from the supported workflow.</p><div class="button-row">${buttons}</div><pre id="finalizeStatus"></pre></div>`; panel.querySelectorAll('[data-finalize-case]').forEach(btn => btn.addEventListener('click', () => finalizeCase(btn.dataset.finalizeCase))); }
-async function finalizeCase(caseId) { if (!state.session) return showSessionError('Start review before finalizing.'); if (!state.attribution?.display_name) { openAttributionModal(); return; } const out = document.getElementById('finalizeStatus'); try { const res = await postJson('/api/finalize', { session_id: state.session.session_id, actor: currentActor(), case_id: caseId }); out.textContent = JSON.stringify(res.result, null, 2); } catch (err) { out.textContent = `Finalization blocked: ${err.message}`; } }
+function renderFinal() { const panel = document.getElementById('case-final'); const buttons = caseIds().map(id => `<button data-finalize-status-case="${esc(id)}">Check ${esc(caseLabel(id))} status</button>`).join(''); panel.innerHTML = `<h2>Final Results</h2><p class="case-subtitle">Reviewed-final outputs remain unavailable until finalization gates pass.</p><div class="final-card"><p class="muted">Status checks are read-only. Create Final is available only in the current React workspace.</p><div class="button-row">${buttons}</div><pre id="finalizeStatus"></pre></div>`; panel.querySelectorAll('[data-finalize-status-case]').forEach(btn => btn.addEventListener('click', () => checkFinalizationStatus(btn.dataset.finalizeStatusCase))); }
+async function checkFinalizationStatus(caseId) { if (!state.session) return showSessionError('Start review before checking finalization status.'); const out = document.getElementById('finalizeStatus'); try { const res = await loadJson(`/api/v1/finalization-status?case_id=${encodeURIComponent(caseId)}&session_id=${encodeURIComponent(state.session.session_id)}`); out.textContent = JSON.stringify(res.result, null, 2); } catch (err) { out.textContent = `Finalization status unavailable: ${err.message}`; } }
 function actionLabel(action) { if (action === ACTIONS.looks) return 'Correct'; if (action === ACTIONS.leak) return 'Needs correction'; if (action === ACTIONS.notSensitive) return 'Not sensitive'; const found = (DATA.tasks?.actions || []).find(a => a.action === action); return found ? found.label : action; }
 function installGlobalHandlers() { document.body.tabIndex = -1; document.body.focus(); document.getElementById('startSession').addEventListener('click', startSession); document.getElementById('changeAttribution').addEventListener('click', openAttributionModal); document.getElementById('exportSession').addEventListener('click', exportSession); document.getElementById('submitAttribution').addEventListener('click', submitAttribution); document.getElementById('cancelAttribution').addEventListener('click', closeAttributionModal); document.getElementById('closeEntities')?.addEventListener('click', closeEntities); document.getElementById('cancelMerge')?.addEventListener('click', closeMergeModal); document.getElementById('confirmMerge')?.addEventListener('click', confirmMerge); window.addEventListener('keydown', onKeyDown, { capture: true }); document.addEventListener('fullscreenchange', () => { const caseId = visibleCaseId(); if (caseId) updatePlayerUi(caseId); }); }
 function isTextEntryTarget(element) { const tag = element?.tagName?.toLowerCase(); if (!tag) return false; if (element.isContentEditable) return true; if (tag === 'textarea' || tag === 'select') return true; if (tag !== 'input') return false; const type = String(element.type || 'text').toLowerCase(); return !['button','checkbox','color','file','hidden','image','radio','range','reset','submit'].includes(type); }

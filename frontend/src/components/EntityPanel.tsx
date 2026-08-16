@@ -85,7 +85,7 @@ export function EntityPanel({
           <div>
             <h2 id="entities-title">Review objects</h2>
             <p className="case-subtitle">
-              Review source-backed people and plates. These actions update Latest reviewed media after backend validation.
+              Review source-backed people and plates. These actions update reviewed media after backend validation.
             </p>
           </div>
           <button type="button" onClick={onClose}>
