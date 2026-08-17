@@ -67,11 +67,11 @@ record reviewer decisions, and add reviewed correction records as a separate
 provenance layer. It does not rerun or retune ADAS detection, ordinary tracking,
 privacy-gap recovery, or the accepted reviewed face corrections.
 
-Final Review Workspace v2.3 validates the expected ADAS XML/BIN hashes when it
-is built. It also indexes face regions into reviewer-facing entities such as
-`Person 01` instead of exposing raw detector track IDs in the default interface.
-Reviewed face corrections use explicit keyframes and checkpoint verification;
-unverified interpolation checkpoints block finalization.
+The current Final Review Workspace validates the expected ADAS XML/BIN hashes
+when it is built. It also indexes face regions into reviewer-facing entities
+such as `Person 01` instead of exposing raw detector track IDs in the default
+interface. Reviewed face corrections use explicit keyframes and validation;
+invalid or pending corrections block finalization.
 
 When finalization is requested, face regions come from frozen automatic face
 privacy regions plus existing accepted reviewed face corrections and any newly
@@ -330,7 +330,7 @@ Reviewer findings are not frozen Ground Truth. They can expose whole-video priva
 
 Review Bundle v1.2.3 also adds `redactor serve-review-bundle`. The command serves a bundle from `127.0.0.1` using the Python standard library, restricts paths to the selected bundle directory, sets MP4 MIME types for embedded playback, and makes no external network calls. The HTML keeps direct file links as a fallback and displays a `file://` hint recommending the localhost server.
 
-The guided page saves a decision immediately, updates progress, marks the selected action, and advances to the next pending required task before optional spot checks. If an optional random-audit task is marked `Needs review`, exported-decision validation treats it as a remaining final blocker until corrected regions are supplied and confirmed.
+The guided page saves a decision immediately, updates progress, marks the selected action, and advances to the next unresolved Guidance item before optional spot checks. In the release Review Workspace, unreviewed Guidance is advisory; only explicit Needs correction or invalid correction state remains blocking.
 
 Review Bundle v1.2.3.1 fixes the grouped media controls. The toolbar resolves comparison videos from the currently visible Guided-review task at click time, so `Play together`, `Pause together`, and `Restart media` do not act on the hidden View-all task list. View-all mode disables grouped playback with an explanatory message; direct native video controls and file links remain available for every clip.
 

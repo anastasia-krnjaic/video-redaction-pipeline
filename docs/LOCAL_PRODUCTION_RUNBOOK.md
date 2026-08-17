@@ -1,66 +1,70 @@
 # Local Production Runbook
 
-This project is designed for local review on `127.0.0.1`. It is not hardened for remote or multi-user deployment.
+This project is designed for local processing and review on `127.0.0.1`. It is not a remote multi-user service.
 
-## Build And Serve
+## Preflight
 
 ```bash
-cd /Users/anastasiasokolenko/Projects/video-redaction-pipeline
-cd frontend
-npm ci
-npm run build
-cd ..
-PYTHONPATH=src .venv/bin/python -m redactor.cli build-final-review-workspace \
-  --output-dir artifacts/final_pipeline_package_frontend_v1_5 \
-  --frontend react \
-  --react-reference-package artifacts/final_pipeline_package_frontend_v1_4_1 \
-  --skip-frontend-build \
-  --overwrite
-PYTHONPATH=src .venv/bin/python -m redactor.cli serve-final-review-workspace \
-  artifacts/final_pipeline_package_frontend_v1_5 --open
+source .venv/bin/activate
+redactor doctor
+npm --prefix frontend run build
 ```
 
-## Operational Checks
+Before serving a writable review workspace, confirm no other writable server owns it:
 
-Before review:
+```bash
+lsof -nP -iTCP:8765 -sTCP:LISTEN
+lsof -nP -iTCP:8766 -sTCP:LISTEN
+```
 
-- confirm the server is bound to `127.0.0.1`;
-- confirm `legacy.html` is still available;
-- confirm `/api/v1/schema` returns the checked-in schema version;
-- confirm Day and Night expose Original, Automatic, and Latest reviewed;
-- confirm MP4 Range requests return `206` for valid byte ranges.
+The application also enforces a per-workspace single-writer lock. If a previous process was killed, use the normal server startup path and let stale-lock validation decide whether the lock is reclaimable.
 
-During review:
+## Serve A Workspace
 
-- accepted object-policy, merge, correction, restore, or reset events should appear in History immediately;
-- media-changing work should show an operation-specific pending state, not a disabled workspace;
-- manual correction Save should show backend acceptance, then Latest reviewed publication progress, while preserving the active case and source frame;
-- no-op/idempotent media work should clear pending state without starting a materialization job;
-- failed publication should leave the last known-good Latest reviewed available and expose retry.
+For a locally available release workspace:
 
-After review:
+```bash
+redactor serve-final-review-workspace artifacts/reviewed_final_combined_v2_1/run_20260813T210250Z/review_workspace --open
+```
 
-- validate the session hash chain;
-- validate finalization blockers before export/finalization;
-- keep generated package/session artifacts local unless a separate data-handling process approves transfer.
+For a newly generated workspace:
 
-## Job Recovery
+```bash
+redactor serve-final-review-workspace artifacts/cases/example_automatic_preview/review_workspace --open
+```
 
-Jobs are scoped by session and case. Each queued media job records an accepted revision and target effective-region hash. Stale jobs cannot publish if the current effective-region hash has changed. If the server stops during a render, existing History remains append-only; the last known-good media remains published, and accepted state can be reloaded from the session event chain.
+Use one writable server per workspace. Open additional browser tabs against the same server rather than starting a second server on the same workspace.
 
-## Cleanup
+## During Review
 
-Do not delete current, checkpoint-referenced, finalization-referenced, or audit-referenced session media. Superseded temporary render files may be cleaned after verifying they are not referenced by a materialization manifest, checkpoint, History event, or final manifest.
+Operational checks:
+
+- the header session ID matches the URL session ID;
+- Guidance is advisory and auditable;
+- Needs correction is visibly blocking;
+- Manual Preview shows rendered privacy pixels;
+- Save correction shows saved/applying state until authoritative refresh;
+- Latest reviewed appears only when its pointer is current;
+- full-video approval is current only for the exact Latest reviewed revision;
+- Final appears only through the current Final pointer.
+
+## After Review
+
+Validate session state before relying on it:
+
+```bash
+redactor validate-review-session --session-dir SESSION_DIR
+redactor summarize-review-session --session-dir SESSION_DIR
+```
+
+Release delivery packages should be verified by checksum and extraction before transfer.
+
+## Recovery Notes
+
+Review events are append-only and hash-chained. Derived snapshots, Latest pointers, sweep state, and Final pointers are rebuildable or auditable from source state. If a server stops during materialization, the last valid current pointer remains authoritative until a compatible job publishes atomically.
+
+Do not manually edit session events, current pointers, Latest revisions, Final revisions, or delivery manifests.
 
 ## Remote Deployment Requirements
 
-Before any remote or multi-user deployment, add and validate:
-
-- authentication and authorization;
-- CSRF/origin controls;
-- TLS;
-- per-user/session data isolation;
-- request and storage quotas;
-- operational backup/restore;
-- centralized logging policy that avoids raw pixels and sensitive payloads;
-- security review for filesystem access and package data handling.
+Before any remote deployment, add and validate authentication, authorization, TLS, CSRF/origin controls, per-user data isolation, quota handling, operational backup/restore, and logging policy that avoids sensitive pixels and payloads.

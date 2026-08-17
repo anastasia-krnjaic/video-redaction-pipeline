@@ -282,16 +282,18 @@ plate rendering configuration frozen. Reviewer additions, replacements,
 suppressions, and not-sensitive decisions are stored as append-only
 reviewed-correction events that sit above the automatic plate evidence.
 
-Final Review Workspace v2.3 validates the expected OIM YOLOv9-S-608 ONNX hash
-before packaging. It indexes plate tracks into reviewer-facing entities such as
-`Plate 01`, separates editor overlay visibility from privacy policy, and supports
-multi-keyframe reviewed plate corrections with checkpoint verification.
+The current Final Review Workspace validates the expected OIM YOLOv9-S-608 ONNX
+hash before packaging. It indexes plate tracks into reviewer-facing entities
+such as `Plate 01`, separates editor overlay visibility from privacy policy, and
+supports multi-keyframe reviewed plate corrections with validation.
 
-`redactor finalize-reviewed-case` can render a reviewed-final case only when all
-blocking tasks are green, every correction has been verified, full-video sweep
-acknowledgement exists, source/configuration hashes match, event-log provenance
-validates, and media/rendered-region validation passes. If plate blockers remain,
-the current result remains a review-required preview rather than a final output.
+`redactor finalize-reviewed-case` can publish a reviewed-final case only when
+active Needs correction and invalid correction state are clear, full-video sweep
+acknowledgement exists for the exact current Latest reviewed revision,
+source/configuration hashes match, event-log provenance validates, and
+media/rendered-region validation passes. Unreviewed Guidance remains auditable
+and may be covered by the full-video sweep; genuine blockers keep the current
+result non-final.
 
 ## Historical Experiments
 

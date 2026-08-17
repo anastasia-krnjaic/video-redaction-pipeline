@@ -1,95 +1,52 @@
-# Video Redaction Pipeline Project Overview
+# Project Overview
 
-## What The System Does
+Video Redaction Pipeline is a local workflow for preparing privacy-redacted videos with auditable machine and human evidence. It detects faces and license plates, tracks them through time, renders privacy protection, supports manual correction, and publishes immutable Final media only after review gates pass.
 
-This project is a local video privacy-redaction prototype. It detects sensitive objects in video, follows them across time, renders redaction over approved regions, and creates review material for uncertain intervals.
+## Why Video Redaction Needs Review
 
-The current system covers two privacy-object categories:
+Video privacy is harder than still-image privacy because targets move, blur, leave the frame, reappear, overlap, and sometimes produce weak or missing detections. The system therefore treats detector output as evidence, not as a complete safety claim.
 
-- Faces
-- License plates
+The workflow combines:
 
-The system is designed for local processing. It does not upload videos, model output, or review data to a cloud service.
+- automatic detection and temporal tracking;
+- conservative privacy rendering over accepted regions;
+- human Guidance for uncertain or important source spans;
+- entity-level policy for people and plates;
+- manual corrections for visible issues;
+- full-video approval of the exact current reviewed video;
+- immutable Final publication and delivery checksums.
 
-## Why Video Privacy Redaction Is Difficult
+## Current Release Behavior
 
-Redacting one still image is usually straightforward: find the sensitive object, cover it, and save the result. Video is harder because privacy targets move, disappear, reappear, blur, shrink, cross behind other objects, and sometimes produce weak or missing detections.
+The release supports two privacy-object categories:
 
-If each frame is handled independently, redaction can flicker. A face or plate may be covered in one frame and visible in the next. A detector may also briefly latch onto the wrong object, or a moving target may split into several short fragments.
+- faces;
+- license plates.
 
-The project therefore treats detection as only the first step. After detection, the pipeline asks a different question: is there enough evidence over time to trust this object track, recover short safe gaps, and send uncertain spans to review?
+Faces and plates use category-specific detector/tracker paths, then converge into shared privacy-region, rendering, review, validation, and Finalization contracts.
 
-## High-Level Workflow
+The Final Review Workspace is the review product. It presents Day and Night cases, Original/Automatic/Latest reviewed/Final media roles, advisory Guidance, blocking Needs correction, Optional QA, Entities, Manual redaction, Final Results, and Audit Trail.
 
-The workflow has six broad stages:
+## Safety Model
 
-1. Detect sensitive objects in each frame.
-2. Normalize detections into a shared observation format.
-3. Connect observations over time.
-4. Accumulate evidence before trusting a track.
-5. Render approved regions and keep uncertain intervals reviewable.
-6. Validate output media and preserve audit records.
+Automatic output is not Final. A reviewer can inspect Guidance and Entities, save corrections when needed, build Latest reviewed, watch the full reviewed video, approve that exact revision, and then create Final.
 
-The system keeps faces and plates as separate detector categories, because the best detector for one category is not the best detector for the other. After detection, both categories use shared ideas: normalized observations, temporal evidence, provenance, rendering, and review tasks.
+Guidance remains visible and auditable but does not require one approval click per card. Needs correction remains fail-closed. The full-video sweep records coverage of any unadjudicated Guidance without creating fake Correct decisions.
 
-## Models Selected
+## Release Evidence
 
-Several face detector candidates were evaluated. The active face detector is OpenVINO `face-detection-adas-0001`. It is the only face detector in the supported active face pipeline.
+The frozen release includes:
 
-Several license-plate detector candidates were also evaluated. The active plate detector is Open Image Models YOLOv9-S-608. It was selected because manual visual adjudication found it produced much cleaner plate localization and far fewer destructive false redactions than the higher-recall finalist. The remaining plate gaps are expected to be handled through tracking, bounded interpolation, and review rather than by accepting a noisier detector.
+- certified Day and Night Final media;
+- Day, Night, and combined delivery zips;
+- detector and automatic coverage metrics;
+- Night reviewed-final strict geometric coverage plus visual audit disposition;
+- documented Day reviewed-final source incompatibility;
+- documented face reviewed-final numerical limitation;
+- production-readiness and cleanup evidence.
 
-Rejected detector experiments are preserved as historical evidence. They are not part of the active runtime path.
+See [RELEASE_EVIDENCE.md](RELEASE_EVIDENCE.md).
 
-## Temporal Consistency And Uncertainty
+## Limits
 
-The face pipeline uses its frozen face-specific tracking and privacy-gap recovery behavior. Existing reviewed day and night face outputs are the accepted face references for this freeze.
-
-The plate pipeline uses the selected OIM detector, then applies a shared temporal evidence engine. Plate observations start as tentative. A track becomes trusted only when there is enough evidence across time: persistence, detector support, density, confidence, box stability, motion consistency, and absence of strong competition.
-
-When a track becomes trusted, earlier valid observations from the same track can be promoted retrospectively. This helps avoid late-start redaction when the system has enough later evidence that the earlier observations belonged to the same plate.
-
-The engine also uses hysteresis: one weak frame or short miss does not immediately break a confirmed track, but long ambiguous gaps stay unresolved. Persistent screen-fixed false positives are not accepted just because they last a long time.
-
-## Day And Night Results
-
-The current frozen package separates machine-derived results from human-reviewed results.
-
-| Area | Machine-derived status | Human-reviewed status |
-| --- | --- | --- |
-| Day face | Reviewed reference output available | Pending full-video audit |
-| Night face | Reviewed reference output available | Pending full-video audit |
-| Day plate | Automatic preview available; review still required | Pending full-video audit |
-| Night plate | Automatic preview available; review still required | Pending full-video audit |
-
-The latest plate evidence engine kept day and close/stress behavior stable and increased full-night rendered plate regions substantially. It also preserved review blockers for long ambiguous gaps. This is useful progress, but it is not a final privacy guarantee.
-
-Day face and day plate reference media originally came from different extracted clips. The current review workspace traces both back to a common parent source, extracts one canonical Day interval, and renders a combined current result from lineage-proven frozen face and plate evidence mapped into that interval. It does not concatenate incompatible encoded clips or fabricate source lineage.
-
-Night face and night plate references share the same source video, so the workspace includes a combined Night current result for review.
-
-## Human Review And Safety Behavior
-
-The system does not claim that a clean automatic pass proves every privacy target was found. Some misses are silent: if a face or plate produces no detector, tracker, or review evidence, software alone may not know it was present.
-
-The final package therefore includes a local case-based review workspace. It shows one source-frame-aware player with Original, Automatic, and Latest reviewed versions, keeps raw machine signals in technical History details, and presents concise reviewer tasks for unresolved intervals, uncertain tracks, provenance changes, and deterministic spot checks. Reviewers can also add a privacy issue found during full-video sweep and save source-frame-keyed manual redactions.
-
-Reviewer decisions and corrections are stored as local append-only events with hash-chain validation. Reviewer identity is declared locally; it is not enterprise authentication.
-
-Human-reviewed leak metrics remain pending until a reviewer exports valid decisions. Pending metrics are represented as `null`, not zero.
-
-## Current Limitations
-
-The prototype is not production-ready and does not claim zero leaks. Known limitations include:
-
-- Plate previews are still review-required.
-- Some nighttime plate gaps remain unresolved.
-- Some false plate redactions are visible and must be adjudicated.
-- Human review corrections remain a local provenance layer; they are not model retraining or threshold tuning.
-- Human full-video audit has not yet been completed.
-- Face production tracking is intentionally frozen and has not migrated to the shared evidence engine.
-
-## Next Possible Improvements
-
-The next practical step is manual full-video audit of the frozen package. That review should mark concrete leaks, false redactions, wrong-target events, and cosmetic-only issues.
-
-After that, the next engineering step is reviewed plate completion: add only evidence-supported plate corrections for the blocking intervals, then produce a reviewed plate candidate. A later milestone can combine reviewed face and reviewed plate regions into one final output when source compatibility allows.
+The project does not claim universal zero leaks. The frozen metrics apply only to their source-bound Ground Truth and policy contracts. Remote multi-user deployment requires additional operational and security hardening beyond the local release workflow.

@@ -96,19 +96,20 @@ roles, and lineage explicit. It aggregates raw audit signals into reviewer tasks
 without deleting raw provenance. Decisions and corrections are append-only local
 events, and finalization uses the same validation library as the CLI.
 
-Final Review Workspace v2.3 exposes category-independent review entities and
-multi-keyframe correction records through a local review web app. Entities use
-reviewer-facing labels such as `Person 01` and `Plate 01`, with representative
-thumbnails, while raw detector/track IDs stay in Technical details. Corrections
-are drawn on the Original frame, interpolate only between explicit reviewed
-keyframes, and require checkpoint verification before finalization.
+The current Final Review Workspace exposes category-independent review entities
+and multi-keyframe correction records through a local review web app. Entities
+use reviewer-facing labels such as `Person 01` and `Plate 01`, with
+representative thumbnails, while raw detector/track IDs stay in Technical
+details. Corrections are drawn on the Original frame, interpolate only between
+explicit reviewed keyframes, and require validation before finalization.
 
 Corrections are reviewed provenance records, not threshold changes. Finalization
-is blocked until required tasks are green, corrections are verified, the
-full-video sweep acknowledgement is bound to the current Latest reviewed
+is blocked until active Needs correction and invalid correction state are clear,
+the full-video sweep acknowledgement is bound to the current Latest reviewed
 revision, source/config hashes match, and media plus region validation artifacts
-pass. Canonical Final is a hardlink or verified copy of Latest reviewed, not a
-new privacy render.
+pass. Unreviewed Guidance remains auditable but does not become a fake Correct
+decision. Canonical Final is a hardlink or verified copy of Latest reviewed, not
+a new privacy render.
 
 ## Migration Strategy
 

@@ -1,82 +1,85 @@
 # Demo Guide
 
-This guide points to the frozen local package and the current case-based review workspace.
+This guide is for a 5 to 10 minute local demonstration of the frozen review workflow. It assumes the frontend has already been built and that either a generated review workspace or the local release evidence workspace is available.
 
-## Open First
+## Start
 
-Start with the broad-reader showcase:
-
-`artifacts/final_pipeline_package_v1/showcase/PROJECT_OVERVIEW.html`
-
-It gives the simplest visual walkthrough: what the system does, what the current outputs show, and which results are still pending human audit.
-
-## Reference Media
-
-For review, serve:
+From the repository root:
 
 ```bash
-redactor serve-final-review-workspace artifacts/final_pipeline_package_frontend_v1_5 --open
+source .venv/bin/activate
+npm --prefix frontend run build
+redactor serve-final-review-workspace artifacts/reviewed_final_combined_v2_1/run_20260813T210250Z/review_workspace --open
 ```
 
-The workspace shows one case at a time:
+If the release artifacts are not present, generate a fresh local workspace first:
 
-- Original video context
-- Current combined result where source-compatible
-- One large versioned player with exactly Original / Automatic / Latest reviewed
-- Timeline-linked guided risk-review tasks
-- Full-video sweep controls
-- Compact object list with representative Person/Plate thumbnails
-- Manual redaction Save that persists into Latest reviewed after publication
-- History and local session export
+```bash
+redactor redact-video path/to/input.mp4 \
+  --categories face,license_plate \
+  --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
+  --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
+  --plate-model models/open-image-models/yolo-v9-s-608-license-plates-end2end.onnx \
+  --output-dir artifacts/cases/demo_automatic_preview \
+  --overwrite
 
-The React app loads under `/app/day`; the frozen generated v2.3.4 workspace is
-available at `/legacy.html` as a fallback. Both use the same Python-owned
-backend package data, media Range serving, sessions, corrections, History,
-and finalization gates.
+redactor serve-final-review-workspace artifacts/cases/demo_automatic_preview/review_workspace --open
+```
 
-The Day and Night cases each show Original, Automatic, and Latest reviewed. When there are no active reviewer changes, Latest reviewed resolves to the Automatic baseline. The Day case uses a canonical interval from `artifacts/day_primary.mp4`; its Automatic result is rendered from lineage-proven frozen face and plate evidence rather than concatenated old clips.
+For correction demonstrations, use a disposable copy instead of the frozen release workspace:
 
-Click **Start new review** to create a local anonymous session. Reviewer name is
-requested only when exporting or finalizing. Use the app's fullscreen controls,
-not raw MP4 fullscreen, so frame numbers and source-frame mapping remain
-visible.
+```bash
+mkdir -p /tmp/video-redaction-demo
+cp -R artifacts/reviewed_final_combined_v2_1/run_20260813T210250Z/review_workspace /tmp/video-redaction-demo/review_workspace
+redactor serve-final-review-workspace /tmp/video-redaction-demo/review_workspace --open
+```
 
-## How To Read The Labels
+## Flow
 
-- **Original:** unredacted source context.
-- **Face-only reviewed reference:** current accepted face reference output.
-- **Plate-only automatic preview:** accepted plate tracks rendered automatically. This is review-required, not final.
-- **Automatic:** compatible face and plate regions rendered together for review where available. This remains non-final while blockers exist.
-- **Final reviewed:** appears only after every required task is green, corrections are verified, sweep acknowledgement exists, hashes match, and media validation passes.
+1. Open the Day or Night case.
+2. Show the media role selector: Original, Automatic, Latest reviewed, and Final when available.
+3. Switch between Original and Automatic to show what the machine pass produced.
+4. Open Guidance and explain that it is advisory and auditable, not a mandatory per-card approval gate.
+5. Open Entities and show source-backed Person and Plate policy actions.
+6. In a disposable workspace, use Manual redaction to draw one correction, Preview it, and show real rendered privacy pixels inside the region.
+7. Save the correction and point out the saved/applying state and updated reviewed media lifecycle.
+8. Show Latest reviewed as the revision that the reviewer watches.
+9. Explain that Approve full-video review is bound to the exact current Latest reviewed revision.
+10. Show Final and the download/package options.
+11. Open Audit Trail or Technical details to show event provenance and hashes.
 
-## Detector, Tracking, Review, And Rendering
+## What Should Be Visible
 
-Detection finds candidate faces or plates.
+- No Restart review button.
+- Guidance terminology rather than blocking Open-query language.
+- Guidance remaining is optional.
+- Needs correction is explicitly blocking.
+- Optional QA is separate.
+- The player is visually larger than the guidance panel on desktop.
+- Manual playback continues while frame state updates unless the reviewer performs a deliberate static-frame action.
+- Preview shows pixelation or blur from generated privacy-rendered media, not an opaque placeholder.
+- Current full-video approval becomes stale after a later media-affecting change.
+- Final appears only after current Latest reviewed and current sweep gates pass.
 
-Tracking connects observations over time. For plates, temporal evidence accumulates before a track is trusted.
+## What Not To Modify In A Frozen Workspace
 
-Review handles uncertain intervals, long gaps, false positives, and spot checks.
+During a release demo of certified Final media:
 
-Rendering applies pixelation or blur only to approved regions and writes validated MP4 output.
+- do not create new decisions;
+- do not create entity actions;
+- do not save corrections;
+- do not reset a case;
+- do not create another sweep;
+- do not create another Final.
 
-## Current Limitations To Mention
+Use a disposable copy for interactive mutation demonstrations.
 
-- The project does not claim zero leaks.
-- Human full-video audit is pending.
-- Plate results are automatic previews and still require review.
-- Some nighttime plate gaps remain unresolved.
-- Some false plate redactions remain visible and should be adjudicated.
-
-## Validating Audit Decisions
-
-After a reviewer creates or exports a session, validate it with:
+## Commands To Mention
 
 ```bash
 redactor validate-review-session --session-dir SESSION_DIR
-```
-
-Summarize review progress with:
-
-```bash
 redactor summarize-review-session --session-dir SESSION_DIR
+redactor serve-final-review-workspace WORKSPACE_ROOT --open
 ```
+
+The demo should describe detector, automatic coverage, reviewed-final scoring, and human full-video review as separate evidence layers.

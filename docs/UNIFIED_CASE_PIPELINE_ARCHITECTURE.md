@@ -6,7 +6,10 @@ The canonical `redact-video` command produces automatic, non-final preview evide
 
 ## Verified Before-State
 
-The refactor was started from commit `0fbbd713ebe77983ec42a31782f0c08202a46b36` on `main`/`origin/main`, whose subject is `Freeze final review workspace v1.5.4`. The workspace had no literal `v1.5.4` tag; `review-workspace-v1.5` was the available v1.5 tag, and `git describe` reported `review-workspace-v1.5-2-g0fbbd71`.
+This refactor began from a frozen earlier review-workspace checkpoint. That
+checkpoint is retained in Git history, but it is not the current release
+workflow contract. Current reviewer behavior is documented in
+`docs/FINAL_REVIEW_WORKSPACE.md`.
 
 Before the change, face full-video execution lived in `redact-video` and delegated to `face_policy.run_full_video_policy_flow` after optional ADAS detection. License plates used separate `detect-plates`, `track-plates`, `render-plates`, and `build-plate-review-bundle` stages. Final review and finalization were already mostly case-level and category-aware, but automatic orchestration and evaluation entry points were not.
 

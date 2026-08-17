@@ -1,117 +1,71 @@
-# Final Review Frontend Architecture
+# Frontend Architecture
 
-Final Review Frontend Foundation v1 migrates the review workspace presentation layer to React and TypeScript while keeping Python as the source of truth for privacy behavior.
+The Final Review Workspace frontend is a React/Vite presentation layer backed by the Python review server. The architecture keeps privacy, review, and finalization authority in Python while making the browser workflow responsive and source-frame aware.
 
 ## Ownership Boundary
 
 Python owns:
 
-- case manifests and media-version mappings;
-- source-frame and case-frame mappings;
-- review tasks, entities, merges, corrections, sessions, decisions, attribution, audit events, and finalization;
-- correction preview rendering and final media rendering;
-- MP4 MIME and HTTP Range serving.
+- workspace, source, media, and case manifests;
+- session creation and current-session resume;
+- append-only event logs and derived snapshots;
+- Guidance, Optional QA, Needs correction, and grouping projection;
+- entity policy and merges;
+- correction Preview and Save validation;
+- reviewed-region compilation and materialization;
+- Latest reviewed, sweep, and Final currentness;
+- media serving and HTTP Range requests;
+- finalization readiness and validation.
 
 React owns:
 
-- presentation, route state, local draft correction UI state, keyboard handling, and view filters;
-- frame-aware player controls that call back into Python-owned source-frame records;
-- typed API calls to `/api/v1/`.
+- layout and route presentation;
+- visible filters and selected card state;
+- local manual-correction draft UI state before submission;
+- frame-aware player controls;
+- status display from backend-authoritative responses.
 
-React does not reimplement detector, tracker, evidence, grouping, correction validation, rendering, audit hash-chain, or privacy-policy logic.
+React does not own detector, tracker, renderer, task/group semantics, finalization readiness, or persistence truth.
 
-## Package Layout
+## App Structure
 
-The frozen reference package remains:
+The main UI concepts are:
 
-```text
-artifacts/final_pipeline_package_v2_3_4/
-```
-
-The current React package is generated at:
-
-```text
-artifacts/final_pipeline_package_frontend_v1_5/
-```
-
-The corrected manual-Save baseline is generated at:
-
-```text
-artifacts/final_pipeline_package_frontend_v1_4_1/
-```
-
-For backend/privacy parity, the v1.5 package copies the accepted v1.4.1 React package as its base, then writes:
-
-```text
-app/                         React/Vite SPA
-legacy.html                  legacy generated workspace fallback
-frontend_build_manifest.json React build metadata
-```
-
-The root `index.html` redirects to `/app/day`. The legacy fallback remains available at `/legacy.html`.
+- case tabs for Day, Night, Final Results, and Audit Trail;
+- media role selector for Original, Automatic, Latest reviewed, and Final;
+- large source-frame-aware player;
+- Guidance queue with optional QA separated;
+- Entity panel;
+- Manual redaction editor;
+- status panels for Latest reviewed, full-video approval, Final, and downloads.
 
 ## API Contract
 
-The stable API prefix is:
-
-```text
-/api/v1/
-```
-
-The checked-in schema is:
+The stable checked-in schema is:
 
 ```text
 docs/api/final_review_workspace_v1.schema.json
 ```
 
-The backend serves the same schema at `/api/v1/schema`. The frontend generated TypeScript contract is:
+The server exposes the runtime schema at `/api/v1/schema`. Frontend types are generated into `frontend/src/types/api.ts`.
 
-```text
-frontend/src/types/api.ts
-```
+## State Refresh Contract
 
-Regenerate it with:
+Successful state-changing API calls must update React from authoritative server state. The frontend may show pending UI while a request is in flight, but it must not synthesize durable approval, readiness, Latest, Final, correction, or entity state locally.
 
-```bash
-cd frontend
-npm run generate:api-types
-```
+Examples:
 
-Legacy `/api/...` endpoints remain available during this milestone.
-
-## Component Boundaries
-
-The React app is split into:
-
-- `AppShell`, `CaseTabs`, `SessionHeader`, `AttributionDialog`, `ErrorBoundary`;
-- `CaseReviewPage`, `FinalResultsPage`, `AuditTrailPage`;
-- `VersionSelector`, `ReviewVideoPlayer`, `ReviewTimeline`;
-- `ReviewQueue`, `ReviewTaskCard`;
-- `EntityPanel`, `EntityCard`, `EntityMergeDialog`;
-- `CorrectionEditor`.
-
-Frame logic is centralized in `useVideoController` and `src/utils/frame.ts`.
-
-## Review State And Materialization
-
-Review decisions, object policies, entity merges, corrections, checkpoints, and History remain Python-owned append-only session state. React may optimistically show an object policy only after the backend accepts the event.
-
-Entity policy changes, correction saves, checkpoint restores, and Restart case review enqueue Python materialization jobs. The server serializes jobs per case, debounces rapid accepted mutations, coalesces queued work to the newest active projection revision, caches already materialized state hashes, and rejects stale render results. React polls `/api/v1/materialization-jobs/{job_id}` and swaps in a revisioned Latest reviewed media URL only after the job completes.
-
-v1.4 adds a deterministic effective-region digest at the materialization scheduling boundary. Mutations that do not change the effective privacy-region hash update Python working state and History without starting a media job. If an identical target hash is already queued or running, the frontend receives the existing job rather than a replacement job. Completed jobs publish only when their target effective-region hash is still compatible with the current active projection.
-
-v1.5 extends the scheduler plan with exact changed source-frame counts and intervals so the UI can show meaningful progress. The renderer still publishes through the full-render fallback; segment reuse is not enabled until it has a separate parity gate.
-
-Entity merges are not assembled in React. The merge endpoint creates one canonical merged review entity, retires the selected aliases, preserves child/source evidence, and records the hash-chained event.
+- correction Save waits for authoritative working-state/materialization updates;
+- sweep approval waits for refreshed authoritative state before showing current approval;
+- finalization status is read from the backend endpoint;
+- media-affecting changes invalidate stale Latest and sweep state through server projection.
 
 ## Media
 
-The Python server keeps the proven Range implementation. React uses one active video element per current page and only changes `src` when the selected media version changes.
+The browser uses normal media URLs served by Python. Range requests are required for reliable seeking. The player maps UI frame state to source-frame records supplied by the backend and should not pause playback merely because current-frame state changes.
 
-No remote assets, external CSS CDN, analytics, database, auth service, upload workflow, Electron, or Tauri are introduced.
+Manual Preview displays generated privacy-rendered media. Geometry overlays are outlines and must not masquerade as privacy output.
 
-## Known Limitations
+## Build Identity
 
-- The lightweight correction editor stores draft UI state locally, then submits Python-owned correction records.
-- Browser E2E covers the main parity-critical flows; manual deep review of every correction geometry edge case is still useful.
-- Final reviewed media appears only after Python finalization gates pass.
+Workspaces include frontend build identity metadata. The server and Technical/About UI expose the served build identity so stale embedded assets can be detected. HTML and manifests are revalidated; hashed static assets may be cached immutably.
