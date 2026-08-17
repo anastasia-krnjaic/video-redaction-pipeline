@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { isBenignMediaAbort } from '../src/hooks/useVideoController';
-import { materializationJobMatchesCurrentProjection } from '../src/state/materialization';
+import {
+  claimLatestReviewedAutoBuildRequest,
+  latestReviewedBuildRequestKey,
+  latestReviewedLifecycleState,
+  materializationJobMatchesCurrentProjection,
+  resetLatestReviewedAutoBuildRequestsForTests,
+} from '../src/state/materialization';
 import type { MaterializationJob, WorkingState } from '../src/types/api';
 
 const state = (revision?: string): WorkingState => ({
@@ -73,5 +79,57 @@ describe('materialization completion revision guard', () => {
     expect(isBenignMediaAbort({ code: 2 } as MediaError)).toBe(false);
     expect(isBenignMediaAbort({ code: 3 } as MediaError)).toBe(false);
     expect(isBenignMediaAbort(null)).toBe(false);
+  });
+
+  it('treats a current latest reviewed projection as reusable across navigation', () => {
+    expect(latestReviewedLifecycleState({
+      activeJobs: [],
+      caseId: 'day',
+      latestRole: { media_validation_passed: true, published_working_state_revision: 'rev_current' },
+      reviewReady: true,
+      sessionId: 'session_1',
+      workingState: state('rev_current'),
+    })).toBe('CURRENT_REUSABLE');
+
+    expect(latestReviewedLifecycleState({
+      activeJobs: [],
+      caseId: 'day',
+      latestRole: { media_validation_passed: true, published_working_state_revision: 'rev_old' },
+      reviewReady: true,
+      sessionId: 'session_1',
+      workingState: state('rev_current'),
+    })).toBe('BUILD_REQUIRED');
+  });
+
+  it('deduplicates navigation-remounted auto-build requests for one fresh projection', () => {
+    resetLatestReviewedAutoBuildRequestsForTests();
+    const key = latestReviewedBuildRequestKey({
+      caseId: 'day',
+      sessionId: 'session_1',
+      workingState: state('rev_current'),
+    });
+
+    expect(key).toBe('session_1:day:rev_current');
+    expect(claimLatestReviewedAutoBuildRequest(key)).toBe(true);
+    expect(claimLatestReviewedAutoBuildRequest(key)).toBe(false);
+    expect(claimLatestReviewedAutoBuildRequest(key.replace('rev_current', 'rev_next'))).toBe(true);
+  });
+
+  it('keeps in-flight and failed equivalent jobs out of automatic navigation rebuilds', () => {
+    expect(latestReviewedLifecycleState({
+      activeJobs: [job({ status: 'running', accepted_working_state_revision: 'rev_current' })],
+      caseId: 'day',
+      reviewReady: true,
+      sessionId: 'session_1',
+      workingState: state('rev_current'),
+    })).toBe('BUILD_RUNNING');
+
+    expect(latestReviewedLifecycleState({
+      activeJobs: [job({ status: 'failed', accepted_working_state_revision: 'rev_current' })],
+      caseId: 'day',
+      reviewReady: true,
+      sessionId: 'session_1',
+      workingState: state('rev_current'),
+    })).toBe('BUILD_FAILED_RETRYABLE');
   });
 });

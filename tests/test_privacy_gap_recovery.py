@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -108,6 +109,14 @@ def decision(result: recovery.RecoveryResult, index: int = 0) -> recovery.Interv
     return result.interval_decisions[index]
 
 
+def semantic_hash(result: recovery.RecoveryResult) -> str:
+    records = []
+    for frame_index in sorted(result.regions_by_frame):
+        records.extend(region.to_dict() for region in result.regions_by_frame[frame_index])
+    payload = json.dumps(records, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def test_short_gap_is_interpolated() -> None:
     result = run({0: source(0, (10, 10, 30, 30)), 2: source(2, (12, 10, 32, 30))}, frame_end=2)
 
@@ -116,9 +125,10 @@ def test_short_gap_is_interpolated() -> None:
     assert recovered_box(result, 1) == (11, 10, 31, 30)
 
 
-def test_valid_bidirectional_gap_is_accepted() -> None:
+def test_valid_bidirectional_gap_is_covered_but_review_required() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.0,
         render_overlay=False,
     )
     result = run(
@@ -132,13 +142,20 @@ def test_valid_bidirectional_gap_is_accepted() -> None:
     )
 
     assert decision(result).strategy == recovery.PROVENANCE_BIDIRECTIONAL_BRIDGE
-    assert decision(result).status == recovery.DECISION_ACCEPTED_AUTOMATICALLY
+    assert decision(result).status == recovery.DECISION_NEEDS_REVIEW
+    assert recovery.REASON_DETERMINISTIC_BRIDGE_REQUIRES_REVIEW in decision(result).reasons
     assert recovered_box(result, 1) == (11, 10, 31, 30)
+    assert result.regions_by_frame[1][0].tracking_direction == "deterministic_source_bound"
+    assert result.regions_by_frame[1][0].metrics["authoritative_algorithm"] == (
+        recovery.DETERMINISTIC_BRIDGE_ALGORITHM
+    )
+    assert result.regions_by_frame[1][0].metrics["visual_tracker_authoritative"] is False
 
 
-def test_bidirectional_gap_can_have_backward_only_frame() -> None:
+def test_bidirectional_gap_ignores_tracker_failures_for_authoritative_geometry() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.0,
         render_overlay=False,
     )
     result = run(
@@ -146,34 +163,30 @@ def test_bidirectional_gap_can_have_backward_only_frame() -> None:
         frame_end=3,
         settings=settings,
         tracker_factory=SequenceTrackerFactory(
-            {1: (11, 10, 31, 30), 2: None},
-            {1: (11, 10, 31, 30), 2: (12, 10, 32, 30)},
+            {1: (90, 10, 110, 30), 2: None},
+            {1: None, 2: (90, 10, 110, 30)},
         ),
     )
 
-    assert result.regions_by_frame[2][0].provenance == recovery.PROVENANCE_BACKWARD_BRIDGE
+    assert result.regions_by_frame[2][0].provenance == recovery.PROVENANCE_BIDIRECTIONAL_BRIDGE
+    assert result.regions_by_frame[2][0].tracking_direction == "deterministic_source_bound"
     assert recovered_box(result, 2) == (12, 10, 32, 30)
 
 
-def test_refinement_can_reduce_excessive_raw_disagreement(
+def test_visual_refinement_does_not_change_authoritative_bidirectional_bridge(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.0,
         enable_visual_refinement=True,
         visual_refinement="bottom_component",
-        max_raw_disagreement_norm=0.2,
         render_overlay=False,
     )
     monkeypatch.setattr(
         recovery,
         "refinement_strategy",
-        lambda settings: FixedRefinement(
-            {
-                (60, 10, 80, 30): (11, 10, 31, 30),
-                (10, 10, 30, 30): (11, 10, 31, 30),
-            }
-        ),
+        lambda settings: pytest.fail("bidirectional bridge must not refine MIL boxes"),
     )
 
     result = run(
@@ -186,34 +199,18 @@ def test_refinement_can_reduce_excessive_raw_disagreement(
         ),
     )
 
-    assert decision(result).status == recovery.DECISION_ACCEPTED_AFTER_REFINEMENT
+    assert decision(result).status == recovery.DECISION_NEEDS_REVIEW
     assert recovered_box(result, 1) == (11, 10, 31, 30)
-    assert decision(result).metrics["maximum_normalized_raw_disagreement"] > 0.2
-    assert decision(result).metrics["maximum_normalized_refined_disagreement"] == 0.0
+    assert "normalized_raw_disagreement" not in result.regions_by_frame[1][0].metrics
 
 
-def test_excessive_refined_disagreement_needs_review(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_tracker_disagreement_cannot_change_authoritative_bidirectional_hash() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
-        enable_visual_refinement=True,
-        visual_refinement="bottom_component",
-        max_refined_disagreement_norm=0.2,
+        deterministic_bridge_margin_fraction=0.0,
         render_overlay=False,
     )
-    monkeypatch.setattr(
-        recovery,
-        "refinement_strategy",
-        lambda settings: FixedRefinement(
-            {
-                (10, 10, 30, 30): (10, 10, 30, 30),
-                (70, 10, 90, 30): (70, 10, 90, 30),
-            }
-        ),
-    )
-
-    result = run(
+    first = run(
         {0: source(0, (10, 10, 30, 30)), 2: source(2, (12, 10, 32, 30))},
         frame_end=2,
         settings=settings,
@@ -222,13 +219,21 @@ def test_excessive_refined_disagreement_needs_review(
             {1: (70, 10, 90, 30)},
         ),
     )
+    second = run(
+        {0: source(0, (10, 10, 30, 30)), 2: source(2, (12, 10, 32, 30))},
+        frame_end=2,
+        settings=settings,
+        tracker_factory=SequenceTrackerFactory(
+            {1: (70, 10, 90, 30)},
+            {1: (10, 10, 30, 30)},
+        ),
+    )
 
-    assert decision(result).status == recovery.DECISION_NEEDS_REVIEW
-    assert recovered_box(result, 1) is None
-    assert "forward_backward_refined_disagreement" in result.regions_by_frame[1][0].reasons
+    assert semantic_hash(first) == semantic_hash(second)
+    assert recovered_box(first, 1) == (11, 10, 31, 30)
 
 
-def test_one_sided_recovery_handles_clip_edges() -> None:
+def test_one_sided_gap_is_review_required_without_authoritative_visual_tracking() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         max_one_sided_gap_frames=3,
         render_overlay=False,
@@ -246,15 +251,28 @@ def test_one_sided_recovery_handles_clip_edges() -> None:
         tracker_factory=SequenceTrackerFactory({1: (11, 10, 31, 30), 2: (12, 10, 32, 30)}),
     )
 
-    assert recovered_box(prefix, 0) == (10, 10, 30, 30)
+    assert decision(prefix).status == recovery.DECISION_NEEDS_REVIEW
+    assert recovered_box(prefix, 0) is None
     assert prefix.regions_by_frame[0][0].provenance == recovery.PROVENANCE_BACKWARD_BRIDGE
-    assert recovered_box(tail, 2) == (12, 10, 32, 30)
+    assert prefix.regions_by_frame[0][0].metrics["visual_tracker_authoritative"] is False
+    assert (
+        recovery.REASON_ONE_SIDED_VISUAL_TRACKING_NOT_AUTHORITATIVE
+        in prefix.regions_by_frame[0][0].reasons
+    )
+    assert decision(tail).status == recovery.DECISION_NEEDS_REVIEW
+    assert recovered_box(tail, 2) is None
     assert tail.regions_by_frame[2][0].provenance == recovery.PROVENANCE_FORWARD_BRIDGE
+    assert tail.regions_by_frame[2][0].metrics["visual_tracker_authoritative"] is False
+    assert (
+        recovery.REASON_ONE_SIDED_VISUAL_TRACKING_NOT_AUTHORITATIVE
+        in tail.regions_by_frame[2][0].reasons
+    )
 
 
 def test_identity_competition_flags_frame() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.0,
         competing_identity_distance_norm=0.8,
         render_overlay=False,
     )
@@ -273,6 +291,7 @@ def test_identity_competition_flags_frame() -> None:
 def test_keep_person_overlap_flags_frame() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.0,
         max_keep_overlap_fraction=0.0,
         render_overlay=False,
     )
@@ -288,25 +307,28 @@ def test_keep_person_overlap_flags_frame() -> None:
     assert "keep_person_overlap" in result.regions_by_frame[1][0].reasons
 
 
-def test_invalid_box_is_rejected() -> None:
+def test_deterministic_bridge_clips_conservative_envelope_to_frame() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.5,
         render_overlay=False,
     )
     result = run(
-        {0: source(0, (10, 10, 30, 30)), 2: source(2, (12, 10, 32, 30))},
+        {0: source(0, (0, 0, 20, 20)), 2: source(2, (2, 0, 22, 20))},
         frame_end=2,
         settings=settings,
-        tracker_factory=SequenceTrackerFactory({1: (10, 10, 10, 30)}, {1: (10, 10, 10, 30)}),
     )
 
-    assert recovered_box(result, 1) is None
-    assert "invalid_box" in result.regions_by_frame[1][0].reasons
+    assert recovered_box(result, 1) == (0, 0, 31, 30)
+    assert result.regions_by_frame[1][0].metrics["rounding"] == (
+        recovery.DETERMINISTIC_ROUNDING_RULE
+    )
 
 
 def test_scene_cut_inside_gap_needs_review() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.0,
         scene_cut_mean_delta=20,
         render_overlay=False,
     )
@@ -330,6 +352,7 @@ def test_scene_cut_inside_gap_needs_review() -> None:
 def test_excessive_center_jump_needs_review() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.0,
         max_center_jump_norm=0.2,
         render_overlay=False,
     )
@@ -346,6 +369,7 @@ def test_excessive_center_jump_needs_review() -> None:
 def test_excessive_scale_change_needs_review() -> None:
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.0,
         max_scale_change=0.2,
         render_overlay=False,
     )
@@ -392,7 +416,7 @@ def test_preserved_regions_are_kept_for_accepted_gaps() -> None:
     ]
 
 
-def test_rightward_drift_fixture_uses_optional_bottom_component_refinement() -> None:
+def test_rightward_drift_fixture_ignores_optional_refinement_for_authority() -> None:
     frame = np.full((100, 120, 3), 170, dtype=np.uint8)
     frame[78:100, 35:66] = 10
     frames = {}
@@ -402,6 +426,7 @@ def test_rightward_drift_fixture_uses_optional_bottom_component_refinement() -> 
         frames[index] = indexed
     settings = recovery.PrivacyGapRecoverySettings(
         short_interpolation_gap_frames=0,
+        deterministic_bridge_margin_fraction=0.0,
         enable_visual_refinement=True,
         visual_refinement="bottom_component",
         max_raw_disagreement_norm=0.3,
@@ -427,11 +452,16 @@ def test_rightward_drift_fixture_uses_optional_bottom_component_refinement() -> 
         frames=frames,
     )
 
-    assert decision(result).status == recovery.DECISION_ACCEPTED_AFTER_REFINEMENT
-    assert all(recovered_box(result, frame_index)[0] < 50 for frame_index in (1, 2, 3))
-    assert (
-        decision(result).metrics["maximum_normalized_refined_disagreement"]
-        < (decision(result).metrics["maximum_normalized_raw_disagreement"])
+    assert decision(result).status == recovery.DECISION_NEEDS_REVIEW
+    assert [recovered_box(result, frame_index) for frame_index in (1, 2, 3)] == [
+        (31, 70, 71, 98),
+        (31, 70, 71, 98),
+        (32, 70, 72, 98),
+    ]
+    assert all(
+        region.metrics["visual_tracker_authoritative"] is False
+        for frame_index in (1, 2, 3)
+        for region in result.regions_by_frame[frame_index]
     )
 
 

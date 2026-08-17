@@ -929,6 +929,13 @@ def track(
 @click.option("--competing-identity-distance-norm", default=0.35, show_default=True, type=float)
 @click.option("--scene-cut-mean-delta", default=45.0, show_default=True, type=float)
 @click.option(
+    "--deterministic-bridge-margin-fraction",
+    default=0.50,
+    show_default=True,
+    type=float,
+    help="Frame-clipped margin applied to deterministic two-anchor privacy bridges.",
+)
+@click.option(
     "--visual-refinement",
     type=click.Choice(["none", "bottom_component"], case_sensitive=True),
     default="none",
@@ -970,6 +977,7 @@ def recover_face_gaps(
     max_keep_overlap_fraction: float,
     competing_identity_distance_norm: float,
     scene_cut_mean_delta: float,
+    deterministic_bridge_margin_fraction: float,
     visual_refinement: str,
     conservative_fallback_enabled: bool,
     preserve_existing_regions: bool,
@@ -990,6 +998,7 @@ def recover_face_gaps(
         max_keep_overlap_fraction=max_keep_overlap_fraction,
         competing_identity_distance_norm=competing_identity_distance_norm,
         scene_cut_mean_delta=scene_cut_mean_delta,
+        deterministic_bridge_margin_fraction=deterministic_bridge_margin_fraction,
         enable_visual_refinement=visual_refinement != "none",
         visual_refinement=visual_refinement,
         conservative_fallback_enabled=conservative_fallback_enabled,

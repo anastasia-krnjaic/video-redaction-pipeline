@@ -7374,7 +7374,30 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             after_state,
             case_id=case_id,
         )
-        materialization_required = bool(after_hash != before_hash or after_hash != published_hash)
+        publication_supported = review_working_state.latest_reviewed_publication_supported(
+            self.server.package_root
+        )
+        current_reusable = bool(
+            publication_supported and after_hash and published_hash == after_hash
+        )
+        initial_publish_without_latest = bool(
+            operation == "latest_reviewed_publish_requested" and not published_hash
+        )
+        compatible_job = None
+        if not current_reusable and after_hash and after_hash != published_hash:
+            compatible_job = self.server.materialization_jobs.compatible_active_job(
+                session_dir=session_dir,
+                case_id=case_id,
+                target_effective_regions_hash=after_hash,
+            )
+        materialization_required = bool(
+            not current_reusable
+            and (
+                initial_publish_without_latest
+                or after_hash != before_hash
+                or compatible_job is not None
+            )
+        )
         if review_working_state.latest_reviewed_publication_deferred(self.server.package_root):
             plan = review_working_state.latest_reviewed_publication_deferred_plan(
                 case_id=case_id,
@@ -7404,7 +7427,9 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             "changed_source_frame_percentage": change_summary["changed_source_frame_percentage"],
             "full_case_fallback_required": materialization_required,
             "materialization_required": materialization_required,
-            "materialization_strategy": "full_render_fallback"
+            "materialization_strategy": "current_reusable"
+            if current_reusable
+            else "full_render_fallback"
             if materialization_required
             else "no_op",
             "operation": operation,
@@ -7413,14 +7438,17 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             "published_effective_regions_hash": published_hash,
             "schema_version": "materialization_planning_result.v1",
         }
+        if current_reusable:
+            return {
+                "job": None,
+                "plan": plan
+                | {
+                    "latest_reviewed_publication_status": "current_reusable",
+                    "publication_status": "current_reusable",
+                    "reuse_reason": "current Latest reviewed already matches the effective-region projection",
+                },
+            }
         if materialization_required:
-            compatible_job = None
-            if after_hash == before_hash:
-                compatible_job = self.server.materialization_jobs.compatible_active_job(
-                    session_dir=session_dir,
-                    case_id=case_id,
-                    target_effective_regions_hash=after_hash,
-                )
             if compatible_job is not None:
                 return {
                     "job": compatible_job,

@@ -2678,6 +2678,92 @@ def test_repeated_same_policy_reuses_existing_pending_materialization_job(tmp_pa
         server.server_close()
 
 
+def test_latest_reviewed_publish_request_reuses_current_projection(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    state = review_working_state.derive_working_state(package, session_dir)
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=state["active_projection_hash"],
+    )
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "session_id": session_dir.name,
+            },
+        )
+        plan = response["materialization_plan"]
+
+        assert response["ok"] is True
+        assert response["materialization_job"] is None
+        assert response["job"] is None
+        assert plan["materialization_required"] is False
+        assert plan["materialization_strategy"] == "current_reusable"
+        assert plan["publication_status"] == "current_reusable"
+        assert (
+            plan["published_effective_regions_hash"]
+            == materialization["effective_regions_hash"]
+        )
+        assert plan["after_effective_regions_hash"] == materialization["effective_regions_hash"]
+        assert server.materialization_jobs.jobs == {}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_repeated_initial_latest_reviewed_publish_reuses_in_flight_job(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    payload = {
+        "actor": {"reviewer_id": "analyst"},
+        "case_id": manifest.case_id,
+        "session_id": session_dir.name,
+    }
+    try:
+        first = post_json(f"{base_url}/api/v1/materialization-jobs", payload)
+        second = post_json(f"{base_url}/api/v1/materialization-jobs", payload)
+
+        assert first["materialization_plan"]["materialization_required"] is True
+        assert second["materialization_plan"]["materialization_required"] is True
+        assert first["materialization_job"]["job_id"] == second["materialization_job"]["job_id"]
+        assert (
+            second["materialization_plan"]["reused_job_id"]
+            == first["materialization_job"]["job_id"]
+        )
+        assert len(server.materialization_jobs.jobs) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_workspace_server_shutdown_cancels_pending_materialization_timer(
     tmp_path: Path,
 ) -> None:
@@ -6479,7 +6565,10 @@ def test_supported_canonical_public_guidance_does_not_block_publication(
         assert retry_response["idempotent_retry"] is True
         assert retry_response["materialization_required"] is False
         assert retry_response["materialization_job"] is None
-        assert retry_response["materialization_plan"]["materialization_strategy"] == "no_op"
+        assert (
+            retry_response["materialization_plan"]["materialization_strategy"]
+            == "current_reusable"
+        )
         assert pointer["status"] == "ready"
         assert latest["revision_id"] == pointer["revision_id"]
         assert lifecycle["finalization"]["status"] == "not_run"

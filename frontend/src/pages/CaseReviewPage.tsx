@@ -44,7 +44,14 @@ import {
   withTaskDecision,
   withoutTaskResolution,
 } from '../state/reviewState';
-import { materializationJobMatchesCurrentProjection } from '../state/materialization';
+import {
+  claimLatestReviewedAutoBuildRequest,
+  latestReviewedBuildRequestKey,
+  latestReviewedLifecycleState,
+  materializationJobMatchesCurrentProjection,
+  releaseLatestReviewedAutoBuildRequest,
+  type LatestReviewedLifecycleState,
+} from '../state/materialization';
 import type {
   Attribution,
   AuditEvent,
@@ -160,7 +167,6 @@ export function CaseReviewPage({
   const seekToFrameRef = useRef<(frame: number) => void>(() => {});
   const workingStateRef = useRef<WorkingState | undefined>(workingState);
   const editDraftContextRef = useRef<string | null>(null);
-  const autoBuildRequestRef = useRef<string>('');
 
   const allTasks = useMemo(
     () => [...baseTasks, ...manualTasks].filter((task) => task.case_id === caseId),
@@ -206,6 +212,10 @@ export function CaseReviewPage({
   const [draft, setDraft] = useState<CorrectionDraft>(() => initialDraft(caseId, manifest, caseFrame, selectedTask));
   const currentSourceFrame = caseToSourceFrame(manifest, caseFrame);
   const activeMaterializationJobs = Object.values(materializationJobs).filter(({ job }) => job.case_id === caseId && (job.status === 'queued' || job.status === 'running'));
+  const caseMaterializationJobs = useMemo(
+    () => Object.values(materializationJobs).filter(({ job }) => job.case_id === caseId).map(({ job }) => job),
+    [caseId, materializationJobs],
+  );
   const savedCorrectionOverlayActive = activeMaterializationJobs.length > 0 || Boolean(correctionSaveStatus?.startsWith('Correction saved'));
   const pendingCorrectionRegions = useMemo(
     () => pendingRegionsForSourceFrame(corrections, manualTasks, caseId, currentSourceFrame, savedCorrectionOverlayActive),
@@ -225,9 +235,19 @@ export function CaseReviewPage({
   const correctionAttentionCount = needsCorrectionBlockerCount(tasks);
   const reviewReady = correctionAttentionCount === 0;
   const allGuidanceAddressed = reviewReady && counts.Open === 0;
+  const latestReviewedLifecycle = latestReviewedLifecycleState({
+    activeJobs: caseMaterializationJobs,
+    caseId,
+    latestRole: materializedLatestRole,
+    materializationError,
+    reviewReady,
+    sessionId: session?.session_id,
+    workingState,
+  });
   const latestReviewedStatus = latestReviewedStatusText({
     activeJobs: activeMaterializationJobs,
     finalizationStatus,
+    lifecycleState: latestReviewedLifecycle,
     latestRole: materializedLatestRole,
     materializationError,
     reviewReady,
@@ -296,11 +316,9 @@ export function CaseReviewPage({
 
   useEffect(() => {
     if (mode !== 'review' || !session?.session_id || !reviewReady || activeMaterializationJobKey) return;
-    if (latestReviewedStatus !== 'Ready to build reviewed video') return;
-    const revision = String(workingState?.active_projection_hash || workingState?.state_hash || '');
-    const requestKey = `${caseId}:${revision}:${latestReviewedStatus}`;
-    if (!revision || autoBuildRequestRef.current === requestKey) return;
-    autoBuildRequestRef.current = requestKey;
+    if (latestReviewedLifecycle !== 'BUILD_REQUIRED') return;
+    const requestKey = latestReviewedBuildRequestKey({ caseId, sessionId: session.session_id, workingState });
+    if (!claimLatestReviewedAutoBuildRequest(requestKey)) return;
     const run = async () => {
       try {
         const result = await requestLatestReviewedBuild({
@@ -311,6 +329,7 @@ export function CaseReviewPage({
         if (result.working_state) applyWorkingStateProjection(result.working_state);
         trackMaterializationJob(result.materialization_job || result.job);
       } catch (err) {
+        releaseLatestReviewedAutoBuildRequest(requestKey);
         setMaterializationError(err instanceof Error ? err.message : String(err));
       }
     };
@@ -319,7 +338,7 @@ export function CaseReviewPage({
     activeMaterializationJobKey,
     attribution,
     caseId,
-    latestReviewedStatus,
+    latestReviewedLifecycle,
     mode,
     reviewReady,
     session?.session_id,
@@ -1367,22 +1386,29 @@ type ReviewedVideoStatus =
 function latestReviewedStatusText({
   activeJobs,
   finalizationStatus,
+  lifecycleState,
   latestRole,
   materializationError,
   reviewReady,
 }: {
   activeJobs: TrackedMaterializationJob[];
   finalizationStatus?: FinalizationStatus;
+  lifecycleState: LatestReviewedLifecycleState;
   latestRole?: MediaVersion;
   materializationError?: string;
   reviewReady: boolean;
 }): ReviewedVideoStatus {
   if (materializationError) return 'Could not update reviewed video — Retry';
   if (activeJobs.length) return 'Updating reviewed video...';
+  if (lifecycleState === 'BUILD_RUNNING') return 'Updating reviewed video...';
+  if (lifecycleState === 'BUILD_FAILED_RETRYABLE') return 'Could not update reviewed video — Retry';
   if (!reviewReady) return 'Needs correction blocks reviewed video';
   if (!latestRole) return 'Ready to build reviewed video';
   if (latestRole.media_validation_passed === false) return 'Could not update reviewed video — Retry';
-  if (finalizationBlockerGroups(finalizationStatus).some((group) => group.key === 'latest_reviewed')) {
+  if (
+    lifecycleState !== 'CURRENT_REUSABLE' &&
+    finalizationBlockerGroups(finalizationStatus).some((group) => group.key === 'latest_reviewed')
+  ) {
     return 'Ready to build reviewed video';
   }
   return 'Reviewed video ready';

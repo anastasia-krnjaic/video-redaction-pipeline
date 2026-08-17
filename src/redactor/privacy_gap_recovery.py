@@ -25,6 +25,14 @@ PROVENANCE_BACKWARD_BRIDGE = "backward_only_bridge"
 PROVENANCE_CONSERVATIVE_FALLBACK = "conservative_fallback"
 PROVENANCE_MANUAL_CORRECTION = "manual_correction"
 PROVENANCE_PRESERVED_REGION = "preserved_privacy_region"
+DETERMINISTIC_BRIDGE_ALGORITHM = "deterministic_source_bound_bridge_v1"
+DETERMINISTIC_ROUNDING_RULE = "round_half_up_then_clip_to_frame"
+REASON_DETERMINISTIC_BRIDGE_REQUIRES_REVIEW = (
+    "deterministic_source_bound_bridge_requires_review"
+)
+REASON_ONE_SIDED_VISUAL_TRACKING_NOT_AUTHORITATIVE = (
+    "one_sided_visual_tracking_not_authoritative"
+)
 
 DECISION_ACCEPTED_AUTOMATICALLY = "accepted_automatically"
 DECISION_ACCEPTED_AFTER_REFINEMENT = "accepted_after_refinement"
@@ -181,6 +189,7 @@ class PrivacyGapRecoverySettings:
     max_keep_overlap_fraction: float = 0.01
     competing_identity_distance_norm: float = 0.35
     scene_cut_mean_delta: float = 45.0
+    deterministic_bridge_margin_fraction: float = 0.50
     enable_visual_refinement: bool = False
     visual_refinement: str = "none"
     conservative_fallback_enabled: bool = False
@@ -208,6 +217,8 @@ class PrivacyGapRecoverySettings:
             raise ValueError("competing-identity-distance-norm must be positive")
         if self.scene_cut_mean_delta <= 0:
             raise ValueError("scene-cut-mean-delta must be positive")
+        if self.deterministic_bridge_margin_fraction < 0:
+            raise ValueError("deterministic-bridge-margin-fraction cannot be negative")
         if self.visual_refinement not in {"none", "bottom_component"}:
             raise ValueError("visual-refinement must be one of: none, bottom_component")
 
@@ -755,6 +766,7 @@ def bidirectional_interval(
     settings: PrivacyGapRecoverySettings,
     tracker_factory: TrackerFactory,
 ) -> IntervalDecision:
+    del tracker_factory
     if interval.left_anchor is None or interval.right_anchor is None:
         return unresolved_decision(
             interval,
@@ -762,26 +774,14 @@ def bidirectional_interval(
             status=DECISION_REJECTED,
             reason="bidirectional_tracking_requires_two_anchors",
         )
-    refinement = refinement_strategy(settings)
-    forward = track_forward(
-        frame_provider,
-        tracker_factory,
-        anchor_frame=interval.left_anchor.frame_index,
-        anchor_box=interval.left_anchor.bbox_xyxy,
-        frame_start=interval.frame_start,
-        frame_end=interval.frame_end,
-    )
-    backward = track_backward(
-        frame_provider,
-        tracker_factory,
-        anchor_frame=interval.right_anchor.frame_index,
-        anchor_box=interval.right_anchor.bbox_xyxy,
-        frame_start=interval.frame_start,
-        frame_end=interval.frame_end,
-    )
     regions: list[PrivacyRegion] = []
-    previous_box: Box | None = interval.left_anchor.bbox_xyxy
-    used_refinement = False
+    previous_box: Box | None = deterministic_bridge_envelope(
+        interval.left_anchor.bbox_xyxy,
+        interval.right_anchor.bbox_xyxy,
+        fraction=0.0,
+        frame_size=frame_size,
+        settings=settings,
+    )
     scene_cut_frames = detect_scene_cuts(
         frame_provider,
         frame_start=interval.left_anchor.frame_index,
@@ -789,35 +789,9 @@ def bidirectional_interval(
         threshold=settings.scene_cut_mean_delta,
     )
     for frame_index in range(interval.frame_start, interval.frame_end + 1):
-        raw_forward = forward.get(frame_index)
-        raw_backward = backward.get(frame_index)
-        refined_forward, forward_meta = refine_box(
-            refinement,
-            frame_provider,
-            frame_index,
-            raw_forward,
-            previous_box=previous_box,
-            frame_size=frame_size,
-        )
-        refined_backward, backward_meta = refine_box(
-            refinement,
-            frame_provider,
-            frame_index,
-            raw_backward,
-            previous_box=previous_box,
-            frame_size=frame_size,
-        )
-        used_refinement = used_refinement or box_changed(raw_forward, refined_forward)
-        used_refinement = used_refinement or box_changed(raw_backward, refined_backward)
-        region = select_bidirectional_region(
+        region = deterministic_bidirectional_region(
             interval,
             frame_index=frame_index,
-            raw_forward=raw_forward,
-            raw_backward=raw_backward,
-            refined_forward=refined_forward,
-            refined_backward=refined_backward,
-            forward_meta=forward_meta,
-            backward_meta=backward_meta,
             previous_box=previous_box,
             keep_boxes=keep_boxes_by_frame.get(frame_index, []),
             competing_boxes=competing_boxes_by_frame.get(frame_index, []),
@@ -832,7 +806,7 @@ def bidirectional_interval(
         interval,
         strategy=PROVENANCE_BIDIRECTIONAL_BRIDGE,
         regions=regions,
-        used_refinement=used_refinement,
+        used_refinement=False,
     )
 
 
@@ -846,32 +820,16 @@ def one_sided_interval(
     settings: PrivacyGapRecoverySettings,
     tracker_factory: TrackerFactory,
 ) -> IntervalDecision:
+    del frame_provider, keep_boxes_by_frame, competing_boxes_by_frame
+    del frame_size, settings, tracker_factory
     if interval.left_anchor is not None:
-        raw = track_forward(
-            frame_provider,
-            tracker_factory,
-            anchor_frame=interval.left_anchor.frame_index,
-            anchor_box=interval.left_anchor.bbox_xyxy,
-            frame_start=interval.frame_start,
-            frame_end=interval.frame_end,
-        )
         provenance = PROVENANCE_FORWARD_BRIDGE
         direction = "forward"
         anchor_frame = interval.left_anchor.frame_index
-        previous_box: Box | None = interval.left_anchor.bbox_xyxy
     elif interval.right_anchor is not None:
-        raw = track_backward(
-            frame_provider,
-            tracker_factory,
-            anchor_frame=interval.right_anchor.frame_index,
-            anchor_box=interval.right_anchor.bbox_xyxy,
-            frame_start=interval.frame_start,
-            frame_end=interval.frame_end,
-        )
         provenance = PROVENANCE_BACKWARD_BRIDGE
         direction = "backward"
         anchor_frame = interval.right_anchor.frame_index
-        previous_box = interval.right_anchor.bbox_xyxy
     else:
         return unresolved_decision(
             interval,
@@ -880,71 +838,124 @@ def one_sided_interval(
             reason="one_sided_tracking_requires_an_anchor",
         )
 
-    refinement = refinement_strategy(settings)
-    regions = []
-    scene_cut_frames = detect_scene_cuts(
-        frame_provider,
-        frame_start=(
-            interval.left_anchor.frame_index if interval.left_anchor else interval.frame_start
-        ),
-        frame_end=(
-            interval.right_anchor.frame_index if interval.right_anchor else interval.frame_end
-        ),
-        threshold=settings.scene_cut_mean_delta,
-    )
-    used_refinement = False
-    frame_range = range(interval.frame_start, interval.frame_end + 1)
-    if direction == "backward":
-        frame_range = reversed(list(frame_range))
-    temporary: dict[int, PrivacyRegion] = {}
-    for frame_index in frame_range:
-        refined, meta = refine_box(
-            refinement,
-            frame_provider,
-            frame_index,
-            raw.get(frame_index),
-            previous_box=previous_box,
-            frame_size=frame_size,
-        )
-        used_refinement = used_refinement or box_changed(raw.get(frame_index), refined)
-        reasons, metrics = safety_reasons(
-            refined,
+    regions = [
+        PrivacyRegion(
             frame_index=frame_index,
-            previous_box=previous_box,
-            keep_boxes=keep_boxes_by_frame.get(frame_index, []),
-            competing_boxes=competing_boxes_by_frame.get(frame_index, []),
-            frame_size=frame_size,
-            settings=settings,
-            scene_cut=frame_index in scene_cut_frames,
-        )
-        metrics["refinement"] = meta
-        region = PrivacyRegion(
-            frame_index=frame_index,
-            bbox_xyxy=None if reasons else refined,
+            bbox_xyxy=None,
             provenance=provenance,
-            state="unresolved" if reasons else "covered",
+            state="unresolved",
             target_track_ids=interval.target_track_ids,
             source_anchor_frames=(anchor_frame,),
             tracking_direction=direction,
-            raw_forward_box_xyxy=raw.get(frame_index) if direction == "forward" else None,
-            raw_backward_box_xyxy=raw.get(frame_index) if direction == "backward" else None,
-            refined_forward_box_xyxy=refined if direction == "forward" else None,
-            refined_backward_box_xyxy=refined if direction == "backward" else None,
-            metrics=metrics,
-            reasons=tuple(reasons),
+            metrics={
+                "authoritative_algorithm": "none_review_required",
+                "visual_tracker_authoritative": False,
+            },
+            reasons=(REASON_ONE_SIDED_VISUAL_TRACKING_NOT_AUTHORITATIVE,),
         )
-        if region.bbox_xyxy is not None:
-            previous_box = region.bbox_xyxy
-        temporary[frame_index] = region
-    regions = [
-        temporary[frame_index]
         for frame_index in range(interval.frame_start, interval.frame_end + 1)
     ]
     return interval_decision_for_regions(
         interval,
         strategy=provenance,
         regions=regions,
-        used_refinement=used_refinement,
+        used_refinement=False,
+    )
+
+
+def deterministic_bidirectional_region(
+    interval: GapInterval,
+    *,
+    frame_index: int,
+    previous_box: Box | None,
+    keep_boxes: list[TrackSourceBox],
+    competing_boxes: list[TrackSourceBox],
+    frame_size: tuple[int, int],
+    settings: PrivacyGapRecoverySettings,
+    scene_cut: bool,
+) -> PrivacyRegion:
+    if interval.left_anchor is None or interval.right_anchor is None:
+        return PrivacyRegion(
+            frame_index=frame_index,
+            bbox_xyxy=None,
+            provenance=PROVENANCE_BIDIRECTIONAL_BRIDGE,
+            state="unresolved",
+            target_track_ids=interval.target_track_ids,
+            tracking_direction="unresolved",
+            reasons=("bidirectional_tracking_requires_two_anchors",),
+        )
+
+    fraction = (frame_index - interval.left_anchor.frame_index) / (
+        interval.right_anchor.frame_index - interval.left_anchor.frame_index
+    )
+    interpolated = deterministic_interpolate_box(
+        interval.left_anchor.bbox_xyxy,
+        interval.right_anchor.bbox_xyxy,
+        fraction,
+    )
+    selected = deterministic_bridge_envelope(
+        interval.left_anchor.bbox_xyxy,
+        interval.right_anchor.bbox_xyxy,
+        fraction=fraction,
+        frame_size=frame_size,
+        settings=settings,
+    )
+    reasons, metrics = safety_reasons(
+        selected,
+        frame_index=frame_index,
+        previous_box=previous_box,
+        keep_boxes=keep_boxes,
+        competing_boxes=competing_boxes,
+        frame_size=frame_size,
+        settings=settings,
+        scene_cut=scene_cut,
+    )
+    anchor_scale_change = scale_change(
+        interval.left_anchor.bbox_xyxy,
+        interval.right_anchor.bbox_xyxy,
+    )
+    if anchor_scale_change > settings.max_scale_change:
+        reasons.append("excessive_scale_change")
+    reasons.append(REASON_DETERMINISTIC_BRIDGE_REQUIRES_REVIEW)
+    metrics.update(
+        {
+            "anchor_center_distance_norm": round(
+                normalized_center_distance(
+                    interval.left_anchor.bbox_xyxy,
+                    interval.right_anchor.bbox_xyxy,
+                ),
+                6,
+            ),
+            "anchor_scale_change": round(anchor_scale_change, 6),
+            "authoritative_algorithm": DETERMINISTIC_BRIDGE_ALGORITHM,
+            "deterministic_bridge_margin_fraction": (
+                settings.deterministic_bridge_margin_fraction
+            ),
+            "interpolated_box_xyxy": list(interpolated),
+            "rounding": DETERMINISTIC_ROUNDING_RULE,
+            "visual_tracker_authoritative": False,
+        }
+    )
+    blocking_reasons = [
+        reason
+        for reason in reasons
+        if reason != REASON_DETERMINISTIC_BRIDGE_REQUIRES_REVIEW
+    ]
+    if blocking_reasons:
+        selected = None
+    return PrivacyRegion(
+        frame_index=frame_index,
+        bbox_xyxy=selected,
+        provenance=PROVENANCE_BIDIRECTIONAL_BRIDGE,
+        state="covered" if selected is not None else "unresolved",
+        target_track_ids=interval.target_track_ids,
+        source_anchor_frames=(
+            interval.left_anchor.frame_index,
+            interval.right_anchor.frame_index,
+        ),
+        tracking_direction="deterministic_source_bound",
+        metrics=metrics,
+        reasons=tuple(sorted(set(reasons))),
     )
 
 
@@ -1134,6 +1145,8 @@ def interval_decision_for_regions(
     if not regions or len(unresolved) == len(regions):
         status = DECISION_REJECTED if reasons == ["missing_box"] else DECISION_NEEDS_REVIEW
     elif unresolved:
+        status = DECISION_NEEDS_REVIEW
+    elif REASON_DETERMINISTIC_BRIDGE_REQUIRES_REVIEW in reasons:
         status = DECISION_NEEDS_REVIEW
     elif used_refinement:
         status = DECISION_ACCEPTED_AFTER_REFINEMENT
@@ -1849,6 +1862,9 @@ def settings_to_dict(settings: PrivacyGapRecoverySettings) -> dict[str, object]:
     return {
         "competing_identity_distance_norm": settings.competing_identity_distance_norm,
         "conservative_fallback_enabled": settings.conservative_fallback_enabled,
+        "deterministic_bridge_margin_fraction": (
+            settings.deterministic_bridge_margin_fraction
+        ),
         "enable_visual_refinement": settings.enable_visual_refinement,
         "max_bridge_gap_frames": settings.max_bridge_gap_frames,
         "max_center_jump_norm": settings.max_center_jump_norm,
@@ -1935,6 +1951,52 @@ def intersection_fraction(left: Box, right: Box) -> float:
 
 def interpolate_box(left: Box, right: Box, fraction: float) -> Box:
     return tuple(round(left[index] + (right[index] - left[index]) * fraction) for index in range(4))
+
+
+def deterministic_interpolate_box(left: Box, right: Box, fraction: float) -> Box:
+    return tuple(
+        round_half_up(left[index] + (right[index] - left[index]) * fraction)
+        for index in range(4)
+    )
+
+
+def deterministic_bridge_envelope(
+    left: Box,
+    right: Box,
+    *,
+    fraction: float,
+    frame_size: tuple[int, int],
+    settings: PrivacyGapRecoverySettings,
+) -> Box:
+    width, height = frame_size
+    interpolated = deterministic_interpolate_box(left, right, fraction)
+    center_x, center_y = box_center(interpolated)
+    base_width = max(
+        interpolated[2] - interpolated[0],
+        left[2] - left[0],
+        right[2] - right[0],
+        1,
+    )
+    base_height = max(
+        interpolated[3] - interpolated[1],
+        left[3] - left[1],
+        right[3] - right[1],
+        1,
+    )
+    margin = math.ceil(
+        max(base_width, base_height) * settings.deterministic_bridge_margin_fraction
+    )
+    envelope = (
+        round_half_up(center_x - base_width / 2.0 - margin),
+        round_half_up(center_y - base_height / 2.0 - margin),
+        round_half_up(center_x + base_width / 2.0 + margin),
+        round_half_up(center_y + base_height / 2.0 + margin),
+    )
+    return clip_box(envelope, width, height)
+
+
+def round_half_up(value: float) -> int:
+    return math.floor(value + 0.5)
 
 
 def fuse_boxes(left: Box, right: Box) -> Box:
