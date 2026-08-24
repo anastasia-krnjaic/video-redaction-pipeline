@@ -40,18 +40,18 @@ export function ReviewVideoPlayer({
   const finalDownloadAvailable = downloadOptions.some((option) => option.role === 'final_reviewed' && option.available);
   return (
     <section className="player-column" aria-label={`${manifest.display_name} video player`}>
-      <div className="version-row">
-        <VersionSelector
-          finalRole={finalRole}
-          roles={roles}
-          selectedRole={selectedRole}
-          onChange={onVersionChange}
-        />
-        <div className="source-range">
-          Source {manifest.source_frame_start}-{manifest.source_frame_end}
-        </div>
-      </div>
       <div className="player-wrapper" ref={controller.wrapperRef}>
+        <div className="version-row">
+          <VersionSelector
+            finalRole={finalRole}
+            roles={roles}
+            selectedRole={selectedRole}
+            onChange={onVersionChange}
+          />
+          <div className="source-range">
+            Source {manifest.source_frame_start}-{manifest.source_frame_end}
+          </div>
+        </div>
         <div className="video-stage">
           <video
             ref={controller.videoRef}
@@ -83,31 +83,31 @@ export function ReviewVideoPlayer({
           tasks={tasks}
           onSelectTask={onSelectTask}
         />
-      </div>
-      <div className="download-row" aria-label={`${manifest.display_name} downloads`}>
-        {downloadOptions.map((option) => (
-          option.available ? (
-            <a key={option.role} className="download-pill available" href={option.url} title={option.status}>
-              <Download size={14} aria-hidden="true" /> {option.label}
+        <div className="download-row" aria-label={`${manifest.display_name} downloads`}>
+          {downloadOptions.map((option) => (
+            option.available ? (
+              <a key={option.role} className="download-pill available" href={option.url} title={option.status}>
+                <Download size={14} aria-hidden="true" /> {option.label}
+              </a>
+            ) : (
+              <span key={option.role} className="download-pill unavailable" aria-disabled="true" title={option.status}>
+                {option.label}
+              </span>
+            )
+          ))}
+        </div>
+        <div className="download-secondary-row">
+          <a className="download-link package-link" href={deliveryPackageUrl(manifest.case_id, sessionId)}>
+            <Download size={14} aria-hidden="true" /> Review package manifest
+          </a>
+          {finalDownloadAvailable ? (
+            <a className="download-link package-link" href={deliveryPackageZipUrl(manifest.case_id, sessionId)}>
+              <Download size={14} aria-hidden="true" /> Final package .zip
             </a>
           ) : (
-            <span key={option.role} className="download-pill unavailable" aria-disabled="true" title={option.status}>
-              {option.label}
-            </span>
-          )
-        ))}
-      </div>
-      <div className="download-secondary-row">
-        <a className="download-link package-link" href={deliveryPackageUrl(manifest.case_id, sessionId)}>
-          <Download size={14} aria-hidden="true" /> Review package manifest
-        </a>
-        {finalDownloadAvailable ? (
-          <a className="download-link package-link" href={deliveryPackageZipUrl(manifest.case_id, sessionId)}>
-            <Download size={14} aria-hidden="true" /> Final package .zip
-          </a>
-        ) : (
-          <span className="download-package-status unavailable">Final package not available</span>
-        )}
+            <span className="download-package-status unavailable">Final package not available</span>
+          )}
+        </div>
       </div>
     </section>
   );

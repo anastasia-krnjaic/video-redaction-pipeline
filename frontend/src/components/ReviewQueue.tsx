@@ -16,7 +16,7 @@ interface Props {
   bucket: QueueBucket;
   manifest: Case;
   optionalTasks?: ReviewGroup[];
-  pendingTaskId?: string;
+  pendingTaskIds?: Set<string>;
   selectedTaskId?: string | null;
   tasks: ReviewGroup[];
   reviewComplete?: boolean;
@@ -35,7 +35,7 @@ export function ReviewQueue({
   onSelectTask,
   optionalTasks = [],
   reviewComplete,
-  pendingTaskId,
+  pendingTaskIds,
   selectedTaskId,
   tasks,
 }: Props) {
@@ -88,7 +88,7 @@ export function ReviewQueue({
             <ReviewTaskCard
               key={task.review_task_id}
               manifest={manifest}
-              pending={pendingTaskId === task.review_task_id}
+              pending={pendingTaskIds?.has(task.review_task_id) || false}
               selected={selectedTaskId === task.review_task_id}
               task={task}
               onDecision={onDecision}
@@ -110,7 +110,7 @@ export function ReviewQueue({
               <ReviewTaskCard
                 key={task.review_task_id}
                 manifest={manifest}
-                pending={pendingTaskId === task.review_task_id}
+                pending={pendingTaskIds?.has(task.review_task_id) || false}
                 selected={selectedTaskId === task.review_task_id}
                 task={task}
                 onDecision={onDecision}

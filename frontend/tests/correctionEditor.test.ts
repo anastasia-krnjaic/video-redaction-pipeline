@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { MANUAL_REDACTION_CATEGORY_OPTIONS } from '../src/types/domain';
 import type { CorrectionDraft } from '../src/types/domain';
-import { applyCorrectionDraftMode, validateCorrectionDraft } from '../src/components/CorrectionEditor';
+import { applyCorrectionDraftMode, resetSingleFrameDraftForSourceFrame, validateCorrectionDraft } from '../src/components/CorrectionEditor';
 
 const baseDraft: CorrectionDraft = {
   caseId: 'day',
@@ -59,6 +59,41 @@ describe('correction editor validation', () => {
     expect(validateCorrectionDraft(draft)).toEqual({ valid: true, message: '' });
   });
 
+  it('rejects a single-frame draft that carries a stale keyframe from another frame', () => {
+    const draft = {
+      ...baseDraft,
+      keyframes: [
+        { source_frame: 100, bbox_xyxy: [10, 20, 110, 120] },
+        { source_frame: 101, bbox_xyxy: [12, 22, 112, 122] },
+      ],
+    } satisfies CorrectionDraft;
+
+    expect(validateCorrectionDraft(draft)).toEqual({
+      valid: false,
+      message: 'A keyframe is outside the selected interval.',
+    });
+  });
+
+  it('resets a single-frame draft when the reviewer moves to a new source frame', () => {
+    const draft = {
+      ...baseDraft,
+      keyframes: [{ source_frame: 89, bbox_xyxy: [10, 20, 110, 120] }],
+      start: 89,
+      start_source_frame: 89,
+      end: 89,
+      end_source_frame: 89,
+    } satisfies CorrectionDraft;
+
+    expect(resetSingleFrameDraftForSourceFrame(draft, 90)).toMatchObject({
+      end: 90,
+      end_source_frame: 90,
+      keyframes: [],
+      preview_token: undefined,
+      start: 90,
+      start_source_frame: 90,
+    });
+  });
+
   it.each(['face', 'license_plate', 'other_sensitive'] as const)('uses the same mode validation for %s', (category) => {
     const draft = {
       ...baseDraft,
@@ -84,6 +119,24 @@ describe('correction editor validation', () => {
     expect(validateCorrectionDraft(draft)).toEqual({ valid: true, message: '' });
   });
 
+  it('rejects fixed-box drafts with more than one authoritative rectangle', () => {
+    const draft = {
+      ...baseDraft,
+      end: 110,
+      end_source_frame: 110,
+      mode: 'fixed_box',
+      keyframes: [
+        { source_frame: 100, bbox_xyxy: [10, 20, 110, 120] },
+        { source_frame: 110, bbox_xyxy: [20, 30, 120, 130] },
+      ],
+    } satisfies CorrectionDraft;
+
+    expect(validateCorrectionDraft(draft)).toEqual({
+      valid: false,
+      message: 'Draw exactly one fixed rectangle for source frames 100-110.',
+    });
+  });
+
   it('requires start and end keyframes for interpolation', () => {
     const draft = {
       ...baseDraft,
@@ -94,7 +147,7 @@ describe('correction editor validation', () => {
     } satisfies CorrectionDraft;
 
     expect(validateCorrectionDraft(draft).valid).toBe(false);
-    expect(validateCorrectionDraft(draft).message).toBe('Draw a rectangle on end frame 110 to preview this interpolation.');
+    expect(validateCorrectionDraft(draft).message).toBe('Interpolate mode requires exactly one start and one end keyframe.');
     expect(
       validateCorrectionDraft({
         ...draft,
@@ -104,6 +157,25 @@ describe('correction editor validation', () => {
         ],
       }),
     ).toEqual({ valid: true, message: '' });
+  });
+
+  it('rejects interpolation drafts with intermediate stale keyframes', () => {
+    const draft = {
+      ...baseDraft,
+      end: 110,
+      end_source_frame: 110,
+      mode: 'interpolate',
+      keyframes: [
+        { source_frame: 100, bbox_xyxy: [10, 20, 110, 120] },
+        { source_frame: 105, bbox_xyxy: [15, 25, 115, 125] },
+        { source_frame: 110, bbox_xyxy: [20, 30, 120, 130] },
+      ],
+    } satisfies CorrectionDraft;
+
+    expect(validateCorrectionDraft(draft)).toEqual({
+      valid: false,
+      message: 'Interpolate mode requires exactly one start and one end keyframe.',
+    });
   });
 
   it('keeps interpolation preview disabled for the observed 1828-1848 start-only draft', () => {
@@ -119,7 +191,7 @@ describe('correction editor validation', () => {
 
     expect(validateCorrectionDraft(draft)).toEqual({
       valid: false,
-      message: 'Draw a rectangle on end frame 1848 to preview this interpolation.',
+      message: 'Interpolate mode requires exactly one start and one end keyframe.',
     });
   });
 

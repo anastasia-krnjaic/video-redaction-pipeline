@@ -22,6 +22,7 @@ import {
   CorrectionEditor,
   CorrectionVideoOverlay,
   PendingCorrectionOverlay,
+  resetSingleFrameDraftForSourceFrame,
   type PendingCorrectionRegion,
 } from '../components/CorrectionEditor';
 import { EntityFocusOverlay, type EntityFocusTarget } from '../components/EntityFocusOverlay';
@@ -45,13 +46,11 @@ import {
   withoutTaskResolution,
 } from '../state/reviewState';
 import {
-  claimLatestReviewedAutoBuildRequest,
-  latestReviewedBuildRequestKey,
   latestReviewedLifecycleState,
   materializationJobMatchesCurrentProjection,
-  releaseLatestReviewedAutoBuildRequest,
   type LatestReviewedLifecycleState,
 } from '../state/materialization';
+import { decisionFromEvent, workingStateIsOlderThanKnownEvents } from '../state/reviewSync';
 import type {
   Attribution,
   AuditEvent,
@@ -106,6 +105,7 @@ interface Props {
 }
 
 interface TrackedMaterializationJob {
+  completionStatus?: string;
   entityIds: string[];
   job: MaterializationJob;
   preserveFrame: number;
@@ -143,9 +143,10 @@ export function CaseReviewPage({
   const [entityFilter, setEntityFilter] = usePersistentState<EntityFilter>(`${uiScope}:entity_filter`, 'needs_review');
   const [entitiesOpen, setEntitiesOpen] = useState(false);
   const [mergeSelection, setMergeSelection] = useState<EffectiveEntity[]>([]);
-  const [pendingTaskId, setPendingTaskId] = useState<string>();
+  const [pendingTaskIds, setPendingTaskIds] = useState<Set<string>>(() => new Set());
   const [pendingEntityIds, setPendingEntityIds] = useState<Set<string>>(() => new Set());
   const [latestRole, setLatestRole] = useState<MediaVersion | undefined>();
+  const [deferredLatestRole, setDeferredLatestRole] = useState<MediaVersion | undefined>();
   const [previewRole, setPreviewRole] = useState<MediaVersion | undefined>();
   const [previewInvalidated, setPreviewInvalidated] = useState(false);
   const [previewReady, setPreviewReady] = useState(false);
@@ -160,12 +161,18 @@ export function CaseReviewPage({
   const [materializationJobs, setMaterializationJobs] = useState<Record<string, TrackedMaterializationJob>>({});
   const [materializationError, setMaterializationError] = useState<string>();
   const [focusTarget, setFocusTarget] = useState<EntityFocusTarget | null>(null);
+  const decisionsRef = useRef(decisions);
   const eventsRef = useRef(events);
   const materializationJobsRef = useRef(materializationJobs);
+  const modeRef = useRef(mode);
   const onWorkingStateChangeRef = useRef(onWorkingStateChange);
+  const selectedRoleValueRef = useRef(selectedRole);
   const setSelectedRoleRef = useRef(setSelectedRole);
   const seekToFrameRef = useRef<(frame: number) => void>(() => {});
+  const taskResolutionsRef = useRef(taskResolutions);
   const workingStateRef = useRef<WorkingState | undefined>(workingState);
+  const controllerPlayingRef = useRef(false);
+  const caseFrameValueRef = useRef(caseFrame);
   const editDraftContextRef = useRef<string | null>(null);
 
   const allTasks = useMemo(
@@ -211,15 +218,18 @@ export function CaseReviewPage({
   const controller = useVideoController(manifest, selectedVersion, caseFrame, setCaseFrame);
   const [draft, setDraft] = useState<CorrectionDraft>(() => initialDraft(caseId, manifest, caseFrame, selectedTask));
   const currentSourceFrame = caseToSourceFrame(manifest, caseFrame);
+  const savedCorrectionsForCase = useMemo(
+    () => corrections.filter((correction) => String(correction.case_id || '') === caseId),
+    [caseId, corrections],
+  );
   const activeMaterializationJobs = Object.values(materializationJobs).filter(({ job }) => job.case_id === caseId && (job.status === 'queued' || job.status === 'running'));
   const caseMaterializationJobs = useMemo(
     () => Object.values(materializationJobs).filter(({ job }) => job.case_id === caseId).map(({ job }) => job),
     [caseId, materializationJobs],
   );
-  const savedCorrectionOverlayActive = activeMaterializationJobs.length > 0 || Boolean(correctionSaveStatus?.startsWith('Correction saved'));
-  const pendingCorrectionRegions = useMemo(
-    () => pendingRegionsForSourceFrame(corrections, manualTasks, caseId, currentSourceFrame, savedCorrectionOverlayActive),
-    [caseId, corrections, currentSourceFrame, manualTasks, savedCorrectionOverlayActive],
+  const pendingMediaChangeCount = useMemo(
+    () => pendingMediaChangesForCase(workingState, caseId),
+    [caseId, workingState],
   );
   const activeMaterializationJobKey = useMemo(
     () => Object.values(materializationJobs)
@@ -244,6 +254,11 @@ export function CaseReviewPage({
     sessionId: session?.session_id,
     workingState,
   });
+  const savedCorrectionOverlayActive = mode === 'edit' && savedCorrectionsForCase.length > 0 && latestReviewedLifecycle !== 'CURRENT_REUSABLE';
+  const pendingCorrectionRegions = useMemo(
+    () => pendingRegionsForSourceFrame(corrections, manualTasks, caseId, currentSourceFrame, savedCorrectionOverlayActive),
+    [caseId, corrections, currentSourceFrame, manualTasks, savedCorrectionOverlayActive],
+  );
   const latestReviewedStatus = latestReviewedStatusText({
     activeJobs: activeMaterializationJobs,
     finalizationStatus,
@@ -272,12 +287,32 @@ export function CaseReviewPage({
   }, [events]);
 
   useEffect(() => {
+    caseFrameValueRef.current = caseFrame;
+  }, [caseFrame]);
+
+  useEffect(() => {
+    decisionsRef.current = decisions;
+  }, [decisions]);
+
+  useEffect(() => {
     materializationJobsRef.current = materializationJobs;
   }, [materializationJobs]);
 
   useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
     onWorkingStateChangeRef.current = onWorkingStateChange;
   }, [onWorkingStateChange]);
+
+  useEffect(() => {
+    selectedRoleValueRef.current = selectedRole;
+  }, [selectedRole]);
+
+  useEffect(() => {
+    taskResolutionsRef.current = taskResolutions;
+  }, [taskResolutions]);
 
   useEffect(() => {
     workingStateRef.current = workingState;
@@ -290,6 +325,14 @@ export function CaseReviewPage({
   useEffect(() => {
     seekToFrameRef.current = controller.seekToFrame;
   }, [controller.seekToFrame]);
+
+  useEffect(() => {
+    controllerPlayingRef.current = controller.playing;
+    if (!controller.playing && deferredLatestRole) {
+      setLatestRole(deferredLatestRole);
+      setDeferredLatestRole(undefined);
+    }
+  }, [controller.playing, deferredLatestRole]);
 
   useEffect(() => {
     let cancelled = false;
@@ -313,38 +356,6 @@ export function CaseReviewPage({
       cancelled = true;
     };
   }, [caseId, session?.session_id, workingState?.active_projection_hash, workingState?.current_event_chain_head]);
-
-  useEffect(() => {
-    if (mode !== 'review' || !session?.session_id || !reviewReady || activeMaterializationJobKey) return;
-    if (latestReviewedLifecycle !== 'BUILD_REQUIRED') return;
-    const requestKey = latestReviewedBuildRequestKey({ caseId, sessionId: session.session_id, workingState });
-    if (!claimLatestReviewedAutoBuildRequest(requestKey)) return;
-    const run = async () => {
-      try {
-        const result = await requestLatestReviewedBuild({
-          session_id: session.session_id,
-          actor: attribution || { display_name: null },
-          case_id: caseId,
-        });
-        if (result.working_state) applyWorkingStateProjection(result.working_state);
-        trackMaterializationJob(result.materialization_job || result.job);
-      } catch (err) {
-        releaseLatestReviewedAutoBuildRequest(requestKey);
-        setMaterializationError(err instanceof Error ? err.message : String(err));
-      }
-    };
-    void run();
-  }, [
-    activeMaterializationJobKey,
-    attribution,
-    caseId,
-    latestReviewedLifecycle,
-    mode,
-    reviewReady,
-    session?.session_id,
-    workingState?.active_projection_hash,
-    workingState?.state_hash,
-  ]);
 
   useEffect(() => {
     if (!roles.some((role) => role.role === selectedRole)) {
@@ -379,6 +390,34 @@ export function CaseReviewPage({
       return initialDraft(caseId, manifest, caseFrame, selectedTask);
     });
   }, [caseId, controller.pause, manifest, mode, selectedTask?.review_task_id]);
+
+  useEffect(() => {
+    if (mode !== 'edit' || draft.mode !== 'single_frame') return;
+    if (
+      draft.start_source_frame === currentSourceFrame &&
+      draft.end_source_frame === currentSourceFrame &&
+      draft.keyframes.every((keyframe) => keyframe.source_frame === currentSourceFrame)
+    ) {
+      return;
+    }
+    setPreviewReady(false);
+    setPreviewInvalidated(false);
+    setPreviewToken(undefined);
+    setPreviewRole(undefined);
+    setDraft((current) => {
+      const reset = resetSingleFrameDraftForSourceFrame(current, currentSourceFrame);
+      const resetManualTask =
+        !selectedTask?.review_task_id &&
+        reset !== current &&
+        String(current.selectedTaskId || '').startsWith(`manual_${caseId}_`);
+      return withDraftHash({
+        ...reset,
+        selectedTaskId: resetManualTask
+          ? manualDraftTaskId(caseId, currentSourceFrame)
+          : reset.selectedTaskId,
+      });
+    });
+  }, [caseId, currentSourceFrame, draft.end_source_frame, draft.keyframes, draft.mode, draft.start_source_frame, mode, selectedTask?.review_task_id]);
 
   useEffect(() => {
     if (!focusTarget) return undefined;
@@ -443,13 +482,22 @@ export function CaseReviewPage({
             },
           );
           if (jobMatchesCurrentProjection && tracked.job.working_state) {
-            onWorkingStateChangeRef.current(tracked.job.working_state);
+            applyWorkingStateProjection(tracked.job.working_state);
           }
           if (jobMatchesCurrentProjection && tracked.job.latest_reviewed && tracked.job.case_id === caseId) {
-            setLatestRole(tracked.job.latest_reviewed);
-            setSelectedRoleRef.current('latest_reviewed');
-            seekToFrameRef.current(tracked.preserveFrame);
-            setCorrectionSaveStatus('Correction saved — reviewed video ready');
+            const manualPlaybackActive = modeRef.current === 'edit' && controllerPlayingRef.current;
+            setLatestRoleWithoutPlaybackInterruption(tracked.job.latest_reviewed);
+            if (!manualPlaybackActive) {
+              const restoreFrame = tracked.preserveFrame;
+              setSelectedRoleRef.current('latest_reviewed');
+              window.setTimeout(() => seekToFrameRef.current(restoreFrame), 0);
+            }
+            if (tracked.completionStatus) {
+              setCorrectionSaveStatus(tracked.completionStatus);
+              window.setTimeout(() => setCorrectionSaveStatus((current) => (
+                current === tracked.completionStatus ? undefined : current
+              )), 3000);
+            }
           }
         }
         if (tracked.job.status === 'superseded') {
@@ -470,7 +518,11 @@ export function CaseReviewPage({
             });
           }
           setMaterializationError(tracked.job.error || 'Reviewed video update failed.');
-          setCorrectionSaveStatus('Correction saved');
+          if (tracked.completionStatus?.startsWith('Correction saved')) {
+            setCorrectionSaveStatus('Correction saved');
+          } else {
+            setCorrectionSaveStatus(undefined);
+          }
         }
       }
     };
@@ -542,12 +594,33 @@ export function CaseReviewPage({
   };
 
   const appendEvents = (nextEvents: AuditEvent[]) => {
-    const combined = [...eventsRef.current, ...nextEvents];
+    const seen = new Set(eventsRef.current.map((event) => event.event_hash));
+    const combined = [
+      ...eventsRef.current,
+      ...nextEvents.filter((event) => !seen.has(event.event_hash)),
+    ];
     eventsRef.current = combined;
     onEventsChange(combined);
   };
 
-  const trackMaterializationJob = (job: MaterializationJob | undefined, entityIds: string[] = []) => {
+  const setLatestRoleWithoutPlaybackInterruption = (role?: MediaVersion) => {
+    if (
+      role &&
+      modeRef.current === 'edit' &&
+      controllerPlayingRef.current &&
+      selectedRoleValueRef.current === 'latest_reviewed'
+    ) {
+      setDeferredLatestRole(role);
+      return;
+    }
+    setLatestRole(role);
+  };
+
+  const trackMaterializationJob = (
+    job: MaterializationJob | undefined,
+    entityIds: string[] = [],
+    completionStatus?: string,
+  ) => {
     const trackedEntityIds = job?.affected_entity_ids?.length ? job.affected_entity_ids : entityIds;
     if (!job?.job_id) {
       if (trackedEntityIds.length) {
@@ -572,30 +645,39 @@ export function CaseReviewPage({
     setMaterializationError(undefined);
     setMaterializationJobs((current) => ({
       ...current,
-      [job.job_id]: { entityIds: trackedEntityIds, job, preserveFrame: caseFrame },
+      [job.job_id]: {
+        completionStatus,
+        entityIds: trackedEntityIds,
+        job,
+        preserveFrame: caseFrameValueRef.current,
+      },
     }));
   };
 
-  const applyWorkingStateProjection = (state?: WorkingState) => {
-    if (!state) return;
+  const applyWorkingStateProjection = (state?: WorkingState, responseEvents: AuditEvent[] = []) => {
+    if (!state) return false;
+    if (workingStateIsOlderThanKnownEvents(state, eventsRef.current, responseEvents)) {
+      return false;
+    }
     workingStateRef.current = state;
     onWorkingStateChange(state);
-    onDecisionsChange(
-      normalizeDecisionsByCase(
-        state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
-        state.task_decisions as Record<string, TaskDecision> | undefined,
-      ),
+    const nextDecisions = normalizeDecisionsByCase(
+      state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+      state.task_decisions as Record<string, TaskDecision> | undefined,
     );
-    onTaskResolutionsChange(
-      normalizeTaskResolutionsByCase(
-        state.task_resolutions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
-        state.task_resolutions as Record<string, TaskDecision> | undefined,
-      ),
+    const nextResolutions = normalizeTaskResolutionsByCase(
+      state.task_resolutions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+      state.task_resolutions as Record<string, TaskDecision> | undefined,
     );
+    decisionsRef.current = nextDecisions;
+    taskResolutionsRef.current = nextResolutions;
+    onDecisionsChange(nextDecisions);
+    onTaskResolutionsChange(nextResolutions);
     onManualTasksChange((Array.isArray(state.active_manual_tasks) ? state.active_manual_tasks : []) as Task[]);
     onEntityOverridesChange((state.object_policy_overrides || {}) as Record<string, EffectiveEntity>);
     onCorrectionsChange((Array.isArray(state.manual_corrections) ? state.manual_corrections : []) as Record<string, unknown>[]);
-    setLatestRole((state.materialized_latest_reviewed || {})[caseId] as MediaVersion | undefined);
+    setLatestRoleWithoutPlaybackInterruption((state.materialized_latest_reviewed || {})[caseId] as MediaVersion | undefined);
+    return true;
   };
 
   const persistDecision = async (task: ReviewGroup, action: string) => {
@@ -607,11 +689,11 @@ export function CaseReviewPage({
       openCorrectionEditor(task);
       return;
     }
-    setPendingTaskId(task.review_task_id);
+    setPendingTaskIds((current) => new Set(current).add(task.review_task_id));
     onError(undefined);
     try {
-      let nextDecisions = decisions;
-      let nextResolutions = taskResolutions;
+      let nextDecisions = decisionsRef.current;
+      let nextResolutions = taskResolutionsRef.current;
       if (task.child_tasks.length > 1) {
         const result = await saveDecisionGroup({
           session_id: session.session_id,
@@ -622,9 +704,8 @@ export function CaseReviewPage({
           action,
           note: groupActionNote(task, action),
         });
-        appendEvents(result.events);
-        if (result.working_state) {
-          applyWorkingStateProjection(result.working_state);
+        const responseEvents = result.events || [];
+        if (result.working_state && applyWorkingStateProjection(result.working_state, responseEvents)) {
           nextDecisions = normalizeDecisionsByCase(
             result.working_state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
             result.working_state.task_decisions as Record<string, TaskDecision> | undefined,
@@ -633,7 +714,19 @@ export function CaseReviewPage({
             result.working_state.task_resolutions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
             result.working_state.task_resolutions as Record<string, TaskDecision> | undefined,
           );
+        } else {
+          for (const responseEvent of responseEvents) {
+            const decision = decisionFromEvent(responseEvent);
+            if (!decision) continue;
+            nextDecisions = withTaskDecision(nextDecisions, caseId, decision.task_id, decision);
+            nextResolutions = withoutTaskResolution(nextResolutions, caseId, decision.task_id);
+          }
+          decisionsRef.current = nextDecisions;
+          taskResolutionsRef.current = nextResolutions;
+          onDecisionsChange(nextDecisions);
+          onTaskResolutionsChange(nextResolutions);
         }
+        appendEvents(responseEvents);
       } else {
         const childTask = task.child_tasks[0] || task;
         const { decision, event, working_state } = await saveDecision({
@@ -649,8 +742,8 @@ export function CaseReviewPage({
                 ? 'Not sensitive'
                 : 'Needs correction',
         });
-        if (working_state) {
-          applyWorkingStateProjection(working_state);
+        const responseEvents = [event].filter(Boolean);
+        if (working_state && applyWorkingStateProjection(working_state, responseEvents)) {
           nextDecisions = normalizeDecisionsByCase(
             working_state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
             working_state.task_decisions as Record<string, TaskDecision> | undefined,
@@ -660,12 +753,14 @@ export function CaseReviewPage({
             working_state.task_resolutions as Record<string, TaskDecision> | undefined,
           );
         } else {
-          nextDecisions = withTaskDecision(decisions, caseId, childTask.review_task_id, decision);
-          nextResolutions = withoutTaskResolution(taskResolutions, caseId, childTask.review_task_id);
+          nextDecisions = withTaskDecision(decisionsRef.current, caseId, childTask.review_task_id, decision);
+          nextResolutions = withoutTaskResolution(taskResolutionsRef.current, caseId, childTask.review_task_id);
+          decisionsRef.current = nextDecisions;
+          taskResolutionsRef.current = nextResolutions;
           onDecisionsChange(nextDecisions);
           onTaskResolutionsChange(nextResolutions);
         }
-        appendEvents([event]);
+        appendEvents(responseEvents);
       }
       if (action === ACTIONS.needsCorrection) {
         openCorrectionEditor(task);
@@ -687,7 +782,11 @@ export function CaseReviewPage({
     } catch (err) {
       onError(`Decision was not saved: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      setPendingTaskId(undefined);
+      setPendingTaskIds((current) => {
+        const next = new Set(current);
+        next.delete(task.review_task_id);
+        return next;
+      });
     }
   };
 
@@ -883,13 +982,22 @@ export function CaseReviewPage({
     setPreviewRole(undefined);
     setCorrectionSaveStatus(
       materialization_required
-        ? 'Correction saved — applying changes...'
+        ? 'Correction saved — reviewed video build pending'
         : publication_status === 'deferred'
           ? 'Correction saved — review still incomplete'
           : 'Correction saved',
     );
-    setSelectedRole('latest_reviewed');
-    trackMaterializationJob(materialization_job, correction.entity_id ? [correction.entity_id] : []);
+    setDraft(initialDraft(caseId, manifest, caseFrameValueRef.current, null));
+    if (selectedRoleValueRef.current === 'correction_preview' || selectedRoleValueRef.current === 'latest_reviewed') {
+      setSelectedRole(preferredManualBaseRole(roles));
+    }
+    if (materialization_job) {
+      trackMaterializationJob(
+        materialization_job,
+        correction.entity_id ? [correction.entity_id] : [],
+        'Reviewed video ready',
+      );
+    }
   };
 
   const previewDraftCorrection = async (correction: Correction) => {
@@ -1035,8 +1143,33 @@ export function CaseReviewPage({
       actor: attribution || { display_name: null },
       job_id: failed.job.job_id,
     });
-    trackMaterializationJob(result.job, failed.entityIds);
+    trackMaterializationJob(result.job, failed.entityIds, failed.completionStatus);
     setMaterializationError(undefined);
+  };
+
+  const requestReviewedVideoBuild = async () => {
+    if (!session?.session_id) return;
+    setMaterializationError(undefined);
+    setCorrectionSaveStatus('Building reviewed video...');
+    try {
+      const result = await requestLatestReviewedBuild({
+        session_id: session.session_id,
+        actor: attribution || { display_name: null },
+        case_id: caseId,
+      });
+      if (result.working_state) applyWorkingStateProjection(result.working_state);
+      if (result.latest_reviewed) setLatestRoleWithoutPlaybackInterruption(result.latest_reviewed);
+      trackMaterializationJob(result.materialization_job || result.job, [], 'Reviewed video ready');
+      if (!(result.materialization_job || result.job)) {
+        setCorrectionSaveStatus(result.latest_reviewed ? 'Reviewed video ready' : undefined);
+        window.setTimeout(() => setCorrectionSaveStatus((current) => (
+          current === 'Reviewed video ready' ? undefined : current
+        )), 3000);
+      }
+    } catch (err) {
+      setMaterializationError(err instanceof Error ? err.message : String(err));
+      setCorrectionSaveStatus(undefined);
+    }
   };
 
   return (
@@ -1127,8 +1260,28 @@ export function CaseReviewPage({
       <section className={`next-step-panel ${reviewReady ? 'complete' : 'progress'}`} aria-label={`${manifest.display_name} review progress`}>
         <div>
           <strong>{lifecycleMessage}</strong>
+          {latestReviewedLifecycle === 'BUILD_REQUIRED' ? (
+            <p className="muted">
+              {pendingMediaChangeCount > 0
+                ? `${pendingMediaChangeCount} saved media change${pendingMediaChangeCount === 1 ? '' : 's'} pending reviewed-video build`
+                : 'No saved media changes; Automatic can be published as Latest'}
+            </p>
+          ) : null}
         </div>
         <div className="button-row">
+          <button
+            type="button"
+            disabled={!session?.session_id || latestReviewedLifecycle !== 'BUILD_REQUIRED' || Boolean(activeMaterializationJobKey)}
+            onClick={() => void requestReviewedVideoBuild()}
+          >
+            {activeMaterializationJobs.length ? (
+              <>
+                <span className="inline-spinner" aria-hidden="true" /> Building reviewed video...
+              </>
+            ) : (
+              'Build reviewed video'
+            )}
+          </button>
           <button
             type="button"
             className="primary"
@@ -1173,7 +1326,11 @@ export function CaseReviewPage({
               />
             ) : null}
             {pendingCorrectionRegions.length ? (
-              <PendingCorrectionOverlay manifest={manifest} regions={pendingCorrectionRegions} />
+              <PendingCorrectionOverlay
+                manifest={manifest}
+                regions={pendingCorrectionRegions}
+                statusLabel={activeMaterializationJobs.length ? 'Correction saved — building reviewed video' : 'Correction saved — pending reviewed-video build'}
+              />
             ) : null}
           </ReviewVideoPlayer>
         </div>
@@ -1181,7 +1338,7 @@ export function CaseReviewPage({
           <ReviewQueue
             bucket={bucket}
             manifest={manifest}
-            pendingTaskId={pendingTaskId}
+            pendingTaskIds={pendingTaskIds}
             selectedTaskId={selectedTaskId}
             tasks={tasks}
             optionalTasks={optionalTasks}
@@ -1201,6 +1358,9 @@ export function CaseReviewPage({
               draft={draft}
               previewInvalidated={previewInvalidated}
               previewReady={previewReady}
+              buildRunning={activeMaterializationJobs.length > 0}
+              latestReviewedCurrent={latestReviewedCurrent}
+              savedCorrections={savedCorrectionsForCase}
               selectedTask={selectedTask}
               sourceVideoHash={manifest.source_video_hash}
               onDiscard={() => {
@@ -1208,11 +1368,12 @@ export function CaseReviewPage({
                 setPreviewToken(undefined);
                 setPreviewRole(undefined);
                 setCorrectionSaveStatus(undefined);
-                setSelectedRole('latest_reviewed');
+                setSelectedRole(defaultRole(roles));
                 setDraft(initialDraft(caseId, manifest, caseFrame, selectedTask));
               }}
               onDraftChange={updateDraft}
               onGoToSourceFrame={controller.seekToSourceFrame}
+              onInspectCorrection={controller.seekToSourceFrame}
               onPreview={previewDraftCorrection}
               onSave={saveCorrection}
             />
@@ -1442,6 +1603,28 @@ function formatMaterializationStatus(job: MaterializationJob): string {
   return `Updating reviewed video: ${rawStage}${changedFrames}`;
 }
 
+function preferredManualBaseRole(roles: MediaVersion[]): string {
+  if (roles.some((role) => role.role === 'original')) return 'original';
+  if (roles.some((role) => role.role === 'automatic')) return 'automatic';
+  return defaultRole(roles);
+}
+
+function pendingMediaChangesForCase(workingState: WorkingState | undefined, caseId: CaseId): number {
+  const currentRevision = String(workingState?.active_projection_hash || '');
+  const latest = (workingState?.materialized_latest_reviewed || {})[caseId] as Record<string, unknown> | undefined;
+  const latestRevision = String(
+    latest?.published_working_state_revision || latest?.accepted_working_state_revision || '',
+  );
+  if (currentRevision && latestRevision === currentRevision) return 0;
+  const corrections = Array.isArray(workingState?.manual_corrections)
+    ? workingState.manual_corrections.filter((correction) => String(correction.case_id || '') === caseId).length
+    : 0;
+  const entityActions = Object.values(workingState?.object_policy_overrides || {})
+    .filter((entity) => String((entity as Record<string, unknown>).case_id || '') === caseId)
+    .length;
+  return corrections + entityActions;
+}
+
 function pendingRegionsForSourceFrame(
   corrections: Record<string, unknown>[],
   manualTasks: Task[],
@@ -1544,8 +1727,12 @@ function initialDraft(caseId: CaseId, manifest: WorkspaceSummary['cases'][string
     barriers: [],
     checkpoints: [],
     interpolation_method: 'none',
-    selectedTaskId: task?.review_task_id,
+    selectedTaskId: task?.review_task_id || manualDraftTaskId(caseId, sourceFrame),
   });
+}
+
+function manualDraftTaskId(caseId: CaseId, sourceFrame: number): string {
+  return `manual_${caseId}_${sourceFrame}_${Date.now()}`;
 }
 
 function manualRedactionCategory(category: string | undefined): ManualRedactionCategory {

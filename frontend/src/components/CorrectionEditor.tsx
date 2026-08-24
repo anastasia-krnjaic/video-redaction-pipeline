@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent, RefObject } from 'react';
+import { displayPointToSourcePoint } from '../state/manualGeometry';
 import type { Attribution, Case, Correction, Task } from '../types/api';
 import type { CaseId, CorrectionCheckpointDraft, CorrectionDraft, CorrectionKeyframeDraft, ManualRedactionCategory } from '../types/domain';
 import { MANUAL_REDACTION_CATEGORY_OPTIONS } from '../types/domain';
-import { clamp } from '../utils/frame';
 
 interface Props {
   actor: Attribution | Record<string, unknown>;
@@ -11,30 +11,38 @@ interface Props {
   configurationFreezeHash?: string | null;
   currentSourceFrame: number;
   draft: CorrectionDraft;
+  buildRunning?: boolean;
+  latestReviewedCurrent?: boolean;
   previewInvalidated: boolean;
   previewReady: boolean;
+  savedCorrections?: Record<string, unknown>[];
   selectedTask?: Task | null;
   sourceVideoHash?: string | null;
   onDiscard: () => void;
   onDraftChange: (draft: CorrectionDraft) => void;
   onGoToSourceFrame: (sourceFrame: number) => void;
+  onInspectCorrection?: (sourceFrame: number) => void;
   onPreview: (correction: Correction) => Promise<void>;
   onSave: (correction: Correction, reason: string) => Promise<void>;
 }
 
 export function CorrectionEditor({
   actor,
+  buildRunning = false,
   caseId,
   configurationFreezeHash,
   currentSourceFrame,
   draft,
+  latestReviewedCurrent = false,
   onDiscard,
   onDraftChange,
+  onInspectCorrection,
   onGoToSourceFrame,
   onPreview,
   onSave,
   previewInvalidated,
   previewReady,
+  savedCorrections = [],
   selectedTask,
   sourceVideoHash,
 }: Props) {
@@ -87,7 +95,7 @@ export function CorrectionEditor({
     if (!configurationFreezeHash) return 'Correction cannot be saved because the package freeze hash is unavailable.';
     if (!sourceVideoHash) return 'Correction cannot be saved because the source video hash is unavailable.';
     if (!validation.valid) return validation.message;
-    const taskId = selectedTask?.review_task_id || draft.selectedTaskId || `manual_${caseId}_${Date.now()}`;
+    const taskId = selectedTask?.review_task_id || draft.selectedTaskId || `manual_${caseId}_${draft.start_source_frame}`;
     const normalized = normalizedKeyframes(draft);
     return {
       case_id: caseId,
@@ -310,6 +318,12 @@ export function CorrectionEditor({
           </p>
         ) : null}
       </article>
+      <SavedCorrectionsSummary
+        buildRunning={buildRunning}
+        latestReviewedCurrent={latestReviewedCurrent}
+        savedCorrections={savedCorrections}
+        onInspectCorrection={onInspectCorrection || onGoToSourceFrame}
+      />
       <p className="muted">Correction geometry is stored in source-frame and source-video coordinates.</p>
     </section>
   );
@@ -332,9 +346,11 @@ export interface PendingCorrectionRegion {
 export function PendingCorrectionOverlay({
   manifest,
   regions,
+  statusLabel = 'Correction saved — pending reviewed-video build',
 }: {
   manifest: Case;
   regions: PendingCorrectionRegion[];
+  statusLabel?: string;
 }) {
   const dimensions = useMemo(() => ({ width: manifest.width || 1920, height: manifest.height || 1080 }), [manifest.height, manifest.width]);
   if (!regions.length) return null;
@@ -355,7 +371,7 @@ export function PendingCorrectionOverlay({
           );
         })}
       </svg>
-      <span className="pending-correction-label">Correction saved — applying changes...</span>
+      <span className="pending-correction-label">{statusLabel}</span>
     </div>
   );
 }
@@ -372,12 +388,19 @@ export function CorrectionVideoOverlay({
   const dimensions = useMemo(() => ({ width: manifest.width || 1920, height: manifest.height || 1080 }), [manifest.height, manifest.width]);
   const rect = draft.keyframes.find((keyframe) => keyframe.source_frame === currentSourceFrame)?.bbox_xyxy;
   const updateDraft = (keyframe: CorrectionKeyframeDraft) => {
+    const keyframes = draft.mode === 'interpolate'
+      ? [
+          ...draft.keyframes.filter((item) => item.source_frame !== keyframe.source_frame),
+          keyframe,
+        ].sort((left, right) => left.source_frame - right.source_frame)
+      : [keyframe];
     onDraftChange({
       ...draft,
-      keyframes: [
-        ...draft.keyframes.filter((item) => item.source_frame !== keyframe.source_frame),
-        keyframe,
-      ].sort((left, right) => left.source_frame - right.source_frame),
+      end: draft.mode === 'single_frame' ? currentSourceFrame : draft.end,
+      end_source_frame: draft.mode === 'single_frame' ? currentSourceFrame : draft.end_source_frame,
+      keyframes,
+      start: draft.mode === 'single_frame' ? currentSourceFrame : draft.start,
+      start_source_frame: draft.mode === 'single_frame' ? currentSourceFrame : draft.start_source_frame,
     });
   };
   const point = (event: PointerEvent<SVGSVGElement>) => {
@@ -385,15 +408,11 @@ export function CorrectionVideoOverlay({
     const videoBox = video?.getBoundingClientRect() || event.currentTarget.getBoundingClientRect();
     const width = video?.videoWidth || dimensions.width;
     const height = video?.videoHeight || dimensions.height;
-    const scale = Math.min(videoBox.width / width, videoBox.height / height);
-    const renderedWidth = width * scale;
-    const renderedHeight = height * scale;
-    const offsetX = (videoBox.width - renderedWidth) / 2;
-    const offsetY = (videoBox.height - renderedHeight) / 2;
-    return {
-      x: clamp(Math.round(((event.clientX - videoBox.left - offsetX) / renderedWidth) * width), 0, width),
-      y: clamp(Math.round(((event.clientY - videoBox.top - offsetY) / renderedHeight) * height), 0, height),
-    };
+    return displayPointToSourcePoint(
+      { clientX: event.clientX, clientY: event.clientY },
+      videoBox,
+      { width, height },
+    );
   };
 
   return (
@@ -427,6 +446,19 @@ export function CorrectionVideoOverlay({
           });
         }}
         onPointerUp={(event) => {
+          const dragOrigin = originRef.current || origin;
+          if (dragOrigin) {
+            const next = point(event);
+            updateDraft({
+              source_frame: currentSourceFrame,
+              bbox_xyxy: [
+                Math.min(dragOrigin.x, next.x),
+                Math.min(dragOrigin.y, next.y),
+                Math.max(dragOrigin.x, next.x),
+                Math.max(dragOrigin.y, next.y),
+              ],
+            });
+          }
           originRef.current = null;
           setOrigin(null);
           if (event.currentTarget.hasPointerCapture(event.pointerId)) {
@@ -457,28 +489,34 @@ export function deriveCorrectionDraftValidation(draft: CorrectionDraft): Correct
   const start = Math.min(draft.start_source_frame, draft.end_source_frame);
   const end = Math.max(draft.start_source_frame, draft.end_source_frame);
   const keyframes = draft.keyframes.filter((keyframe) => keyframe.source_frame >= start && keyframe.source_frame <= end);
+  const outsideKeyframes = draft.keyframes.filter((keyframe) => keyframe.source_frame < start || keyframe.source_frame > end);
   const blockingCheckpoints = draft.barriers.filter(
     (checkpoint) =>
       checkpoint.source_frame > start &&
       checkpoint.source_frame < end &&
       (checkpoint.state === 'not_visible' || checkpoint.state === 'blocked_by_scene_cut'),
   );
-  if (draft.keyframes.length && !keyframes.length) {
-    return { valid: false, message: 'The current keyframe is outside the selected interval.' };
+  if (outsideKeyframes.length) {
+    return { valid: false, message: 'A keyframe is outside the selected interval.' };
   }
   if (draft.mode === 'single_frame') {
     if (draft.start_source_frame !== draft.end_source_frame) return { valid: false, message: 'Single frame mode requires start and end to match.' };
-    if (!keyframes.some((keyframe) => keyframe.source_frame === start)) return { valid: false, message: `Draw a rectangle on source frame ${start}.` };
+    if (keyframes.length !== 1 || keyframes[0].source_frame !== start) {
+      return { valid: false, message: `Draw exactly one rectangle on source frame ${start}.` };
+    }
     return { valid: true, message: '' };
   }
   if (draft.mode === 'fixed_box') {
     if (draft.start_source_frame > draft.end_source_frame) return { valid: false, message: 'Choose a valid source-frame interval.' };
-    if (!keyframes.length) return { valid: false, message: `Draw one rectangle inside source frames ${start}-${end}.` };
+    if (keyframes.length !== 1) return { valid: false, message: `Draw exactly one fixed rectangle for source frames ${start}-${end}.` };
     return { valid: true, message: '' };
   }
   if (draft.start_source_frame >= draft.end_source_frame) return { valid: false, message: 'Interpolate mode requires a multi-frame interval.' };
   if (blockingCheckpoints.length) {
     return { valid: false, message: 'Linear correction cannot cross scene-cut or not-visible barriers.' };
+  }
+  if (keyframes.length !== 2) {
+    return { valid: false, message: 'Interpolate mode requires exactly one start and one end keyframe.' };
   }
   if (!keyframes.some((keyframe) => keyframe.source_frame === start)) {
     return { valid: false, message: `Draw a rectangle on start frame ${start} to preview this interpolation.` };
@@ -490,6 +528,29 @@ export function deriveCorrectionDraftValidation(draft: CorrectionDraft): Correct
 }
 
 export const validateCorrectionDraft = deriveCorrectionDraftValidation;
+
+export function resetSingleFrameDraftForSourceFrame(
+  draft: CorrectionDraft,
+  currentSourceFrame: number,
+): CorrectionDraft {
+  if (draft.mode !== 'single_frame') return draft;
+  if (
+    draft.start_source_frame === currentSourceFrame &&
+    draft.end_source_frame === currentSourceFrame &&
+    draft.keyframes.every((keyframe) => keyframe.source_frame === currentSourceFrame)
+  ) {
+    return draft;
+  }
+  return {
+    ...draft,
+    end: currentSourceFrame,
+    end_source_frame: currentSourceFrame,
+    keyframes: draft.keyframes.filter((keyframe) => keyframe.source_frame === currentSourceFrame),
+    preview_token: undefined,
+    start: currentSourceFrame,
+    start_source_frame: currentSourceFrame,
+  };
+}
 
 function normalizedKeyframes(draft: CorrectionDraft): CorrectionKeyframeDraft[] {
   const start = Math.min(draft.start_source_frame, draft.end_source_frame);
@@ -553,6 +614,7 @@ export function applyCorrectionDraftMode(
     patch.interpolation_method = 'none';
   }
   if (mode === 'fixed_box') {
+    patch.keyframes = draft.keyframes.slice(0, 1);
     patch.holdSameBox = true;
     patch.interpolation_method = 'none';
   }
@@ -561,4 +623,43 @@ export function applyCorrectionDraftMode(
     patch.interpolation_method = 'linear';
   }
   return patch;
+}
+
+function SavedCorrectionsSummary({
+  buildRunning,
+  latestReviewedCurrent,
+  onInspectCorrection,
+  savedCorrections,
+}: {
+  buildRunning: boolean;
+  latestReviewedCurrent: boolean;
+  onInspectCorrection: (sourceFrame: number) => void;
+  savedCorrections: Record<string, unknown>[];
+}) {
+  if (!savedCorrections.length) return null;
+  const status = latestReviewedCurrent ? 'current' : buildRunning ? 'building' : 'pending build';
+  return (
+    <article className="edit-card saved-corrections-card" aria-label="Saved manual corrections">
+      <h3>Saved corrections</h3>
+      <p className="muted">{savedCorrections.length} saved · {status}</p>
+      <div className="saved-correction-list">
+        {savedCorrections.map((correction, index) => {
+          const start = Number(correction.source_frame_start ?? correction.source_frame ?? 0);
+          const end = Number(correction.source_frame_end ?? start);
+          const id = String(correction.correction_id || `correction_${index + 1}`);
+          return (
+            <button
+              type="button"
+              className="saved-correction-row"
+              key={id}
+              onClick={() => onInspectCorrection(start)}
+            >
+              <span>{String(correction.category || 'manual')} · {start === end ? `frame ${start}` : `frames ${start}-${end}`}</span>
+              <span>{id.slice(0, 12)}</span>
+            </button>
+          );
+        })}
+      </div>
+    </article>
+  );
 }

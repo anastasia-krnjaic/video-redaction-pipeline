@@ -216,23 +216,27 @@ main {
   display: grid;
   grid-template-columns: minmax(0, 3fr) minmax(320px, 2fr);
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
+  height: calc(100vh - 270px);
   min-height: 560px;
 }
 
 .review-main,
 .player-column {
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  min-height: 0;
 }
 
 .review-main {
-  display: grid;
-  grid-template-rows: auto;
+  height: 100%;
 }
 
 .side-panel {
+  box-sizing: border-box;
+  height: 100%;
   min-height: 0;
-  max-height: calc(100vh - 190px);
   overflow: auto;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -248,6 +252,12 @@ main {
   margin-bottom: var(--space-2);
 }
 
+.player-wrapper .version-row {
+  margin-bottom: 0;
+  padding: 9px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+}
+
 .version-selector {
   display: flex;
   align-items: center;
@@ -258,6 +268,10 @@ main {
 .source-range {
   color: var(--muted);
   font-size: 13px;
+}
+
+.player-wrapper .source-range {
+  color: rgba(255, 255, 255, 0.78);
 }
 
 .download-link {
@@ -313,6 +327,10 @@ main {
 }
 
 .player-wrapper {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  height: 100%;
   overflow: hidden;
   border-radius: var(--radius);
   background: #050910;
@@ -329,15 +347,20 @@ main {
 }
 
 .video-stage {
+  align-items: center;
+  display: flex;
+  flex: 1 1 auto;
+  justify-content: center;
+  min-height: 0;
   position: relative;
   background: #000;
 }
 
 .video-stage video {
   display: block;
+  height: 100%;
   width: 100%;
   aspect-ratio: 16 / 9;
-  max-height: calc(100vh - 290px);
   background: #000;
   object-fit: contain;
   cursor: pointer;
@@ -721,6 +744,38 @@ main {
   margin-top: 6px;
   color: var(--accent);
   font-size: 13px;
+}
+
+.saved-corrections-card {
+  display: grid;
+  gap: 8px;
+}
+
+.saved-correction-list {
+  display: grid;
+  gap: 6px;
+}
+
+.saved-correction-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  font-size: 12px;
+}
+
+.saved-correction-row span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.saved-correction-row span:last-child {
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
 }
 
 .operation-status {
@@ -1291,6 +1346,7 @@ pre {
 
   .workspace-layout,
   .final-layout {
+    height: auto;
     grid-template-columns: 1fr;
     min-height: 0;
   }
@@ -1300,10 +1356,7 @@ pre {
   }
 
   .side-panel {
-    max-height: none;
-  }
-
-  .video-stage video {
+    height: auto;
     max-height: none;
   }
 

@@ -62,6 +62,9 @@ LATEST_REVIEWED_PUBLICATION_DEFERRED_REASON = (
 )
 WORKING_STATE_CACHE_DISABLE_ENV = "REDACTOR_DISABLE_WORKING_STATE_CACHE"
 WORKING_STATE_CACHE_MAX_ENTRIES = 64
+DELIVERY_REDACTION_RECORDS_SCHEMA_VERSION = "case_delivery_redaction_records.v1"
+DELIVERY_REDACTION_RECORDS_FILENAME = "reviewed_regions.jsonl"
+DELIVERY_REDACTION_RECORDS_MANIFEST_FILENAME = "redaction_manifest.json"
 
 _WORKING_STATE_CACHE_LOCK = threading.RLock()
 _WORKING_STATE_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -1269,11 +1272,16 @@ def correction_verification_status(
             "reason": "Latest reviewed media is not current yet.",
         }
     if not latest:
+        pending_status = str(task.get("publication_status") or "waiting")
         return {
             "actionable": False,
             "decision_state": "waiting_for_latest_reviewed",
-            "publication_status": "waiting",
-            "reason": "Latest reviewed media is not current yet.",
+            "publication_status": pending_status,
+            "reason": (
+                "Correction saved; build the reviewed video before verification."
+                if pending_status == "pending_explicit_build"
+                else "Latest reviewed media is not current yet."
+            ),
         }
     if not media_exists:
         return {
@@ -3210,6 +3218,13 @@ def delivery_package_contract(
             "ready_for_delivery": ready,
         },
     }
+    manifest_payload["redaction_records"] = delivery_redaction_records_contract(
+        package_root,
+        session_dir,
+        case_id=case_id,
+        expected_source_sha256=source_sha256,
+        require_current_final=final_role.get("available") is True,
+    )
     return {
         "case_id": case_id,
         "manifest": manifest_payload,
@@ -3219,6 +3234,186 @@ def delivery_package_contract(
         "roles": roles,
         "schema_version": "delivery_package_contract.v1",
     }
+
+
+def delivery_redaction_records_contract(
+    package_root: Path,
+    session_dir: Path | None,
+    *,
+    case_id: str,
+    expected_source_sha256: str | None,
+    require_current_final: bool,
+) -> dict[str, Any]:
+    package_root = package_root.resolve()
+    case_id = case_ids.validate_case_id(case_id)
+    unavailable = {
+        "available": False,
+        "filename": DELIVERY_REDACTION_RECORDS_FILENAME,
+        "manifest_filename": DELIVERY_REDACTION_RECORDS_MANIFEST_FILENAME,
+        "schema_version": DELIVERY_REDACTION_RECORDS_SCHEMA_VERSION,
+    }
+    if session_dir is None:
+        return unavailable | {"reason": "review session is required"}
+    from redactor import review_finalization, reviewed_regions
+
+    try:
+        latest_pointer = reviewed_regions.validate_current_pointer(
+            package_root,
+            reviewed_regions.load_current_pointer(package_root, case_id=case_id),
+            case_id=case_id,
+        )
+        final_pointer = None
+        if require_current_final:
+            final_pointer = review_finalization.validate_current_final_pointer(
+                package_root,
+                review_finalization.load_current_final_pointer(
+                    package_root,
+                    case_id=case_id,
+                ),
+                case_id=case_id,
+            )
+        revision_manifest = dict(latest_pointer.get("revision_manifest_payload") or {})
+        revision_manifest_path = case_ids.contained_path(
+            package_root,
+            *Path(str(latest_pointer.get("revision_manifest") or "")).parts,
+        )
+        records_path = case_ids.contained_path(
+            package_root,
+            *(
+                revision_manifest_path.parent
+                / str(revision_manifest.get("reviewed_regions") or "")
+            )
+            .relative_to(package_root)
+            .parts,
+        )
+        binding = reviewed_regions.validate_reviewed_regions_artifact_binding(
+            package_root,
+            records_path,
+            latest_pointer=latest_pointer,
+            final_pointer=final_pointer,
+            expected_source_sha256=expected_source_sha256,
+            expected_case_id=case_id,
+        )
+    except (FileNotFoundError, ValueError, reviewed_regions.ReviewedRegionCompilationError) as exc:
+        return unavailable | {"reason": str(exc)}
+
+    content_identities = dict(latest_pointer.get("content_identities") or {})
+    return {
+        "authoritative_path": records_path.relative_to(package_root).as_posix(),
+        "available": True,
+        "case": case_id,
+        "content_identities": {
+            key: dict(value)
+            for key, value in sorted(content_identities.items())
+            if key
+            in {
+                "latest_reviewed_media_validation",
+                "latest_reviewed_region_validation",
+                "latest_reviewed_regions",
+                "latest_reviewed_revision_manifest",
+                "latest_reviewed_video",
+            }
+        },
+        "filename": DELIVERY_REDACTION_RECORDS_FILENAME,
+        "finalization_id": (final_pointer or {}).get("finalization_id"),
+        "latest_reviewed_revision": binding["revision_id"],
+        "manifest_filename": DELIVERY_REDACTION_RECORDS_MANIFEST_FILENAME,
+        "record_count": binding["record_count"],
+        "render_configuration": dict(revision_manifest.get("render_configuration") or {}),
+        "renderer_configuration_sha256": revision_manifest.get(
+            "renderer_configuration_sha256"
+        ),
+        "references": {
+            "final_current_pointer": "final/current.json" if final_pointer is not None else None,
+            "finalization_manifest": (final_pointer or {}).get("finalization_manifest"),
+            "latest_reviewed_current_pointer": "latest_reviewed/current.json",
+            "latest_reviewed_revision_manifest": latest_pointer.get("revision_manifest"),
+        },
+        "reviewed_region_identity": dict(
+            revision_manifest.get("reviewed_region_identity") or {}
+        ),
+        "review_session_id": session_dir.name,
+        "reviewed_region_records_sha256": binding["reviewed_region_records_sha256"],
+        "reviewed_region_set_sha256": binding["reviewed_region_set_sha256"],
+        "reviewed_regions_sha256": binding["reviewed_regions_sha256"],
+        "revision_manifest_artifact_sha256": latest_pointer.get(
+            "revision_manifest_artifact_sha256"
+        ),
+        "revision_manifest_sha256": revision_manifest.get("revision_manifest_sha256"),
+        "schema_version": DELIVERY_REDACTION_RECORDS_SCHEMA_VERSION,
+        "source_sha256": binding["source_sha256"],
+    }
+
+
+def validate_packaged_redaction_records(
+    redaction_manifest: dict[str, Any],
+    records_path: Path,
+) -> dict[str, Any]:
+    errors: list[str] = []
+    manifest = dict(redaction_manifest)
+    if manifest.get("schema_version") != DELIVERY_REDACTION_RECORDS_SCHEMA_VERSION:
+        errors.append("redaction records manifest schema mismatch")
+    if manifest.get("available") is not True:
+        errors.append("redaction records are not marked available")
+    if str(manifest.get("filename") or "") != records_path.name:
+        errors.append("redaction records filename mismatch")
+    for key in (
+        "case",
+        "latest_reviewed_revision",
+        "record_count",
+        "reviewed_region_records_sha256",
+        "reviewed_region_set_sha256",
+        "reviewed_regions_sha256",
+        "source_sha256",
+    ):
+        if manifest.get(key) in (None, ""):
+            errors.append(f"redaction records manifest missing {key}")
+    if _contains_absolute_path_value(manifest):
+        errors.append("redaction records manifest leaks an absolute local path")
+
+    actual_count: int | None = None
+    actual_sha = ""
+    semantic_sha = ""
+    try:
+        actual_sha = media.sha256_file(records_path)
+        raw_lines = [line for line in records_path.read_text(encoding="utf-8").splitlines() if line]
+        actual_count = len(raw_lines)
+        if any(_contains_absolute_path_value(json.loads(line)) for line in raw_lines):
+            errors.append("redaction records leak an absolute local path")
+        from redactor import review_finalization, reviewed_regions
+
+        records = review_finalization.load_privacy_region_records(records_path)
+        semantic_sha = reviewed_regions.semantic_region_set_hash(records)
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        errors.append(f"redaction records are unreadable: {exc}")
+
+    if actual_sha and str(manifest.get("reviewed_regions_sha256") or "") != actual_sha:
+        errors.append("redaction records SHA mismatch")
+    if actual_count is not None and int(manifest.get("record_count") or -1) != actual_count:
+        errors.append("redaction records count mismatch")
+    if semantic_sha and str(manifest.get("reviewed_region_records_sha256") or "") != semantic_sha:
+        errors.append("redaction records semantic SHA mismatch")
+    return {
+        "errors": errors,
+        "passed": not errors,
+        "record_count": actual_count or 0,
+        "reviewed_region_records_sha256": semantic_sha,
+        "reviewed_regions_sha256": actual_sha,
+        "schema_version": "packaged_redaction_records_validation.v1",
+    }
+
+
+def _contains_absolute_path_value(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(_contains_absolute_path_value(item) for item in value.values())
+    if isinstance(value, list | tuple):
+        return any(_contains_absolute_path_value(item) for item in value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("/"):
+            return True
+        return len(stripped) >= 3 and stripped[1] == ":" and stripped[2] in {"\\", "/"}
+    return False
 
 
 def delivery_package_zip(
@@ -3264,6 +3459,28 @@ def delivery_package_zip(
             json.dumps(contract["manifest"]["validation_state"], indent=2, sort_keys=True)
             + "\n",
         )
+        redaction_records = dict(contract["manifest"].get("redaction_records") or {})
+        if redaction_records.get("available") is True:
+            records_path = case_ids.contained_path(
+                package_root,
+                *Path(str(redaction_records["authoritative_path"])).parts,
+            )
+            validation = validate_packaged_redaction_records(redaction_records, records_path)
+            if validation["passed"] is not True:
+                raise ValueError(
+                    f"{case_id}: redaction records failed validation: {validation['errors']}"
+                )
+            redaction_manifest = redaction_records | {
+                "archive_path": f"{case_folder}/{DELIVERY_REDACTION_RECORDS_FILENAME}",
+            }
+            archive.writestr(
+                f"{case_folder}/{DELIVERY_REDACTION_RECORDS_MANIFEST_FILENAME}",
+                json.dumps(redaction_manifest, indent=2, sort_keys=True) + "\n",
+            )
+            archive.write(
+                records_path,
+                arcname=f"{case_folder}/{DELIVERY_REDACTION_RECORDS_FILENAME}",
+            )
         for role_name in ("original", "automatic", "latest_reviewed", "final_reviewed"):
             row = dict(dict(contract.get("roles") or {}).get(role_name) or {})
             if row.get("available") is not True:

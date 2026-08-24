@@ -4,8 +4,10 @@ import json
 import os
 import re
 import shutil
+import threading
 import urllib.error
 import urllib.request
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -1159,7 +1161,7 @@ def test_correction_interpolation_and_no_extrapolation() -> None:
 
 
 def test_correction_interpolation_rejects_extrapolation() -> None:
-    with pytest.raises(ValueError, match="start keyframe at source frame 10"):
+    with pytest.raises(ValueError, match="keyframes must match the interval endpoints"):
         review_corrections.ReviewCorrection(
             case_id="case",
             category="license_plate",
@@ -1180,7 +1182,7 @@ def test_correction_interpolation_rejects_extrapolation() -> None:
 
 
 def test_correction_linear_preview_contract_requires_exact_endpoint_keyframes() -> None:
-    with pytest.raises(ValueError, match="end keyframe at source frame 1848"):
+    with pytest.raises(ValueError, match="exactly one start and one end keyframe"):
         review_corrections.ReviewCorrection(
             case_id="day",
             category=CATEGORY_OTHER_SENSITIVE,
@@ -2372,7 +2374,8 @@ def test_noop_entity_policy_skips_materialization_job(tmp_path: Path) -> None:
                 "session_id": session_id,
             },
         )
-        audit = json.loads((package / "materialization_job_audit.json").read_text())
+        audit_path = package / "materialization_job_audit.json"
+        audit = json.loads(audit_path.read_text()) if audit_path.exists() else {"cases": {}}
 
         assert response["ok"] is True
         assert response["materialization_required"] is False
@@ -2383,14 +2386,20 @@ def test_noop_entity_policy_skips_materialization_job(tmp_path: Path) -> None:
             response["materialization_plan"]["before_effective_regions_hash"]
             == response["materialization_plan"]["after_effective_regions_hash"]
         )
-        assert audit["cases"][manifest.case_id]["materialization_jobs_skipped"] == 1
-        assert audit["cases"][manifest.case_id]["materialization_jobs_started"] == 0
+        assert server.materialization_jobs.jobs == {}
+        assert (
+            audit.get("cases", {}).get(manifest.case_id, {}).get(
+                "materialization_jobs_started",
+                0,
+            )
+            == 0
+        )
     finally:
         server.shutdown()
         server.server_close()
 
 
-def test_media_changing_policy_queues_one_target_hashed_job(tmp_path: Path) -> None:
+def test_media_changing_policy_records_pending_explicit_build(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest, entity = write_policy_entity_package(package)
     session_dir = create_session(package, manifest)
@@ -2408,20 +2417,18 @@ def test_media_changing_policy_queues_one_target_hashed_job(tmp_path: Path) -> N
                 "session_id": session_dir.name,
             },
         )
-        job = response["materialization_job"]
-
         assert response["ok"] is True
         assert response["materialization_required"] is True
-        assert job["status"] == "queued"
-        assert job["changed_source_frame_count"] == 1
-        assert job["current_stage"] == "waiting"
-        assert job["materialization_plan"]["materialization_strategy"] == "full_render_fallback"
-        assert job["planned_frames_to_render"] == manifest.frame_count
+        assert response["materialization_job"] is None
+        assert response["materialization_plan"]["publication_status"] == "pending_explicit_build"
+        assert response["materialization_plan"]["changed_source_frame_count"] == 1
         assert (
-            job["target_effective_regions_hash"]
-            == response["materialization_plan"]["after_effective_regions_hash"]
+            response["materialization_plan"]["materialization_strategy"]
+            == "pending_explicit_build"
         )
-        assert job["target_effective_region_count"] == 0
+        assert response["materialization_plan"]["planned_frames_to_render"] == 0
+        assert response["materialization_plan"]["after_effective_region_count"] == 0
+        assert server.materialization_jobs.jobs == {}
     finally:
         server.shutdown()
         server.server_close()
@@ -2533,6 +2540,65 @@ def test_effective_region_change_summary_tracks_manual_correction_frames(
     )
 
 
+def test_backend_rejects_stale_keyframes_for_manual_correction_modes() -> None:
+    base = {
+        "case_id": "day",
+        "category": CATEGORY_PLATE,
+        "configuration_freeze_hash": "freeze",
+        "operation": review_corrections.OP_ADD,
+        "reason": "manual",
+        "reviewer_identity": {"reviewer_id": "analyst"},
+        "source_video_hash": "source",
+        "task_id": "task_1",
+    }
+    with pytest.raises(ValueError, match="keyframe cannot be after correction interval"):
+        review_corrections.correction_from_dict(
+            base
+            | {
+                "interpolation_method": review_corrections.INTERPOLATION_NONE,
+                "keyframe_boxes": [
+                    {"bbox_xyxy": [10, 10, 20, 20], "source_frame": 89},
+                    {"bbox_xyxy": [12, 12, 22, 22], "source_frame": 90},
+                ],
+                "source_frame_end": 89,
+                "source_frame_start": 89,
+            }
+        )
+    with pytest.raises(
+        ValueError,
+        match="non-interpolated corrections require exactly one keyframe",
+    ):
+        review_corrections.correction_from_dict(
+            base
+            | {
+                "interpolation_method": review_corrections.INTERPOLATION_NONE,
+                "keyframe_boxes": [
+                    {"bbox_xyxy": [10, 10, 20, 20], "source_frame": 89},
+                    {"bbox_xyxy": [12, 12, 22, 22], "source_frame": 89},
+                ],
+                "source_frame_end": 89,
+                "source_frame_start": 89,
+            }
+        )
+    with pytest.raises(
+        ValueError,
+        match="exactly one start and one end keyframe",
+    ):
+        review_corrections.correction_from_dict(
+            base
+            | {
+                "interpolation_method": review_corrections.INTERPOLATION_LINEAR,
+                "keyframe_boxes": [
+                    {"bbox_xyxy": [10, 10, 20, 20], "source_frame": 89},
+                    {"bbox_xyxy": [12, 12, 22, 22], "source_frame": 90},
+                    {"bbox_xyxy": [14, 14, 24, 24], "source_frame": 91},
+                ],
+                "source_frame_end": 91,
+                "source_frame_start": 89,
+            }
+        )
+
+
 def test_fixed_box_long_day_span_expands_to_544_effective_frames(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest = synthetic_case_manifest(package)
@@ -2638,15 +2704,16 @@ def test_materialization_plan_reports_exact_changed_frames_for_policy_removal(
             {"source_frame_start": 0, "source_frame_end": 0}
         ]
         assert plan["affected_source_frame_intervals"] == plan["changed_source_frame_intervals"]
-        assert plan["materialization_strategy"] == "full_render_fallback"
-        assert plan["planned_frames_to_render"] == manifest.frame_count
-        assert plan["planned_frames_to_encode"] == manifest.frame_count
+        assert plan["materialization_strategy"] == "pending_explicit_build"
+        assert plan["publication_status"] == "pending_explicit_build"
+        assert plan["planned_frames_to_render"] == 0
+        assert plan["planned_frames_to_encode"] == 0
     finally:
         server.shutdown()
         server.server_close()
 
 
-def test_repeated_same_policy_reuses_existing_pending_materialization_job(tmp_path: Path) -> None:
+def test_repeated_same_policy_does_not_start_materialization_job(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest, entity = write_policy_entity_package(package)
     session_dir = create_session(package, manifest)
@@ -2663,16 +2730,13 @@ def test_repeated_same_policy_reuses_existing_pending_materialization_job(tmp_pa
     try:
         first = post_json(f"{base_url}/api/v1/object-policy", payload)
         second = post_json(f"{base_url}/api/v1/object-policy", payload)
-        jobs = server.materialization_jobs.jobs
-
         assert first["materialization_required"] is True
-        assert second["materialization_required"] is True
-        assert first["materialization_job"]["job_id"] == second["materialization_job"]["job_id"]
-        assert (
-            second["materialization_plan"]["reused_job_id"]
-            == first["materialization_job"]["job_id"]
-        )
-        assert len(jobs) == 1
+        assert first["materialization_job"] is None
+        assert first["materialization_plan"]["materialization_strategy"] == "pending_explicit_build"
+        assert second["materialization_required"] is False
+        assert second["materialization_job"] is None
+        assert second["materialization_plan"]["materialization_strategy"] == "no_op"
+        assert server.materialization_jobs.jobs == {}
     finally:
         server.shutdown()
         server.server_close()
@@ -2726,7 +2790,7 @@ def test_latest_reviewed_publish_request_reuses_current_projection(tmp_path: Pat
         server.server_close()
 
 
-def test_repeated_initial_latest_reviewed_publish_reuses_in_flight_job(
+def test_initial_latest_reviewed_publish_reuses_automatic_without_heavy_job(
     tmp_path: Path,
 ) -> None:
     package = tmp_path / "package"
@@ -2751,14 +2815,21 @@ def test_repeated_initial_latest_reviewed_publish_reuses_in_flight_job(
         first = post_json(f"{base_url}/api/v1/materialization-jobs", payload)
         second = post_json(f"{base_url}/api/v1/materialization-jobs", payload)
 
-        assert first["materialization_plan"]["materialization_required"] is True
-        assert second["materialization_plan"]["materialization_required"] is True
-        assert first["materialization_job"]["job_id"] == second["materialization_job"]["job_id"]
+        assert first["materialization_plan"]["materialization_required"] is False
         assert (
-            second["materialization_plan"]["reused_job_id"]
-            == first["materialization_job"]["job_id"]
+            first["materialization_plan"]["materialization_strategy"]
+            == "automatic_reuse_publication"
         )
-        assert len(server.materialization_jobs.jobs) == 1
+        assert first["materialization_job"] is None
+        assert first["latest_reviewed"]["role"] == "latest_reviewed"
+        assert first["materialization"]["media_validation"]["automatic_reuse_mode"] in {
+            "hardlink",
+            "verified_copy",
+        }
+        assert second["materialization_plan"]["materialization_required"] is False
+        assert second["materialization_plan"]["materialization_strategy"] == "current_reusable"
+        assert second["materialization_job"] is None
+        assert server.materialization_jobs.jobs == {}
     finally:
         server.shutdown()
         server.server_close()
@@ -2782,6 +2853,14 @@ def test_workspace_server_shutdown_cancels_pending_materialization_timer(
                 "case_id": manifest.case_id,
                 "entity_id": entity["entity_id"],
                 "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                "session_id": session_dir.name,
+            },
+        )
+        post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
                 "session_id": session_dir.name,
             },
         )
@@ -3216,6 +3295,7 @@ def test_region_compatible_job_publishes_after_non_media_decision(tmp_path: Path
                 "session_id": session_dir.name,
             },
         )
+        assert policy_response["materialization_job"] is None
         decision_response = post_json(
             f"{base_url}/api/v1/decisions",
             {
@@ -3227,9 +3307,17 @@ def test_region_compatible_job_publishes_after_non_media_decision(tmp_path: Path
                 "task_id": "task_1",
             },
         )
+        build_response = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "session_id": session_dir.name,
+            },
+        )
         job = wait_for_materialization_job(
             server,
-            str(policy_response["materialization_job"]["job_id"]),
+            str(build_response["materialization_job"]["job_id"]),
         )
         working_state = review_working_state.derive_working_state(package, session_dir)
 
@@ -3240,6 +3328,70 @@ def test_region_compatible_job_publishes_after_non_media_decision(tmp_path: Path
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_publication_guard_uses_media_identity_not_audit_projection_fields(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_base_region(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    _regions, provenance = reviewed_regions.compile_reviewed_regions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        require_blockers_resolved=True,
+    )
+    guard = reviewed_regions.publication_guard_payload(
+        package_root=package,
+        session_dir=session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=review_working_state.derive_working_state(
+            package,
+            session_dir,
+        )["active_projection_hash"],
+        provenance=provenance,
+    )
+
+    review_sessions.append_reviewer_attribution_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        display_name="Analyst",
+        note="audit-only attribution update",
+    )
+    audit_stale_guard = guard | {
+        "active_corrections_hash": "audit-only-correction-hash",
+        "active_decisions_hash": "audit-only-decision-hash",
+        "session_head_hash": "audit-only-session-head",
+        "working_state_projection_hash": "audit-only-projection-hash",
+    }
+
+    reviewed_regions.assert_publication_guard_current(
+        package_root=package,
+        session_dir=session_dir,
+        case_id=manifest.case_id,
+        expected_guard=audit_stale_guard,
+    )
+
+    media_stale_guard = guard | {"reviewed_region_media_identity_sha256": "stale-media"}
+    with pytest.raises(
+        reviewed_regions.ReviewedRegionPublicationStaleError,
+        match="publication guard is stale",
+    ):
+        reviewed_regions.assert_publication_guard_current(
+            package_root=package,
+            session_dir=session_dir,
+            case_id=manifest.case_id,
+            expected_guard=media_stale_guard,
+        )
 
 
 def test_reset_supersedes_running_materialization_job(
@@ -3300,7 +3452,16 @@ def test_reset_supersedes_running_materialization_job(
                 "session_id": session_dir.name,
             },
         )
-        old_job_id = str(response["materialization_job"]["job_id"])
+        assert response["materialization_job"] is None
+        build_response = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "session_id": session_dir.name,
+            },
+        )
+        old_job_id = str(build_response["materialization_job"]["job_id"])
         assert entered.wait(5)
         server.materialization_jobs.debounce_seconds = 60
 
@@ -4487,7 +4648,8 @@ def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> 
         assert events[-1]["event_type"] == "manual_issue_created"
         assert chain["passed"] is True
         assert (session_dir / "corrections.jsonl").exists()
-        assert correction_response["publication_status"] == "queued"
+        assert correction_response["publication_status"] == "pending_explicit_build"
+        assert correction_response["materialization_job"] is None
         assert correction_response["target_effective_region_count"] == 1
         assert correction_response["changed_frame_count"] == 1
         assert correction_response["changed_frame_intervals"] == [
@@ -4496,6 +4658,8 @@ def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> 
         verification_task = correction_response["verification_task"]
         assert verification_task["actionable"] is False
         assert verification_task["decision_state"] == "waiting_for_latest_reviewed"
+        assert verification_task["publication_status"] == "pending_explicit_build"
+        assert server.materialization_jobs.jobs == {}
 
         status, body = post_json_error(
             f"{base_url}/api/decisions",
@@ -4510,7 +4674,7 @@ def test_workspace_server_persists_reviewed_correction_event(tmp_path: Path) -> 
         )
 
         assert status == 409
-        assert "Latest reviewed media" in str(body["error"])
+        assert "build the reviewed video" in str(body["error"])
     finally:
         server.shutdown()
         server.server_close()
@@ -5359,7 +5523,6 @@ def test_supported_canonical_correction_semantic_hash_excludes_audit_metadata(
             | {
                 "keyframes": (
                     review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),
-                    review_corrections.CorrectionKeyframe(2, (30, 22, 70, 44)),
                 ),
                 "source_frame_end": 2,
             }
@@ -5845,9 +6008,18 @@ def test_supported_canonical_public_workflow_publishes_authoritative_latest_only
                 "session_id": session["session_id"],
             },
         )
+        assert correction_response["materialization_job"] is None
+        build_response = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "session_id": session["session_id"],
+            },
+        )
         job = wait_for_materialization_job(
             server,
-            str(correction_response["materialization_job"]["job_id"]),
+            str(build_response["materialization_job"]["job_id"]),
         )
         after_versions = json.loads(
             urllib.request.urlopen(
@@ -6340,6 +6512,113 @@ def test_case_media_download_endpoint_enforces_role_and_delivery_readiness(
         server.server_close()
 
 
+def test_delivery_package_includes_verified_portable_redaction_records(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    state = review_working_state.derive_working_state(package, session_dir)
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=state["active_projection_hash"],
+    )
+    acknowledge_current_latest_reviewed(package, session_dir, manifest.case_id)
+    finalized = review_finalization.finalize_reviewed_case(
+        package_root=package,
+        case_id=manifest.case_id,
+        session_dir=session_dir,
+    )
+
+    delivery = review_working_state.delivery_package_zip(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+
+    assert finalized["finalized"] is True
+    assert delivery["ok"] is True
+    latest_pointer = reviewed_regions.validate_current_pointer(
+        package,
+        reviewed_regions.load_current_pointer(package, case_id=manifest.case_id),
+        case_id=manifest.case_id,
+    )
+    revision_manifest_path = package / str(latest_pointer["revision_manifest"])
+    revision_manifest = dict(latest_pointer["revision_manifest_payload"])
+    authoritative_records = revision_manifest_path.parent / str(
+        revision_manifest["reviewed_regions"]
+    )
+    case_folder = review_working_state.case_label_for_delivery(manifest.case_id)
+    with zipfile.ZipFile(delivery["path"]) as archive:
+        names = set(archive.namelist())
+        package_manifest = json.loads(archive.read(f"{case_folder}/manifest.json"))
+        redaction_manifest = json.loads(archive.read(f"{case_folder}/redaction_manifest.json"))
+        records_bytes = archive.read(f"{case_folder}/reviewed_regions.jsonl")
+
+    assert f"{case_folder}/reviewed_regions.jsonl" in names
+    assert f"{case_folder}/redaction_manifest.json" in names
+    assert records_bytes == authoritative_records.read_bytes()
+    assert package_manifest["redaction_records"]["reviewed_regions_sha256"] == media_sha(
+        authoritative_records
+    )
+    assert redaction_manifest["case"] == manifest.case_id
+    assert redaction_manifest["source_sha256"] == manifest.source_video_hash
+    assert redaction_manifest["latest_reviewed_revision"] == materialization["revision_id"]
+    assert redaction_manifest["finalization_id"] == finalized["finalization_id"]
+    assert redaction_manifest["reviewed_region_set_sha256"] == (
+        revision_manifest["reviewed_region_set_sha256"]
+    )
+    assert redaction_manifest["reviewed_region_identity"] == (
+        revision_manifest["reviewed_region_identity"]
+    )
+    assert redaction_manifest["renderer_configuration_sha256"] == (
+        revision_manifest["renderer_configuration_sha256"]
+    )
+    assert redaction_manifest["references"]["latest_reviewed_revision_manifest"] == (
+        latest_pointer["revision_manifest"]
+    )
+    assert not re.search(r'"/Users/', json.dumps(redaction_manifest, sort_keys=True))
+    records_text = records_bytes.decode("utf-8")
+    assert "/Users/" not in records_text
+    first_record = json.loads(records_text.splitlines()[0])
+    assert first_record["category"] == CATEGORY_PLATE
+    assert first_record["bbox_xyxy"]
+    assert first_record["provenance"]
+    assert first_record["source_frame"] == 0
+    assert first_record["source_record"]["track_uid"] == "plate_track_1"
+
+    packaged_records = tmp_path / "reviewed_regions.jsonl"
+    packaged_records.write_bytes(records_bytes)
+    validation = review_working_state.validate_packaged_redaction_records(
+        redaction_manifest,
+        packaged_records,
+    )
+    assert validation["passed"] is True
+    assert validation["record_count"] == redaction_manifest["record_count"]
+    assert validation["reviewed_regions_sha256"] == redaction_manifest["reviewed_regions_sha256"]
+
+    tampered_records = tmp_path / "tampered_reviewed_regions.jsonl"
+    tampered_records.write_text(
+        records_text + records_text.splitlines()[0] + "\n",
+        encoding="utf-8",
+    )
+    tampered_validation = review_working_state.validate_packaged_redaction_records(
+        redaction_manifest,
+        tampered_records,
+    )
+    assert tampered_validation["passed"] is False
+    assert "redaction records SHA mismatch" in tampered_validation["errors"]
+
+
 def test_supported_canonical_unknown_projection_schema_blocks_pointer(
     tmp_path: Path,
 ) -> None:
@@ -6498,9 +6777,18 @@ def test_supported_canonical_public_guidance_does_not_block_publication(
             "session_id": session["session_id"],
         }
         blocked_response = post_json(f"{base_url}/api/corrections", save_payload)
+        assert blocked_response["materialization_job"] is None
+        build_response = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "session_id": session["session_id"],
+            },
+        )
         blocked_job = wait_for_materialization_job(
             server,
-            str(blocked_response["materialization_job"]["job_id"]),
+            str(build_response["materialization_job"]["job_id"]),
         )
         blocked_versions = json.loads(
             urllib.request.urlopen(
@@ -6513,9 +6801,10 @@ def test_supported_canonical_public_guidance_does_not_block_publication(
             .read()
             .decode("utf-8")
         )["versions"]
-        blocked_lifecycle = json.loads((package / "workspace_manifest.json").read_text())[
-            "lifecycle"
-        ]
+        blocked_pointer = reviewed_regions.load_current_pointer(
+            package,
+            case_id=manifest.case_id,
+        )
         guidance_snapshot = review_guidance_policy.unreviewed_guidance_snapshot(
             package_root=package,
             working_state=review_working_state.derive_working_state(
@@ -6559,7 +6848,7 @@ def test_supported_canonical_public_guidance_does_not_block_publication(
 
         assert blocked_job["status"] == "completed"
         assert "latest_reviewed" in {role["role"] for role in blocked_versions}
-        assert blocked_lifecycle["latest_reviewed"]["status"] == "not_run"
+        assert blocked_pointer["status"] == "ready"
         assert guidance_snapshot["guidance_unreviewed_task_ids"] == ["plate_task_1"]
         assert decision_response["ok"] is True
         assert retry_response["idempotent_retry"] is True
@@ -7610,7 +7899,7 @@ def test_workspace_server_rejects_interpolation_preview_without_end_keyframe(
 
         assert status == 400
         assert body["ok"] is False
-        assert "end keyframe at source frame 3" in body["error"]
+        assert "exactly one start and one end keyframe" in body["error"]
     finally:
         server.shutdown()
         server.server_close()
@@ -7850,10 +8139,117 @@ def test_workspace_server_reuses_duplicate_manual_correction_save(
         ]
 
         assert second["idempotent_retry"] is True
-        assert first["materialization_job"]["job_id"] == second["materialization_job"]["job_id"]
-        assert len(server.materialization_jobs.jobs) == 1
+        assert first["materialization_job"] is None
+        assert second["materialization_job"] is None
+        assert len(server.materialization_jobs.jobs) == 0
         assert state["active_correction_ids"] == [first["event"]["after_state"]["correction_id"]]
         assert len(save_events) == 1
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_batched_manual_correction_saves_wait_for_explicit_build(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_canonical_base_regions(package, manifest.case_id, (CATEGORY_PLATE,))
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        session_response = post_json(
+            f"{base_url}/api/sessions",
+            {
+                "reviewer": {"display_name": "Analyst", "reviewer_id": "analyst@example.test"},
+                "source_revision": "test",
+            },
+        )
+        session = session_response["session"]
+        saved_ids: list[str] = []
+        saved_frames: list[int] = []
+        for frame in range(5):
+            correction = {
+                "case_id": manifest.case_id,
+                "category": CATEGORY_PLATE,
+                "configuration_freeze_hash": session["configuration_freeze_hash"],
+                "interpolation_method": review_corrections.INTERPOLATION_NONE,
+                "keyframe_boxes": [
+                    {
+                        "bbox_xyxy": [10 + frame, 12 + frame, 40 + frame, 30 + frame],
+                        "source_frame": frame,
+                    }
+                ],
+                "operation": review_corrections.OP_ADD,
+                "reason": f"batched manual smoke {frame}",
+                "reviewer_identity": {"reviewer_id": "analyst@example.test"},
+                "source_frame_end": frame,
+                "source_frame_start": frame,
+                "source_video_hash": manifest.source_video_hash,
+                "task_id": f"task_{frame}",
+            }
+            preview_response = post_json(
+                f"{base_url}/api/corrections/preview",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "correction": correction,
+                    "reason": "preview",
+                    "session_id": session["session_id"],
+                },
+            )
+            correction_response = post_json(
+                f"{base_url}/api/corrections",
+                {
+                    "actor": {"reviewer_id": "analyst@example.test"},
+                    "correction": correction,
+                    "preview_token": preview_response["preview"]["preview_token"],
+                    "reason": "save",
+                    "session_id": session["session_id"],
+                },
+            )
+            saved = correction_response["event"]["after_state"]
+            saved_ids.append(str(saved["correction_id"]))
+            saved_frames.append(int(saved["source_frame_start"]))
+            assert correction_response["materialization_job"] is None
+            assert correction_response["publication_status"] == "pending_explicit_build"
+            assert saved["source_frame_start"] == frame
+            assert saved["source_frame_end"] == frame
+            assert [item["source_frame"] for item in saved["keyframe_boxes"]] == [frame]
+
+        session_dir = package / "sessions" / session["session_id"]
+        state_before_build = review_working_state.derive_working_state(package, session_dir)
+        build_response = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "session_id": session["session_id"],
+            },
+        )
+        job = wait_for_materialization_job(
+            server,
+            str(build_response["materialization_job"]["job_id"]),
+        )
+        state_after_build = review_working_state.derive_working_state(package, session_dir)
+        latest = state_after_build["materialized_latest_reviewed"][manifest.case_id]
+
+        assert saved_frames == [0, 1, 2, 3, 4]
+        assert len(saved_ids) == 5
+        assert len(set(saved_ids)) == 5
+        assert len(server.materialization_jobs.jobs) == 1
+        assert job["status"] == "completed"
+        assert job["materialization"]["manual_correction_count"] == 5
+        assert latest["published_working_state_revision"] == state_before_build[
+            "active_projection_hash"
+        ]
     finally:
         server.shutdown()
         server.server_close()
@@ -7911,9 +8307,18 @@ def test_workspace_server_unlocks_correction_verification_after_publication(
                 "session_id": session["session_id"],
             },
         )
+        assert correction_response["materialization_job"] is None
+        build_response = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst@example.test"},
+                "case_id": manifest.case_id,
+                "session_id": session["session_id"],
+            },
+        )
         job = wait_for_materialization_job(
             server,
-            str(correction_response["materialization_job"]["job_id"]),
+            str(build_response["materialization_job"]["job_id"]),
         )
         assert job["status"] == "completed"
         session_dir = package / "sessions" / session["session_id"]
@@ -8205,7 +8610,8 @@ def test_checkpoint_policy_and_adjustment_revision() -> None:
 
     assert [checkpoint.source_frame for checkpoint in checkpoints] == [0, 30, 60, 90]
     assert high_motion == (0, 15, 30)
-    assert len(adjusted.keyframes) == 3
+    assert len(adjusted.keyframes) == 2
+    assert adjusted.checkpoints[0].bbox_xyxy == (5, 5, 15, 15)
     assert adjusted.previous_revision_id == correction.revision_id
 
 
@@ -8288,7 +8694,7 @@ def test_finalization_blocks_unreviewed_correction_checkpoint(tmp_path: Path) ->
             ),
         ),
         configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
-        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
         keyframes=(review_corrections.CorrectionKeyframe(0, (10, 10, 30, 20)),),
         operation=review_corrections.OP_ADD,
         reason="needs checkpoint",
@@ -8336,7 +8742,7 @@ def test_finalization_uses_latest_correction_revision(tmp_path: Path) -> None:
             ),
         ),
         configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
-        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
         keyframes=(review_corrections.CorrectionKeyframe(0, (10, 10, 30, 20)),),
         operation=review_corrections.OP_ADD,
         reason="draft",
@@ -8518,6 +8924,113 @@ def test_render_correction_interval_preview(tmp_path: Path) -> None:
     assert inside_diff > control_diff + 0.75
 
 
+def test_interpolated_manual_correction_maps_compiles_and_renders_exact_geometry(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_empty_regions(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    expected_boxes = {
+        1: (20, 20, 54, 34),
+        2: (23, 21, 57, 35),
+        3: (26, 22, 60, 36),
+    }
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_PLATE,
+        correction_id="corr_exact_geometry",
+        checkpoints=tuple(
+            review_corrections.CorrectionCheckpoint(
+                source_frame=source_frame,
+                state=review_corrections.CHECKPOINT_VERIFIED,
+            )
+            for source_frame in expected_boxes
+        ),
+        configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
+        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
+        keyframes=(
+            review_corrections.CorrectionKeyframe(1, expected_boxes[1]),
+            review_corrections.CorrectionKeyframe(3, expected_boxes[3]),
+        ),
+        operation=review_corrections.OP_ADD,
+        reason="exact geometry",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=3,
+        source_frame_start=1,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id="task_exact_geometry",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+
+    compiled, _provenance = reviewed_regions.compile_reviewed_regions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    correction_rows = [
+        record
+        for record in compiled
+        if record.provenance == "reviewed_correction"
+        and record.object_id == correction.correction_id
+    ]
+    materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+    latest_frame = read_video_frame(package / materialization["latest_reviewed"]["path"], 2)
+    source_frame = read_video_frame(package / manifest.source_path, 2)
+    x1, y1, x2, y2 = expected_boxes[2]
+    inside_diff = float(
+        np.mean(
+            np.abs(
+                latest_frame[y1:y2, x1:x2].astype(np.int16)
+                - source_frame[y1:y2, x1:x2].astype(np.int16)
+            )
+        )
+    )
+    control_diff = float(
+        np.mean(
+            np.abs(
+                latest_frame[0:8, 0:8].astype(np.int16)
+                - source_frame[0:8, 0:8].astype(np.int16)
+            )
+        )
+    )
+    verification = materialization["correction_render_verifications"][
+        correction.correction_id
+    ]
+
+    assert {
+        int(record.source_record["source_frame"]): tuple(record.bbox_xyxy)
+        for record in correction_rows
+    } == expected_boxes
+    assert {
+        int(record.source_record["source_frame"]): record.source_frame
+        for record in correction_rows
+    } == {1: 1, 2: 2, 3: 3}
+    assert len(correction_rows) == 3
+    assert verification["passed"] is True
+    assert verification["sampled_source_frames"] == [1, 2, 3]
+    assert inside_diff > control_diff + 0.75
+    assert control_diff < 3.0
+
+
 def test_materialization_job_manager_coalesces_queued_case_jobs(tmp_path: Path) -> None:
     package = tmp_path / "package"
     session_dir = package / "sessions" / "session_test"
@@ -8562,6 +9075,272 @@ def test_materialization_job_manager_coalesces_queued_case_jobs(tmp_path: Path) 
 
     audit = json.loads((package / "materialization_job_audit.json").read_text())
     assert audit["cases"]["day"]["jobs_coalesced"] == 1
+
+
+def test_editing_during_explicit_build_does_not_spawn_jobs_and_stale_build_cannot_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    manifest, _entity = write_policy_entity_package(package)
+    records: list[PrivacyRegionRecord] = []
+    entities: list[dict[str, object]] = []
+    for index in range(6):
+        track_id = f"plate_{index}"
+        records.append(
+            PrivacyRegionRecord(
+                approval_state=APPROVAL_ACCEPTED,
+                bbox_xyxy=(10 + index, 20, 35 + index, 34),
+                category=CATEGORY_PLATE,
+                object_id=track_id,
+                provenance="plate_detector_observation",
+                render_eligible=True,
+                source_frame=index % manifest.frame_count,
+                source_record={"region_id": f"region_{index}", "track_uid": track_id},
+            )
+        )
+        entities.append(
+            {
+                "automatic_source_track_ids": [track_id],
+                "case_id": manifest.case_id,
+                "category": CATEGORY_PLATE,
+                "current_policy": privacy_entities.POLICY_REDACT,
+                "default_privacy_policy": privacy_entities.POLICY_REDACT,
+                "entity_id": f"entity_plate_{index}",
+                "first_visible_source_frame": index % manifest.frame_count,
+                "label": f"Plate {index}",
+                "last_visible_source_frame": index % manifest.frame_count,
+                "member_detector_tracker_ids": [track_id],
+                "privacy_action": privacy_entities.POLICY_REDACT,
+                "representative_source_frame": index % manifest.frame_count,
+            }
+        )
+    review_finalization.write_privacy_region_records(
+        package / "regions" / f"{manifest.case_id}_current_regions.jsonl",
+        records,
+    )
+    write_json(
+        package / "review_entities.json",
+        {"cases": {manifest.case_id: entities}, "schema_version": "review_entities.v2"},
+    )
+    session_dir = create_session(package, manifest)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    call_count = 0
+
+    def fake_materialize_latest_reviewed(
+        package_root: Path,
+        target_session_dir: Path,
+        *,
+        case_id: str,
+        accepted_revision: str | None = None,
+        actor: dict[str, object] | None = None,
+        event_reason: str | None = None,
+    ) -> dict[str, object]:
+        nonlocal call_count
+        del actor, event_reason
+        call_count += 1
+        if call_count == 1:
+            first_started.set()
+            assert release_first.wait(timeout=5)
+            raise reviewed_regions.ReviewedRegionPublicationStaleError(
+                "Latest reviewed publication guard is stale: "
+                "reviewed_region_set_sha256 current != expected"
+            )
+        digest = review_working_state.effective_privacy_region_digest(
+            package_root,
+            target_session_dir,
+            case_id=case_id,
+        )
+        automatic_path = package_root / manifest.video_roles[1].path
+        return {
+            "audio_handling": "copied",
+            "case_id": case_id,
+            "correction_render_verifications": {},
+            "effective_region_count": digest["region_count"],
+            "effective_regions_hash": digest["effective_regions_hash"],
+            "latest_reviewed": {
+                "accepted_working_state_revision": accepted_revision,
+                "label": "Latest reviewed",
+                "media_validation_passed": True,
+                "path": manifest.video_roles[1].path,
+                "published_working_state_revision": accepted_revision,
+                "role": "latest_reviewed",
+                "sha256": media_sha(automatic_path),
+                "source_frame_end": manifest.source_frame_end,
+                "source_frame_start": manifest.source_frame_start,
+            },
+            "media_validation": {"passed": True},
+            "rendered_frame_count": manifest.frame_count,
+            "rendered_region_count": digest["region_count"],
+            "timing": {
+                "effective_region_derivation_duration_ms": 0,
+                "output_frame_count": manifest.frame_count,
+                "publication_duration_ms": 0,
+                "render_encode_duration_ms": 0,
+                "total_duration_ms": 0,
+            },
+            "video_sha256": media_sha(automatic_path),
+        }
+
+    monkeypatch.setattr(
+        review_workspace.review_working_state,
+        "materialize_latest_reviewed",
+        fake_materialize_latest_reviewed,
+    )
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        first_policy = post_json(
+            f"{base_url}/api/v1/object-policy",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "entity_id": "entity_plate_0",
+                "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                "session_id": session_dir.name,
+            },
+        )
+        assert first_policy["materialization_job"] is None
+        first_build = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "session_id": session_dir.name,
+            },
+        )
+        assert first_started.wait(timeout=5)
+        responses = []
+        for index in range(1, 6):
+            response = post_json(
+                f"{base_url}/api/v1/object-policy",
+                {
+                    "actor": {"reviewer_id": "analyst"},
+                    "case_id": manifest.case_id,
+                    "entity_id": f"entity_plate_{index}",
+                    "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                    "session_id": session_dir.name,
+                },
+            )
+            responses.append(response)
+            assert response["materialization_job"] is None
+        release_first.set()
+        first_job = wait_for_materialization_job(
+            server,
+            str(first_build["materialization_job"]["job_id"]),
+        )
+        final_build = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "session_id": session_dir.name,
+            },
+        )
+        final_job = wait_for_materialization_job(
+            server,
+            str(final_build["materialization_job"]["job_id"]),
+        )
+        jobs = list(server.materialization_jobs.jobs.values())
+        events = review_sessions.load_events(session_dir)
+
+        assert first_job["status"] == "superseded"
+        assert first_job["publication_status"] == "superseded"
+        assert first_job["queue_state"] == "discarded_stale_publication_guard"
+        assert "Superseded by a newer accepted review state" in str(first_job["error"])
+        assert all(response["materialization_required"] is True for response in responses)
+        assert final_job["status"] == "completed"
+        assert final_job["publication_status"] == "published"
+        assert call_count == 2
+        assert sum(1 for job in jobs if job["status"] == "completed") == 1
+        assert sum(1 for job in jobs if job["status"] == "superseded") == 1
+        assert server.materialization_jobs.metrics[manifest.case_id][
+            "materialization_jobs_started"
+        ] == 2
+        assert server.materialization_jobs.metrics[manifest.case_id]["jobs_coalesced"] == 0
+        assert not [
+            event
+            for event in events
+            if event["event_type"] == "reviewed_media_materialization_failed"
+        ]
+    finally:
+        release_first.set()
+        server.shutdown()
+        server.server_close()
+
+
+def test_current_stale_publication_guard_failure_stays_failed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    manifest, entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+
+    def fake_materialize_latest_reviewed(
+        package_root: Path,
+        target_session_dir: Path,
+        *,
+        case_id: str,
+        accepted_revision: str | None = None,
+        actor: dict[str, object] | None = None,
+        event_reason: str | None = None,
+    ) -> dict[str, object]:
+        del package_root, target_session_dir, case_id, accepted_revision, actor, event_reason
+        raise reviewed_regions.ReviewedRegionPublicationStaleError(
+            "Latest reviewed publication guard is stale: "
+            "reviewed_region_set_sha256 current != expected"
+        )
+
+    monkeypatch.setattr(
+        review_workspace.review_working_state,
+        "materialize_latest_reviewed",
+        fake_materialize_latest_reviewed,
+    )
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = post_json(
+            f"{base_url}/api/v1/object-policy",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "entity_id": entity["entity_id"],
+                "policy": privacy_entities.POLICY_KEEP_VISIBLE,
+                "session_id": session_dir.name,
+            },
+        )
+        assert response["materialization_job"] is None
+        build_response = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "session_id": session_dir.name,
+            },
+        )
+        job = wait_for_materialization_job(
+            server,
+            str(build_response["materialization_job"]["job_id"]),
+        )
+        failed_events = [
+            event
+            for event in review_sessions.load_events(session_dir)
+            if event["event_type"] == "reviewed_media_materialization_failed"
+        ]
+
+        assert job["status"] == "failed"
+        assert job["publication_status"] == "failed"
+        assert job["queue_state"] == "failed_retryable"
+        assert "publication guard is stale" in str(job["error"])
+        assert len(failed_events) == 1
+        assert "publication guard is stale" in failed_events[0]["note"]
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_working_state_cache_is_bound_to_event_chain_head(tmp_path: Path) -> None:

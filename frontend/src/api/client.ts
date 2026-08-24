@@ -338,10 +338,12 @@ export async function requestLatestReviewedBuild(payload: {
   session_id: string;
   actor: Attribution | Record<string, unknown>;
   case_id: CaseId;
-}): Promise<{ job?: MaterializationJob; materialization_job?: MaterializationJob; working_state?: WorkingState }> {
+}): Promise<{ job?: MaterializationJob; latest_reviewed?: MediaVersion; materialization?: Record<string, unknown>; materialization_job?: MaterializationJob; working_state?: WorkingState }> {
   const response = await postJson<JsonResponse>(`${API_PREFIX}/materialization-jobs`, payload);
   return {
     job: response.job,
+    latest_reviewed: response.latest_reviewed,
+    materialization: response.materialization,
     materialization_job: response.materialization_job,
     working_state: response.working_state,
   };

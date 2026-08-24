@@ -103,7 +103,9 @@ Manual redaction supports:
 
 The editor works in source-frame coordinates. Preview generates real rendered privacy media for the draft and returns a token bound to the current case, session, source media, working-state revision, geometry, and preview output. The geometry overlay remains an outline; it is not the rendered privacy effect.
 
-Save requires the current Preview token. A valid Save persists an immutable correction revision, updates authoritative working state, schedules or reuses Latest reviewed materialization when pixels change, and shows the saved/applying state until authoritative state confirms the result.
+Save requires the current Preview token. A valid Save persists an immutable correction revision, updates authoritative working state, and marks reviewed media as pending when pixels change. Save does not normally queue or run a full-video Latest reviewed render by itself.
+
+Reviewers may save one or more Manual corrections and media-affecting Entity actions before selecting **Build reviewed video**. That explicit build materializes the accumulated reviewed state, either by rendering a new Latest reviewed video or by reusing validated Automatic media when the reviewed state is pixel-identical to Automatic. Superseded jobs cannot publish stale media.
 
 Discard clears the draft and preview token. Reset this case to Automatic baseline clears the selected case's active review and correction state while preserving append-only history.
 
@@ -121,7 +123,7 @@ Latest reviewed is an immutable revision built from:
 
 The current pointer is valid only if it binds to the current session and active media projection. Audit-only events do not stale identical media, but media-affecting review changes do.
 
-Open Guidance alone does not block building a new Latest reviewed. Active Needs correction, invalid corrections, stale source/config identity, media validation failure, region validation failure, or pointer mismatch do block.
+Open Guidance alone does not block building a new Latest reviewed. Active Needs correction, invalid corrections, stale source/config identity, media validation failure, region validation failure, pending media-affecting changes, or pointer mismatch do block full-video approval and Final creation until a validated current Latest reviewed revision exists.
 
 ## Full-Video Approval
 
@@ -137,7 +139,7 @@ Historical Finals remain immutable. They are not reused or promoted unless the c
 
 ## Downloads And Delivery
 
-The browser exposes downloads for Original, Automatic, Latest reviewed, Final, and Final package zips when available. Delivery packages contain portable manifests and checksums for the Final video, source identity, case ID, Final revision, Latest revision, reviewed-region-set hash, sweep hash, session/event-chain head, validation status, current status, and creation time.
+The browser exposes downloads for Original, Automatic, Latest reviewed, Final, and Final package zips when available. Delivery packages contain portable manifests and checksums for the Final video, source identity, case ID, Final revision, Latest revision, reviewed-region-set hash, sweep hash, session/event-chain head, validation status, current status, creation time, and the packaged per-redaction reviewed-region records.
 
 Absolute local paths are not part of portable semantic identity.
 

@@ -762,6 +762,367 @@ def materialize_latest_reviewed_revision(
     return materialization
 
 
+def publish_automatic_reuse_latest_reviewed_revision(
+    package_root: Path,
+    session_dir: Path,
+    *,
+    case_id: str,
+    accepted_revision: str | None = None,
+    actor: dict[str, Any] | None = None,
+    event_reason: str | None = None,
+) -> dict[str, Any]:
+    from redactor import review_finalization, review_working_state
+
+    total_start = time.monotonic()
+    package_root = package_root.resolve()
+    session_dir = session_dir.resolve()
+    case_id = case_ids.validate_case_id(case_id)
+    effective_start = time.monotonic()
+    reviewed_regions, provenance = compile_reviewed_regions(
+        package_root,
+        session_dir,
+        case_id=case_id,
+        require_blockers_resolved=True,
+    )
+    effective_duration_ms = int((time.monotonic() - effective_start) * 1000)
+    state = review_working_state.derive_working_state(
+        package_root,
+        session_dir,
+        write_snapshot=False,
+    )
+    active_corrections = [
+        correction
+        for correction in review_working_state.load_active_corrections(
+            session_dir,
+            active_correction_ids=set(state.get("active_correction_ids") or []),
+        )
+        if correction.case_id == case_id
+    ]
+    object_overrides = [
+        override
+        for override in dict(state.get("object_policy_overrides") or {}).values()
+        if str(dict(override).get("case_id") or "") == case_id
+    ]
+    media_decisions = [
+        decision
+        for decision in dict(
+            dict(state.get("task_decisions_by_case") or {}).get(case_id) or {}
+        ).values()
+        if str(dict(decision).get("action") or "") == ACTION_NOT_SENSITIVE
+    ]
+    if active_corrections or object_overrides or media_decisions:
+        raise ReviewedRegionCompilationError(
+            f"{case_id}: Automatic reuse publication requires no human media edits"
+        )
+    manifest = case_manifests.load_case_manifest(
+        review_working_state.safe_case_manifest_path(package_root, case_id)
+    )
+    automatic_role = latest_reviewed_automatic_reuse_role(manifest)
+    if automatic_role is None:
+        raise ReviewedRegionCompilationError(f"{case_id}: Automatic media role is missing")
+    automatic_path = case_ids.contained_path(package_root, *Path(automatic_role.path).parts)
+    if not automatic_path.exists():
+        raise ReviewedRegionCompilationError(f"{case_id}: Automatic media is missing")
+    automatic_hash = media.sha256_file(automatic_path)
+    if automatic_role.sha256 and automatic_role.sha256 != automatic_hash:
+        raise ReviewedRegionCompilationError(f"{case_id}: Automatic media hash mismatch")
+    automatic_info = media.probe_media(automatic_path)
+    observed_frames = int(automatic_info.video_stream.frame_count or 0)
+    expected_frame_count = int(manifest.frame_count or observed_frames or 0)
+    if expected_frame_count <= 0:
+        raise ReviewedRegionCompilationError(f"{case_id}: media frame count is unknown")
+    if observed_frames and observed_frames != expected_frame_count:
+        raise ReviewedRegionCompilationError(f"{case_id}: Automatic media frame count mismatch")
+    if manifest.width and automatic_info.video_stream.width != manifest.width:
+        raise ReviewedRegionCompilationError(f"{case_id}: Automatic media width mismatch")
+    if manifest.height and automatic_info.video_stream.height != manifest.height:
+        raise ReviewedRegionCompilationError(f"{case_id}: Automatic media height mismatch")
+    source_path = case_ids.contained_path(
+        package_root,
+        *Path(str(manifest.source_path or "")).parts,
+    )
+    source_hash = manifest.source_video_hash or media.sha256_file(source_path)
+
+    reviewed_hash = str(provenance["reviewed_region_set_sha256"])
+    revision_id = f"latest_reviewed_{reviewed_hash[:16]}"
+    revision_root = session_dir / "latest_reviewed" / case_id / revision_id
+    temp_root = revision_root.with_name(f".{revision_id}.{uuid.uuid4().hex}.tmp")
+    if temp_root.exists():
+        shutil.rmtree(temp_root)
+    temp_root.mkdir(parents=True, exist_ok=False)
+    settings = review_working_state.render_settings()
+    render_configuration = render_configuration_payload(settings)
+    render_configuration_hash = stable_hash(render_configuration)
+    publication_guard = publication_guard_payload(
+        package_root=package_root,
+        session_dir=session_dir,
+        case_id=case_id,
+        accepted_revision=accepted_revision,
+        provenance=provenance,
+    )
+    regions_path = temp_root / "reviewed_regions.jsonl"
+    review_finalization.write_privacy_region_records(regions_path, reviewed_regions)
+    output_path = temp_root / "latest_reviewed.mp4"
+    try:
+        os.link(automatic_path, output_path)
+        reuse_mode = "hardlink"
+    except OSError:
+        shutil.copy2(automatic_path, output_path)
+        reuse_mode = "verified_copy"
+    video_hash = media.sha256_file(output_path)
+    if video_hash != automatic_hash:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise ReviewedRegionCompilationError(f"{case_id}: Automatic reuse media hash mismatch")
+    regions_hash = media.sha256_file(regions_path)
+    media_validation = {
+        "automatic_media_sha256": automatic_hash,
+        "automatic_reuse_mode": reuse_mode,
+        "expected_frame_count": expected_frame_count,
+        "expected_height": manifest.height,
+        "expected_width": manifest.width,
+        "observed_frame_count": observed_frames or expected_frame_count,
+        "observed_height": automatic_info.video_stream.height,
+        "observed_width": automatic_info.video_stream.width,
+        "passed": True,
+        "schema_version": "latest_reviewed_automatic_reuse_media_validation.v1",
+        "source_has_audio": automatic_info.audio_stream is not None,
+        "validation_mode": "automatic_reuse_publication",
+    }
+    region_validation = {
+        "automatic_reuse": True,
+        "passed": True,
+        "rendered_region_count": len(reviewed_regions),
+        "schema_version": "latest_reviewed_automatic_reuse_region_validation.v1",
+        "validation_mode": "automatic_reuse_publication",
+    }
+    write_json(temp_root / "media_validation.json", media_validation)
+    write_json(temp_root / "region_validation.json", region_validation)
+    validation_hash = stable_hash(
+        {
+            "media_validation": media_validation,
+            "region_validation": region_validation,
+            "reviewed_regions_sha256": regions_hash,
+        }
+    )
+    revision_manifest = {
+        "accepted_working_state_revision": accepted_revision,
+        "active_corrections_hash": provenance["reviewed_region_identity"][
+            "active_corrections_hash"
+        ],
+        "active_decisions_hash": provenance["reviewed_region_identity"][
+            "active_decisions_hash"
+        ],
+        "active_projection_hash_schema_version": provenance["reviewed_region_identity"].get(
+            "active_projection_hash_schema_version"
+        ),
+        "automatic_baseline_region_set_sha256": provenance["reviewed_region_identity"][
+            "automatic_baseline_region_set_sha256"
+        ],
+        "automatic_reuse_mode": reuse_mode,
+        "audio_handling": f"automatic_reuse_{reuse_mode}",
+        "case_id": case_id,
+        "created_at_utc": media.utc_timestamp(),
+        "media_validation": "media_validation.json",
+        "media_validation_passed": True,
+        "output_video": "latest_reviewed.mp4",
+        "publication_guard": publication_guard,
+        "region_validation": "region_validation.json",
+        "region_validation_passed": True,
+        "render_configuration": render_configuration,
+        "renderer_configuration_sha256": render_configuration_hash,
+        "rendered_frame_count": observed_frames or expected_frame_count,
+        "rendered_region_count": len(reviewed_regions),
+        "review_session_id": session_dir.name,
+        "reviewed_region_identity": provenance["reviewed_region_identity"],
+        "reviewed_region_set_sha256": reviewed_hash,
+        "reviewed_regions": "reviewed_regions.jsonl",
+        "reviewed_regions_sha256": regions_hash,
+        "revision_id": revision_id,
+        "schema_version": REVISION_SCHEMA_VERSION,
+        "session_head_hash": publication_guard["session_head_hash"],
+        "source_frame_end": manifest.source_frame_end,
+        "source_frame_start": manifest.source_frame_start,
+        "source_sha256": source_hash,
+        "source_video_hash": source_hash,
+        "validation_artifact_sha256": validation_hash,
+        "video_artifact_sha256": video_hash,
+        "workspace_manifest_input_sha256": publication_guard[
+            "workspace_manifest_input_sha256"
+        ],
+        "workspace_manifest_sha256": publication_guard["workspace_manifest_sha256"],
+    }
+    revision_manifest["revision_manifest_sha256"] = stable_hash(revision_manifest)
+    write_json(temp_root / "revision_manifest.json", revision_manifest)
+    try:
+        assert_publication_guard_current(
+            package_root=package_root,
+            session_dir=session_dir,
+            case_id=case_id,
+            expected_guard=publication_guard,
+        )
+    except Exception:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise
+    if revision_root.exists():
+        existing_manifest_path = revision_root / "revision_manifest.json"
+        if not existing_manifest_path.exists():
+            shutil.rmtree(temp_root, ignore_errors=True)
+            raise ReviewedRegionPublicationStaleError(
+                f"{case_id}: existing Latest reviewed revision is incomplete"
+            )
+        existing_manifest = json.loads(existing_manifest_path.read_text(encoding="utf-8"))
+        if existing_manifest.get("reviewed_region_set_sha256") != reviewed_hash:
+            shutil.rmtree(temp_root, ignore_errors=True)
+            raise ReviewedRegionPublicationStaleError(
+                f"{case_id}: existing Latest reviewed revision identity mismatch"
+            )
+        shutil.rmtree(temp_root, ignore_errors=True)
+        revision_manifest = existing_manifest
+        video_hash = str(revision_manifest["video_artifact_sha256"])
+        validation_hash = str(revision_manifest["validation_artifact_sha256"])
+        media_validation = json.loads(
+            (revision_root / str(revision_manifest["media_validation"])).read_text(
+                encoding="utf-8"
+            )
+        )
+        region_validation = json.loads(
+            (revision_root / str(revision_manifest["region_validation"])).read_text(
+                encoding="utf-8"
+            )
+        )
+    else:
+        revision_root.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(temp_root, revision_root)
+    validate_revision_artifacts(revision_root, revision_manifest)
+
+    published_paths = {
+        "media_validation": revision_root / "media_validation.json",
+        "output_video": revision_root / "latest_reviewed.mp4",
+        "region_validation": revision_root / "region_validation.json",
+        "revision_manifest": revision_root / "revision_manifest.json",
+        "reviewed_regions": revision_root / "reviewed_regions.jsonl",
+    }
+    role = {
+        "accepted_working_state_revision": accepted_revision,
+        "effective_regions_hash": reviewed_hash,
+        "label": "Latest reviewed",
+        "media_validation_passed": True,
+        "path": published_paths["output_video"].relative_to(package_root).as_posix(),
+        "published_working_state_revision": accepted_revision,
+        "rendered_region_validation_passed": True,
+        "reviewed_region_set_sha256": reviewed_hash,
+        "revision_id": revision_id,
+        "revision_manifest": published_paths["revision_manifest"]
+        .relative_to(package_root)
+        .as_posix(),
+        "role": "latest_reviewed",
+        "sha256": video_hash,
+        "source_frame_end": manifest.source_frame_end,
+        "source_frame_start": manifest.source_frame_start,
+        "validation_artifact_sha256": validation_hash,
+        "video_artifact_sha256": video_hash,
+    }
+    publication_start = time.monotonic()
+    publish_updates = publish_current_revision(
+        package_root=package_root,
+        session_dir=session_dir,
+        case_id=case_id,
+        role=role,
+        revision_manifest=revision_manifest,
+        paths=published_paths,
+        publication_guard=publication_guard,
+        accepted_revision=accepted_revision,
+    )
+    publication_duration_ms = int((time.monotonic() - publication_start) * 1000)
+    state = review_working_state.derive_working_state(package_root, session_dir)
+    materialization = {
+        "accepted_working_state_revision": accepted_revision,
+        "audio_handling": revision_manifest["audio_handling"],
+        "case_id": case_id,
+        "created_at_utc": revision_manifest["created_at_utc"],
+        "effective_region_count": len(reviewed_regions),
+        "effective_regions": published_paths["reviewed_regions"]
+        .relative_to(package_root)
+        .as_posix(),
+        "effective_regions_hash": reviewed_hash,
+        "latest_reviewed": role,
+        "materialized": True,
+        "media_validation": media_validation,
+        "output_video": role["path"],
+        "publication_guard": publication_guard,
+        "publication_updates": publish_updates,
+        "rendered_frame_count": int(revision_manifest.get("rendered_frame_count") or 0),
+        "rendered_region_count": len(reviewed_regions),
+        "rendered_region_validation": region_validation,
+        "revision_id": revision_id,
+        "revision_manifest": role["revision_manifest"],
+        "schema_version": "latest_reviewed_automatic_reuse_materialization.v1",
+        "state_hash": state["state_hash"],
+        "timing": {
+            "accepted_working_state_revision": accepted_revision,
+            "case_id": case_id,
+            "effective_region_derivation_duration_ms": effective_duration_ms,
+            "output_frame_count": int(revision_manifest.get("rendered_frame_count") or 0),
+            "publication_duration_ms": publication_duration_ms,
+            "render_encode_duration_ms": 0,
+            "schema_version": "materialization_timing.v1",
+            "total_duration_ms": int((time.monotonic() - total_start) * 1000),
+        },
+        "validation_artifact_sha256": validation_hash,
+        "video_sha256": video_hash,
+    } | provenance
+    state.setdefault("materialized_latest_reviewed", {})[case_id] = role | {
+        "created_at_utc": materialization["created_at_utc"],
+        "effective_regions_hash": reviewed_hash,
+    }
+    state["state_hash"] = review_working_state.state_hash(state)
+    review_working_state.write_state_snapshot(session_dir, state)
+    review_working_state.write_json(
+        session_dir / "state" / f"{case_id}_latest_reviewed_manifest.json",
+        materialization,
+    )
+    if actor is not None:
+        append_event(
+            session_dir,
+            event_type="latest_reviewed_materialized",
+            actor=actor,
+            case_id=case_id,
+            task_id=None,
+            before_state=None,
+            after_state={
+                "accepted_working_state_revision": accepted_revision,
+                "active_projection_hash": accepted_revision,
+                "active_projection_hash_schema_version": (
+                    review_working_state.ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+                ),
+                "case_id": case_id,
+                "effective_regions_hash": reviewed_hash,
+                "latest_reviewed": role,
+                "media_validation_passed": True,
+                "published_working_state_revision": accepted_revision,
+                "rendered_region_validation_passed": True,
+                "state_hash": state["state_hash"],
+                "target_effective_regions_hash": reviewed_hash,
+            },
+            note=event_reason or "Latest reviewed media published from Automatic media.",
+            application_hashes={"latest_reviewed_sha256": video_hash},
+        )
+    return materialization
+
+
+def latest_reviewed_automatic_reuse_role(
+    manifest: case_manifests.CaseManifest,
+) -> case_manifests.VideoRole | None:
+    return next(
+        (
+            role
+            for role in manifest.video_roles
+            if role.role in {"automatic", "current_result"}
+        ),
+        None,
+    )
+
+
 def require_supported_workspace(package_root: Path) -> dict[str, Any]:
     from redactor import review_working_state
 
@@ -1994,6 +2355,9 @@ def publication_guard_payload(
         "merge_rejection_state_hash": identity.get("merge_rejection_state_hash"),
         "object_policy_hash": identity.get("object_policy_hash"),
         "renderer_configuration_sha256": identity.get("renderer_configuration_sha256"),
+        "reviewed_region_media_identity_sha256": reviewed_region_media_identity_hash(
+            identity
+        ),
         "reviewed_region_set_sha256": provenance.get("reviewed_region_set_sha256"),
         "schema_version": "latest_reviewed_publication_guard.v1",
         "session_head_hash": review_sessions.last_event_hash(session_dir),
@@ -2027,19 +2391,13 @@ def assert_publication_guard_current(
         provenance=provenance,
     )
     compared_keys = (
-        "accepted_working_state_revision",
-        "active_corrections_hash",
-        "active_decisions_hash",
         "active_projection_hash_schema_version",
-        "automatic_baseline_region_set_sha256",
-        "case_manifest_sha256",
-        "merge_rejection_state_hash",
-        "object_policy_hash",
-        "renderer_configuration_sha256",
+        "case_id",
+        "case_manifest_input_sha256",
+        "reviewed_region_media_identity_sha256",
         "reviewed_region_set_sha256",
         "session_id",
-        "working_state_projection_hash",
-        "workspace_manifest_sha256",
+        "workspace_manifest_input_sha256",
     )
     mismatches = {
         key: {"current": current.get(key), "expected": expected_guard.get(key)}

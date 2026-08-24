@@ -23,8 +23,10 @@ describe('final no-op navigation and status UI contracts', () => {
     const page = source('src/pages/CaseReviewPage.tsx');
 
     expect(page).not.toContain('Reviewed video changed — rebuilding...');
-    expect(page).toContain("if (latestReviewedLifecycle !== 'BUILD_REQUIRED') return;");
-    expect(page).toContain('claimLatestReviewedAutoBuildRequest(requestKey)');
+    expect(page).not.toContain('claimLatestReviewedAutoBuildRequest');
+    expect(page).not.toContain('latestReviewedBuildRequestKey');
+    expect(page).toContain('const requestReviewedVideoBuild = async () =>');
+    expect(page).toContain("'Build reviewed video'");
     expect(page).toContain("group.key === 'latest_reviewed'");
     expect(page).toContain("'Full-video review approved'");
     expect(page).toContain("'Full-video approval stale'");

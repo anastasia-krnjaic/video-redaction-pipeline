@@ -8,8 +8,6 @@ export type LatestReviewedLifecycleState =
   | 'BUILD_FAILED_RETRYABLE'
   | 'BLOCKED';
 
-const requestedAutoBuilds = new Set<string>();
-
 export function materializationJobMatchesCurrentProjection(
   job: MaterializationJob,
   currentState?: WorkingState,
@@ -30,20 +28,6 @@ export function materializationJobRepresentsCurrentProjection(
   const currentRevision = currentState?.active_projection_hash;
   if (!jobRevision || !currentRevision) return false;
   return jobRevision === currentRevision;
-}
-
-export function latestReviewedBuildRequestKey({
-  caseId,
-  sessionId,
-  workingState,
-}: {
-  caseId?: CaseId;
-  sessionId?: string;
-  workingState?: WorkingState;
-}): string {
-  const revision = String(workingState?.active_projection_hash || workingState?.state_hash || '');
-  if (!caseId || !sessionId || !revision) return '';
-  return `${sessionId}:${caseId}:${revision}`;
 }
 
 export function latestReviewedLifecycleState({
@@ -85,18 +69,4 @@ export function latestReviewedLifecycleState({
     }
   }
   return 'BUILD_REQUIRED';
-}
-
-export function claimLatestReviewedAutoBuildRequest(key: string): boolean {
-  if (!key || requestedAutoBuilds.has(key)) return false;
-  requestedAutoBuilds.add(key);
-  return true;
-}
-
-export function releaseLatestReviewedAutoBuildRequest(key: string): void {
-  if (key) requestedAutoBuilds.delete(key);
-}
-
-export function resetLatestReviewedAutoBuildRequestsForTests(): void {
-  requestedAutoBuilds.clear();
 }

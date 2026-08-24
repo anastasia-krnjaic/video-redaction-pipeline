@@ -4783,11 +4783,18 @@ def materialization_acceptance_fields(
     plan = dict(materialization_plan.get("plan") or {})
     job = dict(materialization_plan.get("job") or {})
     materialization_required = bool(plan.get("materialization_required"))
+    plan_status = str(
+        plan.get("publication_status")
+        or plan.get("latest_reviewed_publication_status")
+        or ""
+    )
     publication_status = (
-        str(job.get("publication_status") or job.get("status") or "queued")
+        str(job.get("publication_status") or job.get("status") or plan_status or "queued")
         if materialization_required
         else "published"
     )
+    if materialization_required and not job and plan_status:
+        publication_status = plan_status
     if plan.get("latest_reviewed_publication_status") == "deferred":
         publication_status = "deferred"
     return {
@@ -4800,6 +4807,26 @@ def materialization_acceptance_fields(
         "target_effective_region_count": int(plan.get("after_effective_region_count") or 0),
         "target_effective_regions_hash": plan.get("after_effective_regions_hash"),
     }
+
+
+def media_edit_count_for_case(state: dict[str, Any], case_id: str) -> int:
+    manual_count = sum(
+        1
+        for correction in list(state.get("manual_corrections") or [])
+        if str(dict(correction).get("case_id") or "") == case_id
+    )
+    entity_count = sum(
+        1
+        for override in dict(state.get("object_policy_overrides") or {}).values()
+        if str(dict(override).get("case_id") or "") == case_id
+    )
+    case_decisions = dict(dict(state.get("task_decisions_by_case") or {}).get(case_id) or {})
+    media_decision_count = sum(
+        1
+        for decision in case_decisions.values()
+        if str(dict(decision).get("action") or "") == review_sessions.ACTION_NOT_SENSITIVE
+    )
+    return manual_count + entity_count + media_decision_count
 
 
 def finalization_blocker_groups(blockers: list[str]) -> list[dict[str, Any]]:
@@ -5109,6 +5136,9 @@ class MaterializationJobManager:
                 "accepted_working_state_revision": accepted_revision,
                 "active_corrections_hash": reviewed_identity.get("active_corrections_hash"),
                 "active_decisions_hash": reviewed_identity.get("active_decisions_hash"),
+                "active_projection_hash_schema_version": reviewed_identity.get(
+                    "active_projection_hash_schema_version"
+                ),
                 "automatic_baseline_region_set_sha256": reviewed_identity.get(
                     "automatic_baseline_region_set_sha256"
                 ),
@@ -5704,6 +5734,37 @@ class MaterializationJobManager:
                 )
                 self._write_audit_locked()
         except Exception as exc:  # pragma: no cover - exercised through server integration
+            with self.lock:
+                state = self.case_state.get(key) or {}
+                latest_requested = str(state.get("latest_requested") or "")
+                stale_publication_guard = isinstance(
+                    exc,
+                    reviewed_regions.ReviewedRegionPublicationStaleError,
+                )
+                stale_publication_is_superseded = stale_publication_guard and (
+                    bool(latest_requested and latest_requested != job_id)
+                    or self._publication_guard_stale_locked(
+                        key,
+                        job,
+                        check_workspace_manifest=False,
+                    )
+                )
+                if stale_publication_is_superseded:
+                    job["completed_at_utc"] = media.utc_timestamp()
+                    job["current_stage"] = "superseded"
+                    job["error"] = "Superseded by a newer accepted review state."
+                    job["publication_status"] = "superseded"
+                    job["queue_state"] = "discarded_stale_publication_guard"
+                    job["progress"] = 1.0
+                    job["status"] = "superseded"
+                    self._metric(case_id, "stale_jobs_discarded", 1)
+                    self._record_timing_locked(
+                        job,
+                        status="superseded",
+                        state_projection_duration_ms=state_projection_duration_ms,
+                    )
+                    self._write_audit_locked()
+                    return
             failure_event = review_sessions.append_event(
                 session_dir,
                 event_type="reviewed_media_materialization_failed",
@@ -6738,6 +6799,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     before_digest=before_digest,
                     after_state=state,
                     affected_entity_ids=[correction.entity_id] if correction.entity_id else [],
+                    enqueue_job=False,
                 )
                 existing_event = next(
                     (
@@ -6848,6 +6910,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 before_digest=before_digest,
                 after_state=state_after_correction,
                 affected_entity_ids=[correction.entity_id] if correction.entity_id else [],
+                enqueue_job=False,
             )
             verification_task = review_working_state.create_correction_verification_task(
                 correction,
@@ -7137,9 +7200,36 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 before_digest=before_digest,
                 after_state=state,
             )
+            materialization = None
+            if materialization_plan["plan"].get("automatic_reuse_publication_required"):
+                materialization = reviewed_regions.publish_automatic_reuse_latest_reviewed_revision(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=publish_case_id,
+                    accepted_revision=str(
+                        state.get("active_projection_hash") or state.get("state_hash") or ""
+                    ),
+                    actor=actor,
+                    event_reason="Latest reviewed media published by reusing Automatic media.",
+                )
+                state = review_working_state.derive_working_state(
+                    self.server.package_root,
+                    session_dir,
+                )
+                materialization_plan = {
+                    "job": None,
+                    "plan": materialization_plan["plan"]
+                    | {
+                        "latest_reviewed_publication_status": "published",
+                        "materialization_required": False,
+                        "publication_status": "published",
+                    },
+                }
             self.send_json(
                 {
                     "job": materialization_plan["job"],
+                    "latest_reviewed": (materialization or {}).get("latest_reviewed"),
+                    "materialization": materialization,
                     "materialization_job": materialization_plan["job"],
                     "materialization_plan": materialization_plan["plan"],
                     "ok": True,
@@ -7353,6 +7443,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         before_digest: dict[str, Any],
         after_state: dict[str, Any],
         affected_entity_ids: list[str] | None = None,
+        enqueue_job: bool = True,
         requested_policy: str | None = None,
     ) -> dict[str, Any]:
         case_id = validate_workspace_case_id(self.server.package_root, case_id)
@@ -7383,8 +7474,19 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         initial_publish_without_latest = bool(
             operation == "latest_reviewed_publish_requested" and not published_hash
         )
+        automatic_reuse_publication_required = bool(
+            publication_supported
+            and initial_publish_without_latest
+            and media_edit_count_for_case(after_state, case_id) == 0
+        )
         compatible_job = None
-        if not current_reusable and after_hash and after_hash != published_hash:
+        if (
+            enqueue_job
+            and not automatic_reuse_publication_required
+            and not current_reusable
+            and after_hash
+            and after_hash != published_hash
+        ):
             compatible_job = self.server.materialization_jobs.compatible_active_job(
                 session_dir=session_dir,
                 case_id=case_id,
@@ -7392,6 +7494,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             )
         materialization_required = bool(
             not current_reusable
+            and not automatic_reuse_publication_required
             and (
                 initial_publish_without_latest
                 or after_hash != before_hash
@@ -7425,19 +7528,38 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             "changed_source_frame_count": change_summary["changed_source_frame_count"],
             "changed_source_frame_intervals": change_summary["changed_source_frame_intervals"],
             "changed_source_frame_percentage": change_summary["changed_source_frame_percentage"],
-            "full_case_fallback_required": materialization_required,
+            "full_case_fallback_required": materialization_required and enqueue_job,
             "materialization_required": materialization_required,
             "materialization_strategy": "current_reusable"
             if current_reusable
+            else "automatic_reuse_publication"
+            if automatic_reuse_publication_required
+            else "pending_explicit_build"
+            if materialization_required and not enqueue_job
             else "full_render_fallback"
             if materialization_required
             else "no_op",
             "operation": operation,
-            "planned_frames_to_encode": planned_full_render_frames,
-            "planned_frames_to_render": planned_full_render_frames,
+            "planned_frames_to_encode": planned_full_render_frames if enqueue_job else 0,
+            "planned_frames_to_render": planned_full_render_frames if enqueue_job else 0,
             "published_effective_regions_hash": published_hash,
             "schema_version": "materialization_planning_result.v1",
         }
+        if automatic_reuse_publication_required:
+            return {
+                "job": None,
+                "plan": plan
+                | {
+                    "affected_source_frame_intervals": [],
+                    "automatic_reuse_publication_required": True,
+                    "changed_source_frame_count": 0,
+                    "changed_source_frame_intervals": [],
+                    "changed_source_frame_percentage": 0.0,
+                    "latest_reviewed_publication_status": "automatic_reuse_pending",
+                    "publication_status": "automatic_reuse_pending",
+                    "reuse_reason": "effective regions match Automatic baseline and no human media edits exist",
+                },
+            }
         if current_reusable:
             return {
                 "job": None,
@@ -7449,6 +7571,21 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 },
             }
         if materialization_required:
+            if not enqueue_job:
+                self.server.materialization_jobs.invalidate_cases(
+                    session_dir=session_dir,
+                    case_ids=[case_id],
+                    reason="Accepted review state changed; explicit reviewed-video build required.",
+                )
+                return {
+                    "job": None,
+                    "plan": plan
+                    | {
+                        "latest_reviewed_publication_status": "pending_explicit_build",
+                        "publication_status": "pending_explicit_build",
+                        "requires_explicit_build": True,
+                    },
+                }
             if compatible_job is not None:
                 return {
                     "job": compatible_job,
@@ -7471,6 +7608,8 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 materialization_plan=plan,
             )
             return {"job": job, "plan": plan}
+        if not enqueue_job:
+            return {"job": None, "plan": plan}
         skip = self.server.materialization_jobs.record_skipped_materialization(
             session_dir=session_dir,
             case_id=case_id,
@@ -7549,6 +7688,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             before_digest=before_digest,
             after_state=state,
             affected_entity_ids=[entity_id],
+            enqueue_job=False,
             requested_policy=policy,
         )
         return {
@@ -7636,6 +7776,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             before_digest=before_digest,
             after_state=state,
             affected_entity_ids=entity_ids,
+            enqueue_job=False,
             requested_policy=policy,
         )
         return {
@@ -7745,6 +7886,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             before_digest=before_digest,
             after_state=state,
             affected_entity_ids=[canonical["entity_id"], *retired_ids],
+            enqueue_job=False,
         )
         return {
             "canonical_merged_entity_uuid": canonical["entity_id"],

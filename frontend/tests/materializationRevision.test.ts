@@ -1,11 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { isBenignMediaAbort } from '../src/hooks/useVideoController';
 import {
-  claimLatestReviewedAutoBuildRequest,
-  latestReviewedBuildRequestKey,
   latestReviewedLifecycleState,
   materializationJobMatchesCurrentProjection,
-  resetLatestReviewedAutoBuildRequestsForTests,
 } from '../src/state/materialization';
 import type { MaterializationJob, WorkingState } from '../src/types/api';
 
@@ -101,21 +98,7 @@ describe('materialization completion revision guard', () => {
     })).toBe('BUILD_REQUIRED');
   });
 
-  it('deduplicates navigation-remounted auto-build requests for one fresh projection', () => {
-    resetLatestReviewedAutoBuildRequestsForTests();
-    const key = latestReviewedBuildRequestKey({
-      caseId: 'day',
-      sessionId: 'session_1',
-      workingState: state('rev_current'),
-    });
-
-    expect(key).toBe('session_1:day:rev_current');
-    expect(claimLatestReviewedAutoBuildRequest(key)).toBe(true);
-    expect(claimLatestReviewedAutoBuildRequest(key)).toBe(false);
-    expect(claimLatestReviewedAutoBuildRequest(key.replace('rev_current', 'rev_next'))).toBe(true);
-  });
-
-  it('keeps in-flight and failed equivalent jobs out of automatic navigation rebuilds', () => {
+  it('keeps in-flight and failed equivalent jobs visible without hidden navigation rebuilds', () => {
     expect(latestReviewedLifecycleState({
       activeJobs: [job({ status: 'running', accepted_working_state_revision: 'rev_current' })],
       caseId: 'day',

@@ -129,14 +129,26 @@ class ReviewCorrection:
             return
         source_frames = {keyframe.source_frame for keyframe in self.keyframes}
         if self.interpolation_method == INTERPOLATION_NONE:
-            return
-        if self.source_frame_start == self.source_frame_end:
-            if self.source_frame_start not in source_frames:
+            if len(self.keyframes) != 1:
+                raise ValueError("non-interpolated corrections require exactly one keyframe")
+            if self.source_frame_start == self.source_frame_end and (
+                self.keyframes[0].source_frame != self.source_frame_start
+            ):
                 raise ValueError(
-                    "single-frame correction requires a keyframe at source frame "
+                    "single-frame correction requires exactly one keyframe at source frame "
                     f"{self.source_frame_start}"
                 )
             return
+        if len(self.keyframes) != 2:
+            raise ValueError(
+                "linear interpolation requires exactly one start and one end keyframe"
+            )
+        if self.source_frame_start == self.source_frame_end:
+            raise ValueError("linear interpolation requires a multi-frame interval")
+        if source_frames != {self.source_frame_start, self.source_frame_end}:
+            raise ValueError(
+                "linear interpolation keyframes must match the interval endpoints"
+            )
         if self.source_frame_start not in source_frames:
             raise ValueError(
                 "linear interpolation requires a start keyframe at source frame "
@@ -453,7 +465,15 @@ def mark_checkpoint(
     checkpoints = [item for item in correction.checkpoints if item.source_frame != source_frame]
     checkpoints.append(checkpoint)
     keyframes = correction.keyframes
-    if bbox_xyxy is not None and state == CHECKPOINT_VERIFIED:
+    endpoint_frame = source_frame in {
+        correction.source_frame_start,
+        correction.source_frame_end,
+    }
+    if (
+        bbox_xyxy is not None
+        and state == CHECKPOINT_VERIFIED
+        and (correction.interpolation_method != INTERPOLATION_LINEAR or endpoint_frame)
+    ):
         keyframes = add_or_update_keyframe(
             correction,
             source_frame=source_frame,
