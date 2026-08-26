@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { EffectiveEntity } from '../types/domain';
 import { policyLabel } from '../state/reviewState';
+import { mostProtectivePolicy } from '../state/entityRefinement';
 
 interface Props {
   entities: EffectiveEntity[];
@@ -14,7 +15,7 @@ export function EntityMergeDialog({ entities, onCancel, onMerge, open }: Props) 
   const [saving, setSaving] = useState(false);
   const hasOverlap = useMemo(() => anyOverlap(entities), [entities]);
   const policies = new Set(entities.map((entity) => entity.current_policy || entity.privacy_action || entity.default_privacy_policy || 'review_required'));
-  const resultingPolicy = policies.size === 1 ? [...policies][0] : 'review_required';
+  const resultingPolicy = mostProtectivePolicy(entities);
 
   useEffect(() => {
     if (open) {
@@ -52,10 +53,10 @@ export function EntityMergeDialog({ entities, onCancel, onMerge, open }: Props) 
         </div>
         <div className="modal-scroll-body">
           {hasOverlap ? (
-            <p className="warning-text">Selected objects have overlapping source-frame spans. The merge is still allowed because you are confirming it manually.</p>
+            <p className="warning-text">Selected objects have overlapping source-frame spans. Resolve the conflict before merging.</p>
           ) : null}
           {policies.size > 1 ? (
-            <p className="warning-text">Selected policies conflict. The merged object will be marked Needs review.</p>
+            <p className="warning-text">Selected policies conflict. The merged object will inherit the most protective policy.</p>
           ) : null}
           <div className="merge-candidates">
             {entities.map((entity) => (
@@ -82,7 +83,7 @@ export function EntityMergeDialog({ entities, onCancel, onMerge, open }: Props) 
           <button type="button" onClick={onCancel} disabled={saving}>
             Cancel
           </button>
-          <button type="button" className="primary" onClick={confirm} disabled={saving || entities.length < 2}>
+          <button type="button" className="primary" onClick={confirm} disabled={saving || entities.length < 2 || hasOverlap}>
             Merge selected
           </button>
         </div>

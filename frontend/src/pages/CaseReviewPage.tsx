@@ -1,13 +1,16 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  acceptMergeCandidate,
   acknowledgeFullVideoSweep,
   createCheckpoint,
   deleteCheckpoint,
   loadFinalizationStatus,
   loadMaterializationJob,
+  prepareEntityPreviews,
   loadWorkingState,
   mergeEntities,
   previewCorrection,
+  rejectMergeCandidate,
   removeCorrection as removeCorrectionRequest,
   resetToAutomaticBaseline,
   requestLatestReviewedBuild,
@@ -18,6 +21,8 @@ import {
   saveDecisionGroup,
   saveBulkEntityPolicy,
   saveEntityPolicy,
+  splitMixedEntity,
+  splitTrackletOut,
 } from '../api/client';
 import {
   CorrectionEditor,
@@ -57,6 +62,7 @@ import {
   validRoleOrAutomatic,
 } from '../state/correctionLifecycle';
 import { decisionFromEvent, workingStateIsOlderThanKnownEvents } from '../state/reviewSync';
+import { candidateEntityIds } from '../state/entityRefinement';
 import type {
   Attribution,
   AuditEvent,
@@ -151,6 +157,8 @@ export function CaseReviewPage({
   const [mergeSelection, setMergeSelection] = useState<EffectiveEntity[]>([]);
   const [pendingTaskIds, setPendingTaskIds] = useState<Set<string>>(() => new Set());
   const [pendingEntityIds, setPendingEntityIds] = useState<Set<string>>(() => new Set());
+  const [pendingPreviewEntityIds, setPendingPreviewEntityIds] = useState<Set<string>>(() => new Set());
+  const [entityPreviewOverrides, setEntityPreviewOverrides] = useState<Record<string, EffectiveEntity>>({});
   const [latestRole, setLatestRole] = useState<MediaVersion | undefined>();
   const [deferredLatestRole, setDeferredLatestRole] = useState<MediaVersion | undefined>();
   const [previewRole, setPreviewRole] = useState<MediaVersion | undefined>();
@@ -216,6 +224,21 @@ export function CaseReviewPage({
     }
     return countsByEntity;
   }, [taskRows]);
+  const entityPanelOverrides = useMemo(() => {
+    const merged: Record<string, EffectiveEntity> = { ...entityOverrides };
+    for (const [entityId, preview] of Object.entries(entityPreviewOverrides)) {
+      merged[entityId] = {
+        ...(merged[entityId] || {}),
+        ...preview,
+      } as EffectiveEntity;
+    }
+    return merged;
+  }, [entityOverrides, entityPreviewOverrides]);
+
+  useEffect(() => {
+    setEntityPreviewOverrides({});
+    setPendingPreviewEntityIds(new Set());
+  }, [caseId, session?.session_id]);
 
   const roles = useMemo(() => {
     const sessionLatestRole = previewRole || latestRole || materializedLatestRole;
@@ -983,6 +1006,148 @@ export function CaseReviewPage({
     setMergeSelection([]);
   };
 
+  const acceptCandidate = async (candidate: Record<string, unknown>) => {
+    if (!session) {
+      onError('Start review before accepting merge candidates.');
+      return;
+    }
+    const entityIds = candidateEntityIds(candidate);
+    if (entityIds.length !== 2) return;
+    setPendingEntityIds((current) => new Set([...current, ...entityIds]));
+    try {
+      const result = await acceptMergeCandidate({
+        session_id: session.session_id,
+        actor: attribution || { display_name: null },
+        case_id: caseId,
+        candidate_id: String(candidate.candidate_id || ''),
+        entity_ids: entityIds,
+      });
+      appendEvents([result.event]);
+      if (result.working_state) {
+        applyWorkingStateProjection(result.working_state);
+      } else {
+        const nextOverrides = { ...entityOverrides, [result.merged_entity.entity_id]: result.merged_entity };
+        for (const retiredId of result.retired_entity_uuids) {
+          nextOverrides[retiredId] = { entity_id: retiredId, current_status: 'merged' } as EffectiveEntity;
+        }
+        onEntityOverridesChange(nextOverrides);
+      }
+      trackMaterializationJob(result.materialization_job, [result.merged_entity.entity_id, ...entityIds]);
+    } catch (err) {
+      onError(`Merge candidate was not accepted: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setPendingEntityIds((current) => {
+        const next = new Set(current);
+        entityIds.forEach((id) => next.delete(id));
+        return next;
+      });
+    }
+  };
+
+  const rejectCandidate = async (candidate: Record<string, unknown>) => {
+    if (!session) {
+      onError('Start review before rejecting merge candidates.');
+      return;
+    }
+    const entityIds = candidateEntityIds(candidate);
+    try {
+      const result = await rejectMergeCandidate({
+        session_id: session.session_id,
+        actor: attribution || { display_name: null },
+        case_id: caseId,
+        candidate_id: String(candidate.candidate_id || ''),
+        entity_ids: entityIds,
+      });
+      appendEvents([result.event]);
+      if (result.working_state) applyWorkingStateProjection(result.working_state);
+    } catch (err) {
+      onError(`Merge candidate rejection was not saved: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  };
+
+  const splitMixed = async (entity: EffectiveEntity) => {
+    if (!session) {
+      onError('Start review before splitting entities.');
+      return;
+    }
+    setPendingEntityIds((current) => new Set([...current, entity.entity_id]));
+    try {
+      const result = await splitMixedEntity({
+        session_id: session.session_id,
+        actor: attribution || { display_name: null },
+        case_id: caseId,
+        entity_id: entity.entity_id,
+      });
+      appendEvents([result.event]);
+      if (result.working_state) applyWorkingStateProjection(result.working_state);
+      trackMaterializationJob(result.materialization_job, [entity.entity_id, ...result.split_entities.map((item) => item.entity_id)]);
+    } catch (err) {
+      onError(`Mixed entity was not split: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setPendingEntityIds((current) => {
+        const next = new Set(current);
+        next.delete(entity.entity_id);
+        return next;
+      });
+    }
+  };
+
+  const splitTracklet = async (entity: EffectiveEntity, trackletId: string) => {
+    if (!session) {
+      onError('Start review before splitting tracklets.');
+      return;
+    }
+    setPendingEntityIds((current) => new Set([...current, entity.entity_id]));
+    try {
+      const result = await splitTrackletOut({
+        session_id: session.session_id,
+        actor: attribution || { display_name: null },
+        case_id: caseId,
+        entity_id: entity.entity_id,
+        tracklet_id: trackletId,
+      });
+      appendEvents([result.event]);
+      if (result.working_state) applyWorkingStateProjection(result.working_state);
+      trackMaterializationJob(result.materialization_job, [entity.entity_id, ...result.split_entities.map((item) => item.entity_id)]);
+    } catch (err) {
+      onError(`Tracklet was not split: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setPendingEntityIds((current) => {
+        const next = new Set(current);
+        next.delete(entity.entity_id);
+        return next;
+      });
+    }
+  };
+
+  const loadEntityPreviews = async (entity: EffectiveEntity) => {
+    if (!session) {
+      onError('Start review before loading entity previews.');
+      return;
+    }
+    setPendingPreviewEntityIds((current) => new Set([...current, entity.entity_id]));
+    try {
+      const result = await prepareEntityPreviews({
+        session_id: session.session_id,
+        actor: attribution || { display_name: null },
+        case_id: caseId,
+        entity_id: entity.entity_id,
+      });
+      setEntityPreviewOverrides((current) => ({
+        ...current,
+        [entity.entity_id]: result.entity,
+      }));
+    } catch (err) {
+      onError(`Entity previews were not loaded: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setPendingPreviewEntityIds((current) => {
+        const next = new Set(current);
+        next.delete(entity.entity_id);
+        return next;
+      });
+    }
+  };
+
   const saveCorrection = async (correction: Correction, reason: string) => {
     if (!session) {
       onError('Start review before saving corrections.');
@@ -1470,11 +1635,14 @@ export function CaseReviewPage({
         caseId={caseId}
         entities={(workspace.entities.cases[caseId] || []) as Entity[]}
         entityFilter={entityFilter}
+        events={events}
         open={entitiesOpen}
-        overrides={entityOverrides}
+        overrides={entityPanelOverrides}
         pendingEntityIds={pendingEntityIds}
+        pendingPreviewEntityIds={pendingPreviewEntityIds}
         relatedTaskCountByEntity={relatedTaskCountByEntity}
         unresolvedCount={unresolvedCount}
+        onAcceptCandidate={acceptCandidate}
         onClose={() => setEntitiesOpen(false)}
         onFilterChange={setEntityFilter}
         onJump={(entity) => {
@@ -1493,9 +1661,13 @@ export function CaseReviewPage({
             }
           }
         }}
+        onLoadPreviews={loadEntityPreviews}
         onMergeSelected={setMergeSelection}
         onBulkPolicy={updateBulkPolicy}
         onPolicy={updatePolicy}
+        onRejectCandidate={rejectCandidate}
+        onSplitMixed={splitMixed}
+        onSplitTracklet={splitTracklet}
       />
       <EntityMergeDialog
         entities={mergeSelection}

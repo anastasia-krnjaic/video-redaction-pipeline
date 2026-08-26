@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from redactor import entity_refinement
 from redactor.privacy_records import MANUAL_REDACTION_CATEGORIES, stable_hash
 
 API_SCHEMA_VERSION = "final_review_workspace_api.v1"
@@ -781,6 +782,7 @@ def workspace_summary(package_root: Path) -> dict[str, Any]:
         ],
     }
     tasks["task_count"] = len(tasks["tasks"])
+    entities = load_optional_json(package_root / "review_entities.json", {"cases": {}})
     return {
         "alignment": load_optional_json(package_root / "version_alignment_audit.json", {}),
         "api_schema_version": API_SCHEMA_VERSION,
@@ -789,7 +791,7 @@ def workspace_summary(package_root: Path) -> dict[str, Any]:
         "configuration_freeze_hash": stable_hash(load_json(freeze_path))
         if freeze_path.exists()
         else None,
-        "entities": load_optional_json(package_root / "review_entities.json", {"cases": {}}),
+        "entities": entity_refinement.enrich_entity_index(package_root, entities),
         "frontend": frontend_runtime_manifest(package_root),
         "current_session": load_optional_json(package_root / "current_session.json", {}),
         "raw_signals": load_optional_json(package_root / "raw_audit_signals.json", {}),

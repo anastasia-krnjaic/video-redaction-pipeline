@@ -208,12 +208,22 @@ function rebuildFromEvents(events: AuditEvent[]): {
       const entity = after as unknown as EffectiveEntity;
       entityOverrides[entity.entity_id] = entity;
     }
-    if (event.event_type === 'entities_merged' && isRecord(after.primary)) {
+    if ((event.event_type === 'entities_merged' || event.event_type === 'entity_merge_candidate_accepted') && isRecord(after.primary)) {
       const primary = after.primary as unknown as EffectiveEntity;
       entityOverrides[primary.entity_id] = primary;
       const retired = Array.isArray(after.retired_entity_ids) ? after.retired_entity_ids : [];
       for (const id of retired) {
         if (typeof id === 'string') entityOverrides[id] = { entity_id: id, current_status: 'merged' } as EffectiveEntity;
+      }
+    }
+    if ((event.event_type === 'entity_mixed_split' || event.event_type === 'entity_tracklet_split') && isRecord(after.parent)) {
+      const parent = after.parent as unknown as EffectiveEntity;
+      entityOverrides[parent.entity_id] = parent;
+      const splitEntities = Array.isArray(after.split_entities) ? after.split_entities : [];
+      for (const item of splitEntities) {
+        if (isRecord(item) && typeof item.entity_id === 'string') {
+          entityOverrides[item.entity_id] = item as unknown as EffectiveEntity;
+        }
       }
     }
   }

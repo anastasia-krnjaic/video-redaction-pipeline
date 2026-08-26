@@ -1,7 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { Entity } from '../types/api';
+import type { AuditEvent, Entity } from '../types/api';
 import type { CaseId, EffectiveEntity, EntityFilter, EntityPolicy } from '../types/domain';
 import { effectiveEntities, filteredEntities } from '../state/reviewState';
+import {
+  candidateEntityIds,
+  mergeSelectedEligibility,
+  policyAllowed,
+  sectionEntities,
+  visibleCandidateMatches,
+} from '../state/entityRefinement';
 import { EntityCard } from './EntityCard';
 
 const filters: Array<{ value: EntityFilter; label: string }> = [
@@ -16,32 +23,46 @@ interface Props {
   caseId: CaseId;
   entities: Entity[];
   entityFilter: EntityFilter;
+  events?: AuditEvent[];
   open: boolean;
   overrides: Record<string, EffectiveEntity>;
   pendingEntityIds?: Set<string>;
+  pendingPreviewEntityIds?: Set<string>;
   relatedTaskCountByEntity?: Record<string, number>;
   unresolvedCount: number;
   onClose: () => void;
+  onAcceptCandidate?: (candidate: Record<string, unknown>) => void;
   onBulkPolicy: (entities: EffectiveEntity[], policy: EntityPolicy) => void;
   onFilterChange: (filter: EntityFilter) => void;
   onJump: (entity: EffectiveEntity) => void;
+  onLoadPreviews?: (entity: EffectiveEntity) => void;
   onMergeSelected: (entities: EffectiveEntity[]) => void;
   onPolicy: (entity: EffectiveEntity, policy: EntityPolicy) => void;
+  onRejectCandidate?: (candidate: Record<string, unknown>) => void;
+  onSplitMixed?: (entity: EffectiveEntity) => void;
+  onSplitTracklet?: (entity: EffectiveEntity, trackletId: string) => void;
 }
 
 export function EntityPanel({
   caseId,
   entities,
   entityFilter,
+  events = [],
+  onAcceptCandidate,
   onClose,
   onBulkPolicy,
   onFilterChange,
   onJump,
+  onLoadPreviews,
   onMergeSelected,
   onPolicy,
+  onRejectCandidate,
+  onSplitMixed,
+  onSplitTracklet,
   open,
   overrides,
   pendingEntityIds,
+  pendingPreviewEntityIds,
   relatedTaskCountByEntity = {},
   unresolvedCount,
 }: Props) {
@@ -58,10 +79,14 @@ export function EntityPanel({
 
   const effective = useMemo(() => effectiveEntities(entities, overrides), [entities, overrides]);
   const visible = useMemo(() => filteredEntities(effective, entityFilter), [effective, entityFilter]);
+  const sections = useMemo(() => sectionEntities(visible), [visible]);
+  const candidateRows = useMemo(() => candidateRowsForEntities(visible, effective, events), [effective, events, visible]);
   const visibleIds = useMemo(() => new Set(visible.map((entity) => entity.entity_id)), [visible]);
   const selectedVisible = visible.filter((entity) => selectedIds.has(entity.entity_id));
   const selectedEffective = effective.filter((entity) => selectedIds.has(entity.entity_id));
   const mergeEligibility = mergeSelectedEligibility(selectedEffective);
+  const selectedPolicyAllowed = (policy: EntityPolicy) =>
+    selectedVisible.length > 0 && selectedVisible.every((entity) => policyAllowed(entity, policy));
   const bulk = (policy: EntityPolicy) => {
     if (!confirmEntityPolicyChange(selectedVisible, policy, relatedTaskCountByEntity)) return;
     onBulkPolicy(selectedVisible, policy);
@@ -136,10 +161,10 @@ export function EntityPanel({
             <button type="button" onClick={() => bulk('redact')} disabled={!selectedVisible.length}>
               Bulk Redact
             </button>
-            <button type="button" onClick={() => bulk('keep_visible')} disabled={!selectedVisible.length}>
+            <button type="button" onClick={() => bulk('keep_visible')} disabled={!selectedPolicyAllowed('keep_visible')}>
               Bulk Keep visible
             </button>
-            <button type="button" onClick={() => bulk('not_sensitive')} disabled={!selectedVisible.length}>
+            <button type="button" onClick={() => bulk('not_sensitive')} disabled={!selectedPolicyAllowed('not_sensitive')}>
               Bulk Not a person/plate
             </button>
             <button type="button" onClick={() => bulk('review_required')} disabled={!selectedVisible.length}>
@@ -149,26 +174,65 @@ export function EntityPanel({
           {!mergeEligibility.enabled && selectedEffective.length >= 2 ? (
             <p className="muted">{mergeEligibility.reason}</p>
           ) : null}
+          {candidateRows.length ? (
+            <section className="entity-section candidate-group-section">
+              <h3>Candidate groups</h3>
+              <div className="candidate-group-list">
+                {candidateRows.map((row) => (
+                  <article className="candidate-group-card" key={String(row.candidate.candidate_id)}>
+                    <div>
+                      <strong>{row.entities.map((entity) => entity.label).join(' + ')}</strong>
+                      <p className="task-meta">
+                        {String(row.candidate.classification || 'INSUFFICIENT_EVIDENCE')} · similarity {String(row.candidate.similarity ?? 'n/a')}
+                      </p>
+                    </div>
+                    <div className="entity-actions">
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={() => onAcceptCandidate?.(row.candidate)}
+                        disabled={!onAcceptCandidate || row.candidate.classification !== 'POSSIBLE_CANDIDATE'}
+                      >
+                        Accept merge candidate
+                      </button>
+                      <button type="button" onClick={() => onRejectCandidate?.(row.candidate)} disabled={!onRejectCandidate}>
+                        Reject
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
           <div className="object-list">
-            {visible.length ? (
-              visible.map((entity) => (
-                <EntityCard
-                  key={entity.entity_id}
-                  entity={entity}
-                  pending={pendingEntityIds?.has(entity.entity_id)}
-                  selected={selectedIds.has(entity.entity_id)}
-                  onSelect={(checked) => {
-                    const next = new Set(selectedIds);
-                    if (checked) next.add(entity.entity_id);
-                    else next.delete(entity.entity_id);
-                    setSelectedIds(next);
-                  }}
-                  onJump={onJump}
-                  onPolicy={(target, policy) => {
-                    if (!confirmEntityPolicyChange([target], policy, relatedTaskCountByEntity)) return;
-                    onPolicy(target, policy);
-                  }}
-                />
+            {sections.length ? (
+              sections.map((section) => (
+                <section className="entity-section" key={section.title}>
+                  <h3>{section.title}</h3>
+                  {section.entities.map((entity) => (
+                    <EntityCard
+                      key={entity.entity_id}
+                      entity={entity}
+                      pending={pendingEntityIds?.has(entity.entity_id)}
+                      selected={selectedIds.has(entity.entity_id)}
+                      onSelect={(checked) => {
+                        const next = new Set(selectedIds);
+                        if (checked) next.add(entity.entity_id);
+                        else next.delete(entity.entity_id);
+                        setSelectedIds(next);
+                      }}
+                      onJump={onJump}
+                      onLoadPreviews={onLoadPreviews}
+                      onPolicy={(target, policy) => {
+                        if (!confirmEntityPolicyChange([target], policy, relatedTaskCountByEntity)) return;
+                        onPolicy(target, policy);
+                      }}
+                      onSplitMixed={onSplitMixed}
+                      onSplitTracklet={onSplitTracklet}
+                      previewPending={pendingPreviewEntityIds?.has(entity.entity_id)}
+                    />
+                  ))}
+                </section>
               ))
             ) : (
               <p className="muted">No review objects match this filter.</p>
@@ -188,6 +252,29 @@ export function EntityPanel({
   );
 }
 
+function candidateRowsForEntities(
+  visible: EffectiveEntity[],
+  effective: EffectiveEntity[],
+  events: AuditEvent[],
+): Array<{ candidate: Record<string, unknown>; entities: EffectiveEntity[] }> {
+  const byId = new Map(effective.map((entity) => [entity.entity_id, entity]));
+  const seen = new Set<string>();
+  const rows: Array<{ candidate: Record<string, unknown>; entities: EffectiveEntity[] }> = [];
+  for (const entity of visible) {
+    for (const candidate of visibleCandidateMatches(entity, events)) {
+      const candidateId = String(candidate.candidate_id || '');
+      if (!candidateId || seen.has(candidateId)) continue;
+      const candidateEntities = candidateEntityIds(candidate)
+        .map((id) => byId.get(id))
+        .filter((item): item is EffectiveEntity => Boolean(item));
+      if (candidateEntities.length < 2) continue;
+      seen.add(candidateId);
+      rows.push({ candidate, entities: candidateEntities });
+    }
+  }
+  return rows;
+}
+
 function confirmEntityPolicyChange(
   entities: EffectiveEntity[],
   policy: EntityPolicy,
@@ -203,13 +290,4 @@ function confirmEntityPolicyChange(
   return window.confirm(
     `Remove redaction for ${label}${range}? This marks the ${category} as not sensitive and resolves ${affectedTasks} related review issue${affectedTasks === 1 ? '' : 's'}.`,
   );
-}
-
-function mergeSelectedEligibility(entities: EffectiveEntity[]): { enabled: boolean; reason: string } {
-  if (entities.length < 2) return { enabled: false, reason: 'Select at least two same-category objects to merge.' };
-  const cases = new Set(entities.map((entity) => entity.case_id));
-  if (cases.size > 1) return { enabled: false, reason: 'Selected objects belong to different cases.' };
-  const categories = new Set(entities.map((entity) => entity.category));
-  if (categories.size > 1) return { enabled: false, reason: 'People and plates cannot be merged together.' };
-  return { enabled: true, reason: 'Merge selected review objects.' };
 }

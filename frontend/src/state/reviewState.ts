@@ -533,9 +533,9 @@ export function effectiveEntities(
       seen.add(entity.entity_id);
       return { ...entity, ...(overrides[entity.entity_id] || {}) };
     })
-    .filter((entity) => entity.current_status !== 'merged');
+    .filter((entity) => entity.current_status !== 'merged' && entity.current_status !== 'split');
   for (const [entityId, override] of Object.entries(overrides)) {
-    if (seen.has(entityId) || override.current_status === 'merged') continue;
+    if (seen.has(entityId) || override.current_status === 'merged' || override.current_status === 'split') continue;
     if (!override.case_id) continue;
     if (caseIds.size && !caseIds.has(String(override.case_id))) continue;
     effective.push(override);

@@ -27,6 +27,7 @@ from redactor import (
     case_ids,
     case_manifests,
     detection,
+    entity_refinement,
     face_policy,
     final_package,
     frame_spans,
@@ -6160,12 +6161,17 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             session_dir = self.session_dir_from_query(query)
             if session_dir is None:
                 return True
+            state = review_working_state.derive_working_state(
+                self.server.package_root,
+                session_dir,
+            )
             self.send_json(
                 {
                     "ok": True,
-                    "working_state": review_working_state.derive_working_state(
+                    "working_state": presentation_working_state(
                         self.server.package_root,
                         session_dir,
+                        state,
                     ),
                 }
             )
@@ -6324,7 +6330,23 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             self.send_json(read_json_file(case_path))
             return True
         if path == "/api/v1/entities":
-            self.send_json(read_json_file(self.server.package_root / "review_entities.json"))
+            query = parse_qs(parsed.query)
+            session_id = str((query.get("session_id") or [""])[0])
+            session_events: list[dict[str, Any]] = []
+            if session_id:
+                session_dir = review_sessions.session_directory(
+                    self.server.package_root,
+                    session_id,
+                )
+                if session_dir.exists():
+                    session_events = review_sessions.load_events(session_dir)
+            self.send_json(
+                entity_refinement.enrich_entity_index(
+                    self.server.package_root,
+                    read_json_file(self.server.package_root / "review_entities.json"),
+                    session_events=session_events,
+                )
+            )
             return True
         if path == "/api/v1/finalization-status":
             query = parse_qs(parsed.query)
@@ -6485,26 +6507,31 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 self.server.package_root,
                 session_dir,
             )
+            presentation_state = presentation_working_state(
+                self.server.package_root,
+                session_dir,
+                working_state,
+            )
             pointer = write_current_session_pointer(self.server.package_root, session_dir)
             self.send_json(
                 {
                     "attribution": review_sessions.load_reviewer_attribution(session_dir),
                     "chain": review_sessions.validate_event_hash_chain(session_dir),
-                    "corrections": list(working_state.get("manual_corrections") or []),
+                    "corrections": list(presentation_state.get("manual_corrections") or []),
                     "current_session": pointer,
-                    "decisions": dict(working_state.get("task_decisions") or {}),
+                    "decisions": dict(presentation_state.get("task_decisions") or {}),
                     "decisions_by_case": dict(
-                        working_state.get("task_decisions_by_case") or {}
+                        presentation_state.get("task_decisions_by_case") or {}
                     ),
                     "events": review_sessions.load_events(session_dir),
                     "ok": True,
                     "session": read_json_file(session_dir / "review_session.json"),
                     "summary": read_json_file(session_dir / "review_summary.json"),
-                    "task_resolutions": dict(working_state.get("task_resolutions") or {}),
+                    "task_resolutions": dict(presentation_state.get("task_resolutions") or {}),
                     "task_resolutions_by_case": dict(
-                        working_state.get("task_resolutions_by_case") or {}
+                        presentation_state.get("task_resolutions_by_case") or {}
                     ),
-                    "working_state": working_state,
+                    "working_state": presentation_state,
                 }
             )
             return True
@@ -7386,6 +7413,31 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 }
             )
             return
+        if path == "/api/entity-refinement/accept-merge":
+            result = self.accept_merge_candidate(payload, actor, session_dir)
+            status = HTTPStatus.OK if result.get("ok", False) else HTTPStatus.CONFLICT
+            self.send_json(result, status=status)
+            return
+        if path == "/api/entity-refinement/reject-merge":
+            result = self.reject_merge_candidate(payload, actor, session_dir)
+            status = HTTPStatus.OK if result.get("ok", False) else HTTPStatus.CONFLICT
+            self.send_json(result, status=status)
+            return
+        if path == "/api/entity-refinement/split-mixed":
+            result = self.split_mixed_entity(payload, actor, session_dir)
+            status = HTTPStatus.OK if result.get("ok", False) else HTTPStatus.CONFLICT
+            self.send_json(result, status=status)
+            return
+        if path == "/api/entity-refinement/split-tracklet":
+            result = self.split_tracklet_out(payload, actor, session_dir)
+            status = HTTPStatus.OK if result.get("ok", False) else HTTPStatus.CONFLICT
+            self.send_json(result, status=status)
+            return
+        if path == "/api/entity-refinement/previews":
+            result = self.prepare_entity_previews(payload, actor, session_dir)
+            status = HTTPStatus.OK if result.get("ok", False) else HTTPStatus.CONFLICT
+            self.send_json(result, status=status)
+            return
         if path == "/api/entity-events":
             entity_event = dict(payload.get("event") or {})
             event_case_id = require_workspace_case(
@@ -7804,9 +7856,22 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             session_dir=session_dir,
             case_id=case_id,
             entity_id=entity_id,
+            lazy_crops=False,
         )
         if entity is None:
             return {"error": "review entity not found", "ok": False}
+        current_policy = review_working_state.inherited_policy(entity)
+        disabled_reason = (
+            None
+            if current_policy == policy
+            else entity_refinement.validate_policy_action(entity, policy)
+        )
+        if disabled_reason is not None:
+            return {
+                "action_availability": entity.get("policy_action_availability"),
+                "error": f"object policy action disabled: {disabled_reason}",
+                "ok": False,
+            }
         before_digest = review_working_state.effective_privacy_region_digest(
             self.server.package_root,
             session_dir,
@@ -7849,6 +7914,12 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             enqueue_job=False,
             requested_policy=policy,
         )
+        presentation_state = presentation_working_state(
+            self.server.package_root,
+            session_dir,
+            state,
+            lazy_crops=False,
+        )
         return {
             "entity": after,
             "event": event,
@@ -7857,7 +7928,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             "materialization_plan": materialization_plan["plan"],
             "materialization_required": materialization_plan["plan"]["materialization_required"],
             "ok": True,
-            "working_state": state,
+            "working_state": presentation_state,
         }
 
     def apply_bulk_object_policy(
@@ -7894,9 +7965,24 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 session_dir=session_dir,
                 case_id=case_id,
                 entity_id=entity_id,
+                lazy_crops=False,
             )
             if entity is None:
                 return {"error": f"review entity not found: {entity_id}", "ok": False}
+            current_policy = review_working_state.inherited_policy(entity)
+            disabled_reason = (
+                None
+                if current_policy == policy
+                else entity_refinement.validate_policy_action(entity, policy)
+            )
+            if disabled_reason is not None:
+                return {
+                    "action_availability": entity.get("policy_action_availability"),
+                    "error": (
+                        f"object policy action disabled for {entity_id}: {disabled_reason}"
+                    ),
+                    "ok": False,
+                }
             before_entities.append(entity)
             after_entities.append(
                 entity
@@ -7937,6 +8023,12 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             enqueue_job=False,
             requested_policy=policy,
         )
+        presentation_state = presentation_working_state(
+            self.server.package_root,
+            session_dir,
+            state,
+            lazy_crops=False,
+        )
         return {
             "entities": after_entities,
             "event": event,
@@ -7945,7 +8037,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             "materialization_plan": materialization_plan["plan"],
             "materialization_required": materialization_plan["plan"]["materialization_required"],
             "ok": True,
-            "working_state": state,
+            "working_state": presentation_state,
         }
 
     def merge_selected_entities(
@@ -7968,6 +8060,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 session_dir=session_dir,
                 case_id=case_id,
                 entity_id=entity_id,
+                lazy_crops=False,
             )
             if entity is None:
                 return {"error": f"review entity not found: {entity_id}", "ok": False}
@@ -7978,6 +8071,17 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             return {"error": "Merge rejected: objects belong to different cases.", "ok": False}
         if len(categories) != 1:
             return {"error": "Merge rejected: objects belong to different categories.", "ok": False}
+        if any(
+            str(dict(entity.get("entity_refinement") or {}).get("purity") or "")
+            == entity_refinement.PURITY_LIKELY_MIXED
+            for entity in entities
+        ):
+            return {"error": "Merge rejected: mixed entities must be split first.", "ok": False}
+        if any_entities_overlap(entities):
+            return {
+                "error": "Merge rejected: selected objects have simultaneous source-frame conflict.",
+                "ok": False,
+            }
         before_digest = review_working_state.effective_privacy_region_digest(
             self.server.package_root,
             session_dir,
@@ -7989,11 +8093,10 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         )
         canonical = canonical_merged_entity(entities, session_dir=session_dir)
         retired_ids = [str(entity.get("entity_id") or "") for entity in entities]
-        overlap_warning = any_entities_overlap(entities)
         after_state = {
             "canonical_merged_entity_uuid": canonical["entity_id"],
             "materialization_required": False,
-            "overlapping_frame_warning": overlap_warning,
+            "overlapping_frame_warning": False,
             "primary": canonical,
             "resulting_policy": canonical.get("current_policy"),
             "retired_entity_ids": retired_ids,
@@ -8046,19 +8149,452 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             affected_entity_ids=[canonical["entity_id"], *retired_ids],
             enqueue_job=False,
         )
+        presentation_state = presentation_working_state(
+            self.server.package_root,
+            session_dir,
+            state,
+            lazy_crops=False,
+        )
+        response_canonical = dict(
+            presentation_state.get("object_policy_overrides", {})
+        ).get(canonical["entity_id"], canonical)
         return {
             "canonical_merged_entity_uuid": canonical["entity_id"],
             "event": event,
             "materialization_job": materialization_plan["job"],
             "materialization_plan": materialization_plan["plan"],
             "materialization_required": materialization_plan["plan"]["materialization_required"],
-            "merged_entity": canonical,
+            "merged_entity": response_canonical,
             "ok": True,
             "retired_entity_uuids": retired_ids,
-            "resulting_policy": canonical.get("current_policy"),
+            "resulting_policy": response_canonical.get("current_policy"),
             "source_evidence_preserved": True,
-            "working_state": state,
+            "working_state": presentation_state,
             "working_state_revision": state.get("state_hash"),
+        }
+
+    def accept_merge_candidate(
+        self,
+        payload: dict[str, Any],
+        actor: dict[str, Any],
+        session_dir: Path,
+    ) -> dict[str, Any]:
+        case_id = validate_workspace_case_id(
+            self.server.package_root,
+            str(payload.get("case_id") or ""),
+        )
+        entity_ids = [str(item) for item in list(payload.get("entity_ids") or [])]
+        if len(entity_ids) != 2:
+            return {"error": "Exactly two candidate entity ids are required.", "ok": False}
+        entities = [
+            find_active_review_entity(
+                self.server.package_root,
+                session_dir=session_dir,
+                case_id=case_id,
+                entity_id=entity_id,
+                lazy_crops=False,
+            )
+            for entity_id in entity_ids
+        ]
+        if any(entity is None for entity in entities):
+            return {"error": "candidate entity not found", "ok": False}
+        typed_entities = [dict(entity) for entity in entities if entity is not None]
+        if any(
+            str(dict(entity.get("entity_refinement") or {}).get("purity") or "")
+            == entity_refinement.PURITY_LIKELY_MIXED
+            for entity in typed_entities
+        ):
+            return {"error": "Merge rejected: mixed entities must be split first.", "ok": False}
+        candidate_id = str(payload.get("candidate_id") or "")
+        pair_id = entity_refinement.candidate_pair_id(case_id, typed_entities[0], typed_entities[1])
+        if candidate_id and candidate_id != pair_id:
+            return {"error": "candidate id does not match selected entities", "ok": False}
+        candidate_id = pair_id
+        baseline = read_json_file(self.server.package_root / "review_entities.json")
+        session_events = review_sessions.load_events(session_dir)
+        active_state = review_working_state.derive_working_state(
+            self.server.package_root,
+            session_dir,
+        )
+        active_case_entities = review_working_state.effective_case_entities(
+            list(dict(baseline.get("cases") or {}).get(case_id) or []),
+            active_state,
+        )
+        enriched_case_entities = [
+            entity_refinement.enrich_entity(
+                dict(active_entity),
+                package_root=self.server.package_root,
+                entity_index=baseline,
+                session_events=session_events,
+            )
+            for active_entity in active_case_entities
+            if dict(active_entity).get("current_status") not in {"merged", "split"}
+        ]
+        candidate = next(
+            (
+                item
+                for item in entity_refinement.advisory_candidate_pairs(
+                    self.server.package_root,
+                    enriched_case_entities,
+                    case_id=case_id,
+                    rejected_candidate_ids=entity_refinement.rejected_candidate_ids(
+                        session_events
+                    ),
+                )
+                if str(item.get("candidate_id") or "") == candidate_id
+            ),
+            None,
+        )
+        if candidate is None:
+            return {"error": "candidate is not currently available", "ok": False}
+        if str(candidate.get("classification") or "") != entity_refinement.CANDIDATE_POSSIBLE:
+            return {
+                "candidate": candidate,
+                "error": "candidate is not safe enough for human-confirmed merge",
+                "ok": False,
+            }
+        event_candidate = candidate_event_snapshot(candidate)
+        before_digest = review_working_state.effective_privacy_region_digest(
+            self.server.package_root,
+            session_dir,
+            case_id=case_id,
+        )
+        state_before = review_working_state.derive_working_state(
+            self.server.package_root,
+            session_dir,
+        )
+        canonical = canonical_merged_entity(typed_entities, session_dir=session_dir)
+        retired_ids = [str(entity.get("entity_id") or "") for entity in typed_entities]
+        after_state = {
+            "candidate": event_candidate,
+            "candidate_id": candidate_id,
+            "canonical_merged_entity_uuid": canonical["entity_id"],
+            "materialization_required": False,
+            "primary": canonical,
+            "resulting_policy": canonical.get("current_policy"),
+            "retired_entity_ids": retired_ids,
+            "retired_entity_uuids": retired_ids,
+            "source_entity_ids": retired_ids,
+            "working_state_revision": state_before.get("state_hash"),
+        }
+        event = review_sessions.append_event(
+            session_dir,
+            event_type="entity_merge_candidate_accepted",
+            actor=actor,
+            case_id=case_id,
+            task_id=None,
+            before_state={"candidate": event_candidate, "entities": typed_entities},
+            after_state=after_state,
+            note=str(payload.get("reason") or "Reviewer accepted advisory merge candidate."),
+            application_hashes={"candidate_evidence_hash": stable_hash(event_candidate)},
+        )
+        state = review_working_state.derive_working_state(
+            self.server.package_root,
+            session_dir,
+        )
+        materialization_plan = self.plan_materialization_for_case(
+            session_dir=session_dir,
+            case_id=case_id,
+            actor=actor,
+            operation="entity_merge_candidate_accepted",
+            reason="Latest reviewed media updated after accepted entity merge.",
+            accepted_revision=str(
+                state.get("active_projection_hash") or state.get("state_hash") or ""
+            ),
+            before_digest=before_digest,
+            after_state=state,
+            affected_entity_ids=[canonical["entity_id"], *retired_ids],
+            enqueue_job=False,
+        )
+        presentation_state = presentation_working_state(
+            self.server.package_root,
+            session_dir,
+            state,
+            lazy_crops=False,
+        )
+        response_canonical = dict(
+            presentation_state.get("object_policy_overrides", {})
+        ).get(canonical["entity_id"], canonical)
+        return {
+            "candidate": candidate,
+            "event": event,
+            "materialization_job": materialization_plan["job"],
+            "materialization_plan": materialization_plan["plan"],
+            "materialization_required": materialization_plan["plan"]["materialization_required"],
+            "merged_entity": response_canonical,
+            "ok": True,
+            "retired_entity_uuids": retired_ids,
+            "resulting_policy": response_canonical.get("current_policy"),
+            "working_state": presentation_state,
+        }
+
+    def reject_merge_candidate(
+        self,
+        payload: dict[str, Any],
+        actor: dict[str, Any],
+        session_dir: Path,
+    ) -> dict[str, Any]:
+        case_id = validate_workspace_case_id(
+            self.server.package_root,
+            str(payload.get("case_id") or ""),
+        )
+        entity_ids = [str(item) for item in list(payload.get("entity_ids") or [])]
+        if len(entity_ids) != 2:
+            return {"error": "Exactly two candidate entity ids are required.", "ok": False}
+        supplied_candidate_id = str(payload.get("candidate_id") or "")
+        candidate_id = entity_refinement.candidate_pair_id_from_ids(
+            case_id,
+            entity_ids[0],
+            entity_ids[1],
+        )
+        before_state = {
+            "candidate_id": candidate_id,
+            "entity_ids": sorted(entity_ids),
+            "supplied_candidate_id": supplied_candidate_id or None,
+        }
+        event = review_sessions.append_event(
+            session_dir,
+            event_type="entity_merge_candidate_rejected",
+            actor=actor,
+            case_id=case_id,
+            task_id=None,
+            before_state=before_state,
+            after_state=before_state
+            | {
+                "reason": str(payload.get("reason") or "Reviewer rejected merge candidate."),
+            },
+            note=str(payload.get("reason") or "Reviewer rejected merge candidate."),
+            application_hashes={"candidate_rejection_hash": stable_hash(before_state)},
+        )
+        return {
+            "event": event,
+            "materialization_required": False,
+            "ok": True,
+            "working_state": presentation_working_state(
+                self.server.package_root,
+                session_dir,
+                review_working_state.derive_working_state(
+                    self.server.package_root,
+                    session_dir,
+                ),
+                lazy_crops=False,
+            ),
+        }
+
+    def split_mixed_entity(
+        self,
+        payload: dict[str, Any],
+        actor: dict[str, Any],
+        session_dir: Path,
+    ) -> dict[str, Any]:
+        case_id = validate_workspace_case_id(
+            self.server.package_root,
+            str(payload.get("case_id") or ""),
+        )
+        entity_id = str(payload.get("entity_id") or "")
+        entity = find_active_review_entity(
+            self.server.package_root,
+            session_dir=session_dir,
+            case_id=case_id,
+            entity_id=entity_id,
+            lazy_crops=False,
+        )
+        if entity is None:
+            return {"error": "review entity not found", "ok": False}
+        tracklets = entity_refinement.raw_tracklets_for_entity(entity)
+        if len(tracklets) < 2:
+            return {"error": "Split rejected: entity has fewer than two tracklets.", "ok": False}
+        before_digest = review_working_state.effective_privacy_region_digest(
+            self.server.package_root,
+            session_dir,
+            case_id=case_id,
+        )
+        split_entities = split_entities_for_tracklets(entity, tracklets)
+        parent = dict(entity) | {
+            "current_status": "split",
+            "split_child_entity_ids": [child["entity_id"] for child in split_entities],
+        }
+        event = review_sessions.append_event(
+            session_dir,
+            event_type="entity_mixed_split",
+            actor=actor,
+            case_id=case_id,
+            task_id=None,
+            before_state={"entity": entity, "raw_tracklets": tracklets},
+            after_state={
+                "parent": parent,
+                "source_entity_ids": [entity_id],
+                "split_entities": split_entities,
+            },
+            note=str(payload.get("reason") or "Reviewer split mixed entity into tracklets."),
+            application_hashes={
+                "split_source_hash": stable_hash(
+                    {"entity_id": entity_id, "tracklets": tracklets}
+                )
+            },
+        )
+        state = review_working_state.derive_working_state(
+            self.server.package_root,
+            session_dir,
+        )
+        materialization_plan = self.plan_materialization_for_case(
+            session_dir=session_dir,
+            case_id=case_id,
+            actor=actor,
+            operation="entity_mixed_split",
+            reason="Latest reviewed media updated after entity split.",
+            accepted_revision=str(
+                state.get("active_projection_hash") or state.get("state_hash") or ""
+            ),
+            before_digest=before_digest,
+            after_state=state,
+            affected_entity_ids=[entity_id, *[child["entity_id"] for child in split_entities]],
+            enqueue_job=False,
+        )
+        presentation_state = presentation_working_state(
+            self.server.package_root,
+            session_dir,
+            state,
+            lazy_crops=False,
+        )
+        return {
+            "event": event,
+            "materialization_job": materialization_plan["job"],
+            "materialization_plan": materialization_plan["plan"],
+            "materialization_required": materialization_plan["plan"]["materialization_required"],
+            "ok": True,
+            "parent_entity_id": entity_id,
+            "split_entities": split_entities,
+            "working_state": presentation_state,
+        }
+
+    def split_tracklet_out(
+        self,
+        payload: dict[str, Any],
+        actor: dict[str, Any],
+        session_dir: Path,
+    ) -> dict[str, Any]:
+        case_id = validate_workspace_case_id(
+            self.server.package_root,
+            str(payload.get("case_id") or ""),
+        )
+        entity_id = str(payload.get("entity_id") or "")
+        tracklet_id = str(payload.get("tracklet_id") or "")
+        entity = find_active_review_entity(
+            self.server.package_root,
+            session_dir=session_dir,
+            case_id=case_id,
+            entity_id=entity_id,
+            lazy_crops=False,
+        )
+        if entity is None:
+            return {"error": "review entity not found", "ok": False}
+        tracklets = entity_refinement.raw_tracklets_for_entity(entity)
+        selected = [item for item in tracklets if str(item.get("tracklet_id") or "") == tracklet_id]
+        if not selected:
+            return {"error": "tracklet not found in entity", "ok": False}
+        remaining_tracklets = [
+            item
+            for item in tracklets
+            if str(item.get("tracklet_id") or "") != tracklet_id
+        ]
+        before_digest = review_working_state.effective_privacy_region_digest(
+            self.server.package_root,
+            session_dir,
+            case_id=case_id,
+        )
+        split_entities = split_entities_for_tracklets(entity, selected)
+        parent = parent_after_tracklet_split(entity, remaining_tracklets)
+        event = review_sessions.append_event(
+            session_dir,
+            event_type="entity_tracklet_split",
+            actor=actor,
+            case_id=case_id,
+            task_id=None,
+            before_state={"entity": entity, "raw_tracklets": tracklets},
+            after_state={
+                "parent": parent,
+                "source_entity_ids": [entity_id],
+                "split_entities": split_entities,
+                "tracklet_id": tracklet_id,
+            },
+            note=str(payload.get("reason") or "Reviewer split one tracklet out."),
+            application_hashes={
+                "split_tracklet_hash": stable_hash(
+                    {"entity_id": entity_id, "tracklet_id": tracklet_id}
+                )
+            },
+        )
+        state = review_working_state.derive_working_state(
+            self.server.package_root,
+            session_dir,
+        )
+        materialization_plan = self.plan_materialization_for_case(
+            session_dir=session_dir,
+            case_id=case_id,
+            actor=actor,
+            operation="entity_tracklet_split",
+            reason="Latest reviewed media updated after tracklet split.",
+            accepted_revision=str(
+                state.get("active_projection_hash") or state.get("state_hash") or ""
+            ),
+            before_digest=before_digest,
+            after_state=state,
+            affected_entity_ids=[entity_id, *[child["entity_id"] for child in split_entities]],
+            enqueue_job=False,
+        )
+        presentation_state = presentation_working_state(
+            self.server.package_root,
+            session_dir,
+            state,
+            lazy_crops=False,
+        )
+        return {
+            "event": event,
+            "materialization_job": materialization_plan["job"],
+            "materialization_plan": materialization_plan["plan"],
+            "materialization_required": materialization_plan["plan"]["materialization_required"],
+            "ok": True,
+            "parent_entity_id": entity_id,
+            "split_entities": split_entities,
+            "working_state": presentation_state,
+        }
+
+    def prepare_entity_previews(
+        self,
+        payload: dict[str, Any],
+        actor: dict[str, Any],
+        session_dir: Path,
+    ) -> dict[str, Any]:
+        del actor
+        case_id = validate_workspace_case_id(
+            self.server.package_root,
+            str(payload.get("case_id") or ""),
+        )
+        entity_id = str(payload.get("entity_id") or "")
+        entity = find_active_review_entity(
+            self.server.package_root,
+            session_dir=session_dir,
+            case_id=case_id,
+            entity_id=entity_id,
+            lazy_crops=False,
+        )
+        if entity is None:
+            return {"error": "review entity not found", "ok": False}
+        baseline = read_json_file(self.server.package_root / "review_entities.json")
+        events = review_sessions.load_events(session_dir)
+        prepared = entity_refinement.prepare_entity_previews(
+            self.server.package_root,
+            entity,
+            entity_index=baseline,
+            session_events=events,
+        )
+        return {
+            "entity": prepared,
+            "entity_id": entity_id,
+            "ok": True,
+            "preview_status": prepared.get("preview_status"),
+            "representative_crops": prepared.get("representative_crops") or [],
         }
 
     def read_json_body(self) -> dict[str, Any]:
@@ -8212,19 +8748,47 @@ def find_review_entity(
     return None
 
 
+def presentation_working_state(
+    package_root: Path,
+    session_dir: Path,
+    state: dict[str, Any],
+    *,
+    lazy_crops: bool = False,
+) -> dict[str, Any]:
+    index_path = package_root / "review_entities.json"
+    if not index_path.exists():
+        return state
+    entity_index = read_json_file(index_path)
+    events = review_sessions.load_events(session_dir)
+    return entity_refinement.enrich_working_state_entities(
+        package_root,
+        state,
+        entity_index=entity_index,
+        session_events=events,
+        lazy_crops=lazy_crops,
+    )
+
+
 def find_active_review_entity(
     package_root: Path,
     *,
     session_dir: Path,
     case_id: str,
     entity_id: str,
+    lazy_crops: bool = False,
 ) -> dict[str, Any] | None:
     state = review_working_state.derive_working_state(package_root, session_dir)
     baseline = read_json_file(package_root / "review_entities.json")
     entities = list(dict(baseline.get("cases") or {}).get(case_id) or [])
     for entity in review_working_state.effective_case_entities(entities, state):
         if str(entity.get("entity_id") or "") == entity_id:
-            return dict(entity)
+            return entity_refinement.enrich_entity(
+                dict(entity),
+                package_root=package_root,
+                entity_index=baseline,
+                session_events=review_sessions.load_events(session_dir),
+                lazy_crops=lazy_crops,
+            )
     return None
 
 
@@ -8246,13 +8810,11 @@ def canonical_merged_entity(
         for entity in ordered
         if review_working_state.inherited_policy(entity)
     }
-    resulting_policy = (
-        next(iter(policies)) if len(policies) == 1 else privacy_entities.POLICY_REVIEW_REQUIRED
-    )
+    resulting_policy = entity_refinement.most_protective_policy(policies)
     policy_reason = (
         "all_selected_entities_shared_policy"
         if len(policies) == 1
-        else "conflicting_selected_policies"
+        else "most_protective_selected_policy"
     )
     representative = choose_merge_representative(ordered)
     first_frames = [
@@ -8323,6 +8885,10 @@ def canonical_merged_entity(
                 "reason": policy_reason,
                 "resulting_policy": resulting_policy,
                 "schema_version": "merged_entity_policy_initialization.v1",
+            },
+            "entity_refinement_verification": {
+                "schema_version": "entity_refinement_verification.v1",
+                "status": "human_verified_merge",
             },
             "review_entity_state": (
                 "confirmed"
@@ -8438,6 +9004,189 @@ def entity_spans_overlap(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
 def unique_sorted(values: Any) -> list[str]:
     return sorted({str(value) for value in values if value is not None})
+
+
+def candidate_event_snapshot(candidate: dict[str, Any]) -> dict[str, Any]:
+    crop_evidence: dict[str, list[dict[str, Any]]] = {}
+    for entity_id, crops in dict(candidate.get("representative_crops") or {}).items():
+        rows: list[dict[str, Any]] = []
+        for crop in list(crops or []):
+            if not isinstance(crop, dict):
+                continue
+            rows.append(
+                {
+                    "bbox_xyxy": crop.get("bbox_xyxy"),
+                    "cache_key": crop.get("cache_key"),
+                    "crop_role": crop.get("crop_role"),
+                    "geometry_hash": crop.get("geometry_hash"),
+                    "quality_state": crop.get("quality_state"),
+                    "raw_tracklet_id": crop.get("raw_tracklet_id"),
+                    "schema_version": crop.get("schema_version"),
+                    "source_entity_id": crop.get("source_entity_id"),
+                    "source_frame": crop.get("source_frame"),
+                    "visual_descriptor_version": crop.get("visual_descriptor_version"),
+                }
+            )
+        crop_evidence[str(entity_id)] = rows
+    return {
+        "candidate_id": candidate.get("candidate_id"),
+        "category": candidate.get("category"),
+        "classification": candidate.get("classification"),
+        "descriptor_version": candidate.get("descriptor_version"),
+        "entity_ids": candidate.get("entity_ids"),
+        "has_visual_evidence": candidate.get("has_visual_evidence"),
+        "labels": candidate.get("labels"),
+        "representative_crop_evidence": crop_evidence,
+        "schema_version": "entity_similarity_candidate_event_snapshot.v1",
+        "similarity": candidate.get("similarity"),
+        "source_intervals": candidate.get("source_intervals"),
+        "temporal_conflict_frame_count": candidate.get("temporal_conflict_frame_count"),
+        "temporal_conflict_sample_frames": candidate.get("temporal_conflict_sample_frames"),
+    }
+
+
+def parent_after_tracklet_split(
+    parent: dict[str, Any],
+    remaining_tracklets: list[dict[str, Any]],
+) -> dict[str, Any]:
+    remaining_ids = unique_sorted(
+        str(tracklet.get("tracklet_id") or "")
+        for tracklet in remaining_tracklets
+        if tracklet.get("tracklet_id")
+    )
+    first_frames = [
+        int(tracklet["source_frame_start"])
+        for tracklet in remaining_tracklets
+        if isinstance(tracklet.get("source_frame_start"), int)
+    ]
+    last_frames = [
+        int(tracklet["source_frame_end"])
+        for tracklet in remaining_tracklets
+        if isinstance(tracklet.get("source_frame_end"), int)
+    ]
+    crops = entity_refinement.representative_crops({"raw_tracklets": remaining_tracklets})
+    updated = dict(parent) | {
+        "automatic_source_track_ids": remaining_ids,
+        "member_detector_tracker_ids": remaining_ids,
+        "raw_tracklets": remaining_tracklets,
+        "representative_crops": crops,
+    }
+    if first_frames:
+        updated["first_visible_source_frame"] = min(first_frames)
+    else:
+        updated.pop("first_visible_source_frame", None)
+    if last_frames:
+        updated["last_visible_source_frame"] = max(last_frames)
+    else:
+        updated.pop("last_visible_source_frame", None)
+    if crops:
+        updated["representative_bbox"] = crops[0].get("bbox_xyxy")
+        updated["representative_source_frame"] = crops[0].get("source_frame")
+        updated["representative_thumbnail_path"] = crops[0].get("path")
+    else:
+        updated.pop("representative_bbox", None)
+        updated.pop("representative_source_frame", None)
+        updated.pop("representative_thumbnail_path", None)
+    refinement = dict(updated.get("entity_refinement") or {})
+    refinement["raw_tracklets"] = remaining_tracklets
+    refinement["child_tracklet_count"] = len(remaining_tracklets)
+    updated["entity_refinement"] = refinement
+    updated["current_status"] = "active" if remaining_tracklets else "split"
+    return updated
+
+
+def split_entities_for_tracklets(
+    parent: dict[str, Any],
+    tracklets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    case_id = str(parent.get("case_id") or "")
+    category = str(parent.get("category") or "")
+    policy = review_working_state.inherited_policy(parent)
+    parent_id = str(parent.get("entity_id") or "")
+    parent_label = str(parent.get("label") or parent_id or "Review object")
+    children: list[dict[str, Any]] = []
+    for index, tracklet in enumerate(tracklets, start=1):
+        tracklet_id = str(tracklet.get("tracklet_id") or f"tracklet_{index}")
+        child_id = f"entity_split_{stable_hash({'parent': parent_id, 'tracklet': tracklet_id})[:24]}"
+        crops = list(tracklet.get("representative_crops") or [])
+        first = entity_refinement.optional_int(tracklet.get("source_frame_start"))
+        last = entity_refinement.optional_int(tracklet.get("source_frame_end"))
+        representative_frame = first
+        representative_bbox = None
+        if crops:
+            representative_frame = (
+                entity_refinement.optional_int(crops[0].get("source_frame"))
+                or representative_frame
+            )
+            representative_bbox = crops[0].get("bbox_xyxy")
+        child = {
+            "attached_fragment_track_ids": [],
+            "automatic_source_track_ids": [tracklet_id],
+            "case_id": case_id,
+            "category": category,
+            "created_provenance": {
+                "parent_entity_id": parent_id,
+                "schema_version": "entity_split_child_provenance.v1",
+                "source": "entity_refinement_split",
+                "tracklet_id": tracklet_id,
+            },
+            "current_policy": policy,
+            "current_status": "active",
+            "default_privacy_policy": policy,
+            "display_name": f"{parent_label} split {index:02d}",
+            "entity_id": child_id,
+            "entity_refinement_verification": {
+                "schema_version": "entity_refinement_verification.v1",
+                "status": "split_from_mixed_pending_review",
+            },
+            "evidence_summary": {
+                "provenance_counts": {
+                    "detector": 1 if tracklet.get("detector_backed") else 0,
+                    "entity_refinement_split": 1,
+                },
+                "review_observation_count": 1,
+                "review_tracklet_count": 1,
+                "tracklet_count": 1,
+            },
+            "first_visible_source_frame": first,
+            "label": f"{parent_label} split {index:02d}",
+            "last_visible_source_frame": last,
+            "member_detector_tracker_ids": [tracklet_id],
+            "merge_split_lineage": [
+                *list(parent.get("merge_split_lineage") or []),
+                {
+                    "operation": "split_tracklet",
+                    "parent_entity_id": parent_id,
+                    "result_entity_id": child_id,
+                    "tracklet_id": tracklet_id,
+                },
+            ],
+            "privacy_action": policy,
+            "raw_tracklets": [tracklet],
+            "representative_bbox": representative_bbox,
+            "representative_crops": crops,
+            "representative_source_frame": representative_frame,
+            "representative_thumbnail_path": crops[0].get("path") if crops else None,
+            "review_entity_state": "ready"
+            if policy == privacy_entities.POLICY_REDACT
+            else "review_required",
+            "review_state": "reviewed"
+            if policy == privacy_entities.POLICY_REDACT
+            else "needs_review",
+            "schema_version": "review_entity.v2",
+            "source_entity_ids": [parent_id],
+            "source_lineage": {
+                "parent_entity_id": parent_id,
+                "schema_version": "mixed_review_entity_source_lineage.v1",
+                "technical_id": tracklet_id,
+                "technical_track_ids": [tracklet_id],
+            },
+            "split_parent_entity_id": parent_id,
+        }
+        children.append(
+            entity_refinement.enrich_entity(child, package_root=None)
+        )
+    return children
 
 
 def policy_verification_task(case_id: str, entity: dict[str, Any], task_id: str) -> dict[str, Any]:
