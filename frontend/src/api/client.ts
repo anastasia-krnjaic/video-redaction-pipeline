@@ -257,6 +257,33 @@ export async function saveCorrection(payload: {
   };
 }
 
+export async function removeCorrection(payload: {
+  session_id: string;
+  actor: Attribution | Record<string, unknown>;
+  case_id: CaseId;
+  correction_id: string;
+  reason?: string;
+}): Promise<{
+  already_inactive?: boolean;
+  event?: AuditEvent;
+  events?: AuditEvent[];
+  materialization_job?: MaterializationJob;
+  materialization_required?: boolean;
+  publication_status?: string;
+  working_state?: WorkingState;
+}> {
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/corrections/remove`, payload);
+  return {
+    already_inactive: Boolean(response.already_inactive),
+    event: response.event,
+    events: response.events,
+    materialization_job: response.materialization_job,
+    materialization_required: typeof response.materialization_required === 'boolean' ? response.materialization_required : undefined,
+    publication_status: typeof response.publication_status === 'string' ? response.publication_status : undefined,
+    working_state: response.working_state,
+  };
+}
+
 export async function previewCorrection(payload: {
   session_id: string;
   actor: Attribution | Record<string, unknown>;

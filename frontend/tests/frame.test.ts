@@ -4,7 +4,9 @@ import {
   caseToSourceFrame,
   formatTime,
   fpsValue,
+  frameToSeekSeconds,
   frameToSeconds,
+  secondsToFrame,
   sourceToCaseFrame,
   taskTimestamp,
   timelineRatioToFrame,
@@ -33,6 +35,15 @@ describe('frame utilities', () => {
     expect(fpsValue('30000/1001')).toBeCloseTo(29.97003);
     expect(frameToSeconds(manifest, 300)).toBeCloseTo(9.9766);
     expect(formatTime(3723.9)).toBe('01:02:03');
+  });
+
+  it('seeks to the middle of the target frame and maps playback time by frame interval', () => {
+    const fps = fpsValue(manifest.fps);
+    expect(frameToSeekSeconds(manifest, 89)).toBeCloseTo((89.5) / fps);
+    expect(secondsToFrame(manifest, 89 / fps)).toBe(89);
+    expect(secondsToFrame(manifest, (89.5) / fps)).toBe(89);
+    expect(secondsToFrame(manifest, (90 - 0.001) / fps)).toBe(89);
+    expect(secondsToFrame(manifest, 90 / fps)).toBe(90);
   });
 
   it('formats task timestamps from exact source-frame starts', () => {

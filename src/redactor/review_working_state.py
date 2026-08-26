@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 import zipfile
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from redactor.review_sessions import (
     ACTION_NOT_SENSITIVE,
     CANONICAL_REVIEW_ACTIONS,
     EVENT_CORRECTION_SAVED_LEGACY,
+    EVENT_MANUAL_CORRECTION_RETRACTED,
     EVENT_MANUAL_CORRECTION_SAVED,
     EVENT_TASK_RESOLUTION_DERIVED,
     REVIEW_DECISION_IDENTITY_V2,
@@ -430,9 +432,12 @@ def _working_state_cache_enabled() -> bool:
 
 
 def _working_state_cache_key(package_root: Path, session_dir: Path) -> tuple[Any, ...]:
+    from redactor import reviewed_regions
+
     return (
         str(package_root),
         str(session_dir),
+        stable_hash(reviewed_regions.render_configuration_payload(render_settings())),
         current_event_chain_head(session_dir),
         _file_signatures(
             [
@@ -719,6 +724,21 @@ def derive_active_review_projection(
                 active_correction_ids.add(correction_id)
                 if case_id:
                     correction_case_by_id[correction_id] = case_id
+            continue
+        if event_type == EVENT_MANUAL_CORRECTION_RETRACTED:
+            correction_id = str(after.get("correction_id") or "")
+            retraction_case_id = str(after.get("case_id") or case_id or "")
+            if correction_id:
+                active_correction_ids.discard(correction_id)
+            if correction_id and retraction_case_id:
+                verification_task_id = f"correction_verify_{retraction_case_id}_{correction_id}"
+                manual_tasks.pop(manual_task_key(retraction_case_id, verification_task_id), None)
+                decisions_by_case.get(retraction_case_id, {}).pop(verification_task_id, None)
+                if not decisions_by_case.get(retraction_case_id):
+                    decisions_by_case.pop(retraction_case_id, None)
+                resolutions_by_case.get(retraction_case_id, {}).pop(verification_task_id, None)
+                if not resolutions_by_case.get(retraction_case_id):
+                    resolutions_by_case.pop(retraction_case_id, None)
             continue
         if event_type == "entity_policy_changed":
             entity = dict(after)
@@ -1944,6 +1964,7 @@ def materialize_latest_reviewed(
     accepted_revision: str | None = None,
     actor: dict[str, Any] | None = None,
     event_reason: str | None = None,
+    publication_currentness_assertion: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     from redactor import review_finalization
 
@@ -1968,6 +1989,7 @@ def materialize_latest_reviewed(
             accepted_revision=accepted_revision,
             actor=actor,
             event_reason=event_reason,
+            publication_currentness_assertion=publication_currentness_assertion,
         )
     manifest = case_manifests.load_case_manifest(safe_case_manifest_path(package_root, case_id))
     source_path = review_finalization.resolve_package_path(package_root, manifest.source_path)

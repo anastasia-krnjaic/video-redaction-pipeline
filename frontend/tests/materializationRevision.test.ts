@@ -96,6 +96,26 @@ describe('materialization completion revision guard', () => {
       sessionId: 'session_1',
       workingState: state('rev_current'),
     })).toBe('BUILD_REQUIRED');
+
+    expect(latestReviewedLifecycleState({
+      activeJobs: [],
+      caseId: 'night',
+      caseLatestReviewedStale: false,
+      latestRole: { media_validation_passed: true, published_working_state_revision: 'rev_old' },
+      reviewReady: true,
+      sessionId: 'session_1',
+      workingState: state('rev_current'),
+    })).toBe('CURRENT_REUSABLE');
+
+    expect(latestReviewedLifecycleState({
+      activeJobs: [],
+      caseId: 'day',
+      caseLatestReviewedStale: true,
+      latestRole: { media_validation_passed: true, published_working_state_revision: 'rev_current' },
+      reviewReady: true,
+      sessionId: 'session_1',
+      workingState: state('rev_current'),
+    })).toBe('BUILD_REQUIRED');
   });
 
   it('keeps in-flight and failed equivalent jobs visible without hidden navigation rebuilds', () => {

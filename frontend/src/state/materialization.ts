@@ -32,6 +32,7 @@ export function materializationJobRepresentsCurrentProjection(
 
 export function latestReviewedLifecycleState({
   activeJobs,
+  caseLatestReviewedStale,
   caseId,
   latestRole,
   materializationError,
@@ -40,6 +41,7 @@ export function latestReviewedLifecycleState({
   workingState,
 }: {
   activeJobs: MaterializationJob[];
+  caseLatestReviewedStale?: boolean;
   caseId: CaseId;
   latestRole?: Record<string, unknown>;
   materializationError?: string;
@@ -60,6 +62,8 @@ export function latestReviewedLifecycleState({
     return 'BUILD_RUNNING';
   }
   if (latestRole && latestRole.media_validation_passed !== false) {
+    if (caseLatestReviewedStale === false) return 'CURRENT_REUSABLE';
+    if (caseLatestReviewedStale === true) return 'BUILD_REQUIRED';
     const currentRevision = String(workingState?.active_projection_hash || '');
     const latestRevision = String(
       latestRole.published_working_state_revision || latestRole.accepted_working_state_revision || '',

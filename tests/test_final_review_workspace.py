@@ -3414,8 +3414,9 @@ def test_reset_supersedes_running_materialization_job(
         accepted_revision: str | None = None,
         actor: dict[str, Any] | None = None,
         event_reason: str | None = None,
+        publication_currentness_assertion: Any | None = None,
     ) -> dict[str, Any]:
-        del package_root, job_session_dir, actor, event_reason
+        del package_root, job_session_dir, actor, event_reason, publication_currentness_assertion
         entered.set()
         assert release.wait(5)
         return {
@@ -7300,6 +7301,57 @@ def test_supported_canonical_new_event_invalidates_current_latest_until_republis
     assert "latest_reviewed" in {role["role"] for role in republished_versions}
 
 
+def test_supported_canonical_materialization_implementation_identity_invalidates_latest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_empty_regions(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    original = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+
+    monkeypatch.setattr(
+        reviewed_regions,
+        "LATEST_REVIEWED_MATERIALIZATION_IMPLEMENTATION_ID",
+        "latest_reviewed_materialization.test.changed",
+    )
+    stale_versions = review_working_state.case_versions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )["versions"]
+    republished = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+        accepted_revision=review_working_state.derive_working_state(package, session_dir)[
+            "active_projection_hash"
+        ],
+    )
+
+    assert "latest_reviewed" not in {role["role"] for role in stale_versions}
+    assert republished["revision_id"] != original["revision_id"]
+    assert (
+        republished["latest_reviewed"]["path"]
+        != original["latest_reviewed"]["path"]
+    )
+
+
 def test_supported_canonical_session_binding_survives_publication_and_reset(
     tmp_path: Path,
 ) -> None:
@@ -8149,6 +8201,505 @@ def test_workspace_server_reuses_duplicate_manual_correction_save(
         server.server_close()
 
 
+def test_workspace_server_removes_saved_correction_case_scoped_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    package, day, night, session_dir = write_duplicate_task_case_package(tmp_path)
+    correction = review_corrections.ReviewCorrection(
+        case_id=day.case_id,
+        category=CATEGORY_PLATE,
+        correction_id="corr_remove_endpoint",
+        configuration_freeze_hash="freeze.test",
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),),
+        operation=review_corrections.OP_ADD,
+        reason="endpoint remove test",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=0,
+        source_frame_start=0,
+        source_video_hash=day.source_video_hash or "",
+        task_id="shared_task_001",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+    state_with_correction = review_working_state.derive_working_state(package, session_dir)
+    day_materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=day.case_id,
+        accepted_revision=state_with_correction["active_projection_hash"],
+    )
+    night_materialization = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=night.case_id,
+        accepted_revision=state_with_correction["active_projection_hash"],
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        wrong_case_status, wrong_case_body = post_json_error(
+            f"{base_url}/api/v1/corrections/remove",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": night.case_id,
+                "correction_id": correction.correction_id,
+                "session_id": session_dir.name,
+            },
+        )
+        remove_response = post_json(
+            f"{base_url}/api/v1/corrections/remove",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": day.case_id,
+                "correction_id": correction.correction_id,
+                "reason": "remove correction",
+                "session_id": session_dir.name,
+            },
+        )
+        event_count_after_remove = len(review_sessions.load_events(session_dir))
+        second_remove = post_json(
+            f"{base_url}/api/v1/corrections/remove",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": day.case_id,
+                "correction_id": correction.correction_id,
+                "reason": "remove correction",
+                "session_id": session_dir.name,
+            },
+        )
+        state_after = review_working_state.derive_working_state(package, session_dir)
+        day_current = reviewed_regions.current_latest_reviewed_role(
+            package,
+            session_dir,
+            case_id=day.case_id,
+            active_projection_hashes=state_after["active_projection_hashes"],
+            working_state=state_after,
+        )
+        night_current = reviewed_regions.current_latest_reviewed_role(
+            package,
+            session_dir,
+            case_id=night.case_id,
+            active_projection_hashes=state_after["active_projection_hashes"],
+            working_state=state_after,
+        )
+        compiled_after, _ = reviewed_regions.compile_reviewed_regions(
+            package,
+            session_dir,
+            case_id=day.case_id,
+        )
+        events = review_sessions.load_events(session_dir)
+
+        assert wrong_case_status == 409
+        assert "different case" in str(wrong_case_body["error"])
+        assert remove_response["event"]["event_type"] == "manual_correction_retracted"
+        assert remove_response["materialization_required"] is True
+        assert remove_response["publication_status"] == "pending_explicit_build"
+        assert correction.correction_id not in remove_response["working_state"][
+            "active_correction_ids"
+        ]
+        assert not [
+            record for record in compiled_after if record.object_id == correction.correction_id
+        ]
+        assert day_current == {}
+        assert night_current["revision_id"] == night_materialization["revision_id"]
+        assert second_remove["already_inactive"] is True
+        assert len(review_sessions.load_events(session_dir)) == event_count_after_remove
+        assert [
+            correction.correction_id
+            for correction in review_corrections.load_corrections_jsonl(
+                session_dir / "corrections.jsonl"
+            )
+        ] == [correction.correction_id]
+        assert sum(
+            1 for event in events if event["event_type"] == "manual_correction_saved"
+        ) == 1
+        assert sum(
+            1 for event in events if event["event_type"] == "manual_correction_retracted"
+        ) == 1
+        assert day_materialization["revision_id"]
+        assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_in_flight_materialization_cannot_republish_retracted_correction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_empty_regions(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_PLATE,
+        correction_id="corr_inflight_remove",
+        configuration_freeze_hash="freeze.test",
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),),
+        operation=review_corrections.OP_ADD,
+        reason="in-flight remove test",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=0,
+        source_frame_start=0,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id="task_inflight_remove",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+    first_started = threading.Event()
+    release_first = threading.Event()
+
+    def fake_materialize_latest_reviewed(
+        package_root: Path,
+        target_session_dir: Path,
+        *,
+        case_id: str,
+        accepted_revision: str | None = None,
+        actor: dict[str, object] | None = None,
+        event_reason: str | None = None,
+        publication_currentness_assertion: Any | None = None,
+    ) -> dict[str, object]:
+        del actor, event_reason, publication_currentness_assertion
+        first_started.set()
+        assert release_first.wait(timeout=5)
+        digest = review_working_state.effective_privacy_region_digest(
+            package_root,
+            target_session_dir,
+            case_id=case_id,
+        )
+        automatic_path = package_root / manifest.video_roles[1].path
+        return {
+            "audio_handling": "copied",
+            "case_id": case_id,
+            "correction_render_verifications": {},
+            "effective_region_count": digest["region_count"],
+            "effective_regions_hash": digest["effective_regions_hash"],
+            "latest_reviewed": {
+                "accepted_working_state_revision": accepted_revision,
+                "label": "Latest reviewed",
+                "media_validation_passed": True,
+                "path": manifest.video_roles[1].path,
+                "published_working_state_revision": accepted_revision,
+                "role": "latest_reviewed",
+                "sha256": media_sha(automatic_path),
+                "source_frame_end": manifest.source_frame_end,
+                "source_frame_start": manifest.source_frame_start,
+            },
+            "media_validation": {"passed": True},
+            "rendered_frame_count": manifest.frame_count,
+            "rendered_region_count": digest["region_count"],
+            "timing": {
+                "effective_region_derivation_duration_ms": 0,
+                "output_frame_count": manifest.frame_count,
+                "publication_duration_ms": 0,
+                "render_encode_duration_ms": 0,
+                "total_duration_ms": 0,
+            },
+            "video_sha256": media_sha(automatic_path),
+        }
+
+    monkeypatch.setattr(
+        review_workspace.review_working_state,
+        "materialize_latest_reviewed",
+        fake_materialize_latest_reviewed,
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        build = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "session_id": session_dir.name,
+            },
+        )
+        assert first_started.wait(timeout=5)
+        remove = post_json(
+            f"{base_url}/api/v1/corrections/remove",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "correction_id": correction.correction_id,
+                "session_id": session_dir.name,
+            },
+        )
+        release_first.set()
+        stale_job = wait_for_materialization_job(
+            server,
+            str(build["materialization_job"]["job_id"]),
+        )
+        state_after = review_working_state.derive_working_state(package, session_dir)
+
+        assert remove["event"]["event_type"] == "manual_correction_retracted"
+        assert stale_job["status"] == "superseded"
+        assert stale_job["publication_status"] == "superseded"
+        assert stale_job["queue_state"] in {
+            "discarded_stale_generation",
+            "discarded_stale_render",
+            "discarded_stale_revision",
+        }
+        assert correction.correction_id not in state_after["active_correction_ids"]
+        assert not reviewed_regions.load_current_pointer(
+            package,
+            case_id=manifest.case_id,
+        )
+    finally:
+        release_first.set()
+        server.shutdown()
+        server.server_close()
+
+
+def test_real_materializer_retraction_wins_before_current_pointer_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package, day, night, session_dir = write_duplicate_task_case_package(tmp_path)
+    baseline_state = review_working_state.derive_working_state(package, session_dir)
+    day_baseline = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=day.case_id,
+        accepted_revision=baseline_state["active_projection_hash"],
+    )
+    night_baseline = review_working_state.materialize_latest_reviewed(
+        package,
+        session_dir,
+        case_id=night.case_id,
+        accepted_revision=baseline_state["active_projection_hash"],
+    )
+    pointer_path = reviewed_regions.current_pointer_path(package)
+    pre_race_pointer_sha = media_sha(pointer_path)
+    pre_race_pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    correction = review_corrections.ReviewCorrection(
+        case_id=day.case_id,
+        category=CATEGORY_PLATE,
+        correction_id="corr_real_retraction_wins",
+        configuration_freeze_hash="freeze.test",
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),),
+        operation=review_corrections.OP_ADD,
+        reason="real publication race",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=0,
+        source_frame_start=0,
+        source_video_hash=day.source_video_hash or "",
+        task_id="shared_task_001",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+    stale_digest = review_working_state.effective_privacy_region_digest(
+        package,
+        session_dir,
+        case_id=day.case_id,
+    )
+    stale_reviewed_hash = str(stale_digest["effective_regions_hash"])
+    stale_revision_id = f"latest_reviewed_{stale_reviewed_hash[:16]}"
+    pre_publish_reached = threading.Event()
+    release_publish = threading.Event()
+    original_publish = reviewed_regions.publish_current_revision
+
+    def block_day_publish_until_retraction(**kwargs: object) -> dict[str, object]:
+        if kwargs.get("case_id") == day.case_id:
+            pre_publish_reached.set()
+            assert release_publish.wait(timeout=5)
+        return original_publish(**kwargs)
+
+    monkeypatch.setattr(
+        reviewed_regions,
+        "publish_current_revision",
+        block_day_publish_until_retraction,
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        build = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": day.case_id,
+                "session_id": session_dir.name,
+            },
+        )
+        assert pre_publish_reached.wait(timeout=10)
+        stale_revision_root = (
+            session_dir / "latest_reviewed" / day.case_id / stale_revision_id
+        )
+        assert stale_revision_root.exists()
+        remove = post_json(
+            f"{base_url}/api/v1/corrections/remove",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": day.case_id,
+                "correction_id": correction.correction_id,
+                "session_id": session_dir.name,
+            },
+        )
+        release_publish.set()
+        stale_job = wait_for_materialization_job(
+            server,
+            str(build["materialization_job"]["job_id"]),
+        )
+        state_after = review_working_state.derive_working_state(package, session_dir)
+        compiled_after, _ = reviewed_regions.compile_reviewed_regions(
+            package,
+            session_dir,
+            case_id=day.case_id,
+        )
+        pointer_after = json.loads(pointer_path.read_text(encoding="utf-8"))
+        day_pointer = reviewed_regions.load_current_pointer(package, case_id=day.case_id)
+        night_pointer = reviewed_regions.load_current_pointer(package, case_id=night.case_id)
+        events = review_sessions.load_events(session_dir)
+
+        assert remove["event"]["event_type"] == "manual_correction_retracted"
+        assert remove["materialization_required"] is False
+        assert stale_job["status"] == "superseded"
+        assert stale_job["publication_status"] == "superseded"
+        assert stale_job["queue_state"] in {
+            "discarded_stale_generation",
+            "discarded_stale_publication_guard",
+            "discarded_stale_render",
+            "discarded_stale_revision",
+        }
+        assert media_sha(pointer_path) == pre_race_pointer_sha
+        assert pointer_after == pre_race_pointer
+        assert day_pointer["revision_id"] == day_baseline["revision_id"]
+        assert night_pointer["revision_id"] == night_baseline["revision_id"]
+        assert day_pointer["revision_id"] != stale_revision_id
+        assert day_pointer["reviewed_region_set_sha256"] != stale_reviewed_hash
+        assert correction.correction_id not in state_after["active_correction_ids"]
+        assert not [
+            record for record in compiled_after if record.object_id == correction.correction_id
+        ]
+        assert [
+            item.correction_id
+            for item in review_corrections.load_corrections_jsonl(
+                session_dir / "corrections.jsonl"
+            )
+        ] == [correction.correction_id]
+        assert sum(
+            1 for event in events if event["event_type"] == "manual_correction_saved"
+        ) == 1
+        assert sum(
+            1 for event in events if event["event_type"] == "manual_correction_retracted"
+        ) == 1
+        assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
+    finally:
+        release_publish.set()
+        server.shutdown()
+        server.server_close()
+
+
+def test_real_materializer_publication_wins_then_retraction_stales_latest(
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_empty_regions(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_PLATE,
+        correction_id="corr_real_publication_wins",
+        configuration_freeze_hash="freeze.test",
+        interpolation_method=review_corrections.INTERPOLATION_NONE,
+        keyframes=(review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),),
+        operation=review_corrections.OP_ADD,
+        reason="publication wins race",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=0,
+        source_frame_start=0,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id="task_publication_wins",
+    )
+    review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+    (package / "index.html").write_text("ok", encoding="utf-8")
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 0.01
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        build = post_json(
+            f"{base_url}/api/v1/materialization-jobs",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "session_id": session_dir.name,
+            },
+        )
+        completed = wait_for_materialization_job(
+            server,
+            str(build["materialization_job"]["job_id"]),
+        )
+        current_before_remove = reviewed_regions.load_current_pointer(
+            package,
+            case_id=manifest.case_id,
+        )
+        remove = post_json(
+            f"{base_url}/api/v1/corrections/remove",
+            {
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "correction_id": correction.correction_id,
+                "session_id": session_dir.name,
+            },
+        )
+        state_after = review_working_state.derive_working_state(package, session_dir)
+        current_after_remove = reviewed_regions.current_latest_reviewed_role(
+            package,
+            session_dir,
+            case_id=manifest.case_id,
+            active_projection_hashes=state_after["active_projection_hashes"],
+            working_state=state_after,
+        )
+
+        assert completed["status"] == "completed"
+        assert completed["publication_status"] == "published"
+        assert current_before_remove["revision_id"] == completed["latest_reviewed"]["revision_id"]
+        assert remove["event"]["event_type"] == "manual_correction_retracted"
+        assert remove["materialization_required"] is True
+        assert correction.correction_id not in state_after["active_correction_ids"]
+        assert current_after_remove == {}
+        assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_batched_manual_correction_saves_wait_for_explicit_build(
     tmp_path: Path,
 ) -> None:
@@ -8924,8 +9475,61 @@ def test_render_correction_interval_preview(tmp_path: Path) -> None:
     assert inside_diff > control_diff + 0.75
 
 
-def test_interpolated_manual_correction_maps_compiles_and_renders_exact_geometry(
+@pytest.mark.parametrize(
+    (
+        "mode_name",
+        "interpolation_method",
+        "source_frame_start",
+        "source_frame_end",
+        "keyframe_boxes",
+        "expected_boxes",
+    ),
+    [
+        (
+            "linear",
+            review_corrections.INTERPOLATION_LINEAR,
+            1,
+            3,
+            (
+                (1, (20, 20, 54, 34)),
+                (3, (26, 22, 60, 36)),
+            ),
+            {
+                1: (20, 20, 54, 34),
+                2: (23, 21, 57, 35),
+                3: (26, 22, 60, 36),
+            },
+        ),
+        (
+            "fixed",
+            review_corrections.INTERPOLATION_NONE,
+            1,
+            3,
+            ((1, (20, 20, 54, 34)),),
+            {
+                1: (20, 20, 54, 34),
+                2: (20, 20, 54, 34),
+                3: (20, 20, 54, 34),
+            },
+        ),
+        (
+            "single",
+            review_corrections.INTERPOLATION_NONE,
+            2,
+            2,
+            ((2, (23, 21, 57, 35)),),
+            {2: (23, 21, 57, 35)},
+        ),
+    ],
+)
+def test_manual_correction_preview_and_latest_render_inclusive_frames(
     tmp_path: Path,
+    mode_name: str,
+    interpolation_method: str,
+    source_frame_start: int,
+    source_frame_end: int,
+    keyframe_boxes: tuple[tuple[int, tuple[int, int, int, int]], ...],
+    expected_boxes: dict[int, tuple[int, int, int, int]],
 ) -> None:
     package = tmp_path / "package"
     manifest = add_automatic_role(package, synthetic_case_manifest(package))
@@ -8938,15 +9542,10 @@ def test_interpolated_manual_correction_maps_compiles_and_renders_exact_geometry
         categories=(CATEGORY_PLATE,),
     )
     session_dir = create_session(package, manifest)
-    expected_boxes = {
-        1: (20, 20, 54, 34),
-        2: (23, 21, 57, 35),
-        3: (26, 22, 60, 36),
-    }
     correction = review_corrections.ReviewCorrection(
         case_id=manifest.case_id,
         category=CATEGORY_PLATE,
-        correction_id="corr_exact_geometry",
+        correction_id=f"corr_{mode_name}_geometry",
         checkpoints=tuple(
             review_corrections.CorrectionCheckpoint(
                 source_frame=source_frame,
@@ -8955,18 +9554,24 @@ def test_interpolated_manual_correction_maps_compiles_and_renders_exact_geometry
             for source_frame in expected_boxes
         ),
         configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
-        interpolation_method=review_corrections.INTERPOLATION_LINEAR,
-        keyframes=(
-            review_corrections.CorrectionKeyframe(1, expected_boxes[1]),
-            review_corrections.CorrectionKeyframe(3, expected_boxes[3]),
+        interpolation_method=interpolation_method,
+        keyframes=tuple(
+            review_corrections.CorrectionKeyframe(frame, box)
+            for frame, box in keyframe_boxes
         ),
         operation=review_corrections.OP_ADD,
         reason="exact geometry",
         reviewer_identity={"reviewer_id": "analyst"},
-        source_frame_end=3,
-        source_frame_start=1,
+        source_frame_end=source_frame_end,
+        source_frame_start=source_frame_start,
         source_video_hash=manifest.source_video_hash or "",
-        task_id="task_exact_geometry",
+        task_id=f"task_{mode_name}_geometry",
+    )
+    preview = review_working_state.render_correction_preview(
+        package,
+        session_dir,
+        correction=correction,
+        include_unsaved_correction=True,
     )
     review_sessions.append_correction_event(
         session_dir,
@@ -8993,28 +9598,29 @@ def test_interpolated_manual_correction_maps_compiles_and_renders_exact_geometry
             "active_projection_hash"
         ],
     )
-    latest_frame = read_video_frame(package / materialization["latest_reviewed"]["path"], 2)
-    source_frame = read_video_frame(package / manifest.source_path, 2)
-    x1, y1, x2, y2 = expected_boxes[2]
-    inside_diff = float(
-        np.mean(
-            np.abs(
-                latest_frame[y1:y2, x1:x2].astype(np.int16)
-                - source_frame[y1:y2, x1:x2].astype(np.int16)
-            )
-        )
-    )
-    control_diff = float(
-        np.mean(
-            np.abs(
-                latest_frame[0:8, 0:8].astype(np.int16)
-                - source_frame[0:8, 0:8].astype(np.int16)
-            )
-        )
-    )
+    latest_path = package / materialization["latest_reviewed"]["path"]
     verification = materialization["correction_render_verifications"][
         correction.correction_id
     ]
+
+    def frame_diff(
+        path_a: Path,
+        frame_a: int,
+        path_b: Path,
+        frame_b: int,
+        bbox: tuple[int, int, int, int],
+    ) -> float:
+        left = read_video_frame(path_a, frame_a)
+        right = read_video_frame(path_b, frame_b)
+        x1, y1, x2, y2 = bbox
+        return float(
+            np.mean(
+                np.abs(
+                    left[y1:y2, x1:x2].astype(np.int16)
+                    - right[y1:y2, x1:x2].astype(np.int16)
+                )
+            )
+        )
 
     assert {
         int(record.source_record["source_frame"]): tuple(record.bbox_xyxy)
@@ -9023,12 +9629,169 @@ def test_interpolated_manual_correction_maps_compiles_and_renders_exact_geometry
     assert {
         int(record.source_record["source_frame"]): record.source_frame
         for record in correction_rows
-    } == {1: 1, 2: 2, 3: 3}
-    assert len(correction_rows) == 3
+    } == {frame: frame for frame in expected_boxes}
+    assert len(correction_rows) == len(expected_boxes)
+    if source_frame_start > 0:
+        assert frame_diff(
+            latest_path,
+            source_frame_start - 1,
+            package / manifest.source_path,
+            source_frame_start - 1,
+            expected_boxes[source_frame_start],
+        ) < 5.0
+    for frame, bbox in expected_boxes.items():
+        assert frame_diff(latest_path, frame, package / manifest.source_path, frame, bbox) > 0.75
+        assert frame_diff(
+            latest_path,
+            frame,
+            package / preview["corrected_preview"],
+            frame - source_frame_start,
+            bbox,
+        ) < 8.0
     assert verification["passed"] is True
-    assert verification["sampled_source_frames"] == [1, 2, 3]
-    assert inside_diff > control_diff + 0.75
-    assert control_diff < 3.0
+    assert verification["sampled_source_frames"] == sorted(
+        {source_frame_start, (source_frame_start + source_frame_end) // 2, source_frame_end}
+    )
+
+
+@pytest.mark.parametrize(
+    (
+        "mode_name",
+        "interpolation_method",
+        "source_frame_start",
+        "source_frame_end",
+        "keyframes",
+    ),
+    [
+        (
+            "linear",
+            review_corrections.INTERPOLATION_LINEAR,
+            1,
+            3,
+            (
+                review_corrections.CorrectionKeyframe(1, (20, 20, 54, 34)),
+                review_corrections.CorrectionKeyframe(3, (26, 22, 60, 36)),
+            ),
+        ),
+        (
+            "fixed",
+            review_corrections.INTERPOLATION_NONE,
+            1,
+            3,
+            (review_corrections.CorrectionKeyframe(1, (20, 20, 54, 34)),),
+        ),
+        (
+            "single",
+            review_corrections.INTERPOLATION_NONE,
+            2,
+            2,
+            (review_corrections.CorrectionKeyframe(2, (23, 21, 57, 35)),),
+        ),
+    ],
+)
+def test_manual_correction_retraction_excludes_active_regions_and_preserves_history(
+    tmp_path: Path,
+    mode_name: str,
+    interpolation_method: str,
+    source_frame_start: int,
+    source_frame_end: int,
+    keyframes: tuple[review_corrections.CorrectionKeyframe, ...],
+) -> None:
+    package = tmp_path / "package"
+    manifest = add_automatic_role(package, synthetic_case_manifest(package))
+    write_empty_regions(package, manifest.case_id)
+    write_review_entity_shell(package, manifest.case_id)
+    write_json(package / "reviewer_tasks.json", {"tasks": []})
+    write_supported_canonical_workspace_manifest(
+        package,
+        manifest,
+        categories=(CATEGORY_PLATE,),
+    )
+    session_dir = create_session(package, manifest)
+    correction = review_corrections.ReviewCorrection(
+        case_id=manifest.case_id,
+        category=CATEGORY_PLATE,
+        correction_id=f"corr_remove_{mode_name}",
+        configuration_freeze_hash=stable_hash({"schema_version": "freeze.test"}),
+        interpolation_method=interpolation_method,
+        keyframes=keyframes,
+        operation=review_corrections.OP_ADD,
+        reason="remove test",
+        reviewer_identity={"reviewer_id": "analyst"},
+        source_frame_end=source_frame_end,
+        source_frame_start=source_frame_start,
+        source_video_hash=manifest.source_video_hash or "",
+        task_id=f"task_remove_{mode_name}",
+    )
+    save_event = review_sessions.append_correction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+    )
+    verification_task = review_working_state.create_correction_verification_task(
+        correction,
+        accepted_working_state_revision="pending",
+        materialization_plan={
+            "after_effective_regions_hash": "pending_hash",
+            "materialization_required": True,
+        },
+        publication_status="pending_explicit_build",
+    )
+    review_sessions.append_event(
+        session_dir,
+        event_type="manual_issue_created",
+        actor={"reviewer_id": "analyst"},
+        case_id=manifest.case_id,
+        task_id=verification_task["review_task_id"],
+        before_state=None,
+        after_state={"task": verification_task},
+        note="Correction verification task created.",
+        application_hashes={},
+    )
+    compiled_before, _ = reviewed_regions.compile_reviewed_regions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+
+    retract_event = review_sessions.append_correction_retraction_event(
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        correction=correction,
+        before_state={"active": True},
+        reason="remove correction",
+    )
+    state_after = review_working_state.derive_working_state(package, session_dir)
+    compiled_after, _ = reviewed_regions.compile_reviewed_regions(
+        package,
+        session_dir,
+        case_id=manifest.case_id,
+    )
+    correction_rows_before = [
+        record for record in compiled_before if record.object_id == correction.correction_id
+    ]
+    correction_rows_after = [
+        record for record in compiled_after if record.object_id == correction.correction_id
+    ]
+    correction_history = review_corrections.load_corrections_jsonl(
+        session_dir / "corrections.jsonl"
+    )
+
+    assert [record.source_frame for record in correction_rows_before] == list(
+        range(source_frame_start, source_frame_end + 1)
+    )
+    assert correction_rows_after == []
+    assert correction.correction_id not in state_after["active_correction_ids"]
+    assert state_after["manual_corrections"] == []
+    assert not [
+        task
+        for task in state_after["active_manual_tasks"]
+        if task["review_task_id"] == verification_task["review_task_id"]
+    ]
+    assert [item.correction_id for item in correction_history] == [correction.correction_id]
+    assert save_event["event_type"] == "manual_correction_saved"
+    assert retract_event["event_type"] == "manual_correction_retracted"
+    assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
 
 
 def test_materialization_job_manager_coalesces_queued_case_jobs(tmp_path: Path) -> None:
@@ -9136,9 +9899,10 @@ def test_editing_during_explicit_build_does_not_spawn_jobs_and_stale_build_canno
         accepted_revision: str | None = None,
         actor: dict[str, object] | None = None,
         event_reason: str | None = None,
+        publication_currentness_assertion: Any | None = None,
     ) -> dict[str, object]:
         nonlocal call_count
-        del actor, event_reason
+        del actor, event_reason, publication_currentness_assertion
         call_count += 1
         if call_count == 1:
             first_started.set()
@@ -9287,8 +10051,17 @@ def test_current_stale_publication_guard_failure_stays_failed(
         accepted_revision: str | None = None,
         actor: dict[str, object] | None = None,
         event_reason: str | None = None,
+        publication_currentness_assertion: Any | None = None,
     ) -> dict[str, object]:
-        del package_root, target_session_dir, case_id, accepted_revision, actor, event_reason
+        del (
+            package_root,
+            target_session_dir,
+            case_id,
+            accepted_revision,
+            actor,
+            event_reason,
+            publication_currentness_assertion,
+        )
         raise reviewed_regions.ReviewedRegionPublicationStaleError(
             "Latest reviewed publication guard is stale: "
             "reviewed_region_set_sha256 current != expected"

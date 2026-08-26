@@ -23,8 +23,12 @@ export function frameToSeconds(manifest: Case, caseFrame: number): number {
   return clamp(caseFrame, 0, Math.max(0, manifest.frame_count - 1)) / fpsValue(manifest.fps);
 }
 
+export function frameToSeekSeconds(manifest: Case, caseFrame: number): number {
+  return (clamp(caseFrame, 0, Math.max(0, manifest.frame_count - 1)) + 0.5) / fpsValue(manifest.fps);
+}
+
 export function secondsToFrame(manifest: Case, seconds: number): number {
-  return clamp(Math.round(seconds * fpsValue(manifest.fps)), 0, Math.max(0, manifest.frame_count - 1));
+  return clamp(Math.floor(seconds * fpsValue(manifest.fps) + 1e-6), 0, Math.max(0, manifest.frame_count - 1));
 }
 
 export function formatTime(seconds: number): string {

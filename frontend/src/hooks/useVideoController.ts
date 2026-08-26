@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { RefObject } from 'react';
 import type { Case, MediaVersion } from '../types/api';
-import { caseToSourceFrame, clamp, formatTime, frameToSeconds, secondsToFrame } from '../utils/frame';
+import { caseToSourceFrame, clamp, formatTime, frameToSeconds, frameToSeekSeconds, secondsToFrame } from '../utils/frame';
 
 export interface VideoController {
   videoRef: RefObject<HTMLVideoElement>;
@@ -57,7 +57,7 @@ export function useVideoController(
       setCaseFrame(nextFrame);
       const video = videoRef.current;
       if (video && Number.isFinite(video.duration || 0)) {
-        video.currentTime = frameToSeconds(manifest, caseToVersionLocalFrame(nextFrame));
+        video.currentTime = frameToSeekSeconds(manifest, caseToVersionLocalFrame(nextFrame));
       }
     },
     [caseToVersionLocalFrame, manifest, maxFrame, setCaseFrame],
@@ -124,7 +124,7 @@ export function useVideoController(
       const nextFrame = versionLocalToCaseFrame(localFrame);
       caseFrameRef.current = nextFrame;
       setCaseFrame(nextFrame);
-      video.currentTime = frameToSeconds(manifest, localFrame);
+      video.currentTime = frameToSeekSeconds(manifest, localFrame);
     };
     const onPlay = () => setPlaying(true);
     const onPause = () => setPlaying(false);
@@ -155,7 +155,7 @@ export function useVideoController(
     if (!video) return;
     if (lastVersionPath.current !== version?.path) {
       lastVersionPath.current = version?.path;
-      video.currentTime = frameToSeconds(manifest, caseToVersionLocalFrame(caseFrame));
+      video.currentTime = frameToSeekSeconds(manifest, caseToVersionLocalFrame(caseFrame));
     }
   }, [caseFrame, caseToVersionLocalFrame, manifest, version?.path]);
 

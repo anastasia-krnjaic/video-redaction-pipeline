@@ -7,6 +7,7 @@ import shutil
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from redactor.review_sessions import (
     GREEN_ACTIONS,
     append_event,
     invalid_task_decision_reason,
+    session_write_lock,
 )
 
 COMPILER_SCHEMA_VERSION = "reviewed_region_compiler.v1"
@@ -42,6 +44,9 @@ REVISION_SCHEMA_VERSION = "latest_reviewed_revision.v1"
 PUBLICATION_SCHEMA_VERSION = "latest_reviewed_publication.v1"
 CURRENT_POINTER_SCHEMA_VERSION = "latest_reviewed_current_pointer.v1"
 CURRENT_POINTER_INDEX_SCHEMA_VERSION = "latest_reviewed_current_pointer_index.v1"
+LATEST_REVIEWED_MATERIALIZATION_IMPLEMENTATION_ID = (
+    "latest_reviewed_materialization.v2.frame_centered_seek_cache_identity.v1"
+)
 SUPPORTED_PUBLICATION_STATUSES = {"supported", "ready"}
 WORKSPACE_PUBLICATION_IDENTITY_KEYS = {
     "publication_mode",
@@ -367,7 +372,7 @@ def _reviewed_region_digest_cache_key(
         str(session_dir),
         case_id,
         bool(require_blockers_resolved),
-        stable_hash(dict(renderer_settings.__dict__)),
+        stable_hash(render_configuration_payload(renderer_settings)),
         working_state.get("current_event_chain_head"),
         working_state.get("active_projection_hash"),
         working_state.get("state_hash"),
@@ -421,6 +426,7 @@ def materialize_latest_reviewed_revision(
     accepted_revision: str | None = None,
     actor: dict[str, Any] | None = None,
     event_reason: str | None = None,
+    publication_currentness_assertion: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     from redactor import review_finalization, review_working_state
 
@@ -677,6 +683,7 @@ def materialize_latest_reviewed_revision(
         paths=published_paths,
         publication_guard=publication_guard,
         accepted_revision=accepted_revision,
+        publication_currentness_assertion=publication_currentness_assertion,
     )
     publication_duration_ms = int((time.monotonic() - publication_start) * 1000)
     state = review_working_state.derive_working_state(package_root, session_dir)
@@ -770,6 +777,7 @@ def publish_automatic_reuse_latest_reviewed_revision(
     accepted_revision: str | None = None,
     actor: dict[str, Any] | None = None,
     event_reason: str | None = None,
+    publication_currentness_assertion: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     from redactor import review_finalization, review_working_state
 
@@ -1032,6 +1040,7 @@ def publish_automatic_reuse_latest_reviewed_revision(
         paths=published_paths,
         publication_guard=publication_guard,
         accepted_revision=accepted_revision,
+        publication_currentness_assertion=publication_currentness_assertion,
     )
     publication_duration_ms = int((time.monotonic() - publication_start) * 1000)
     state = review_working_state.derive_working_state(package_root, session_dir)
@@ -2508,11 +2517,13 @@ def source_timestamp_seconds(
 def render_configuration_payload(settings: Any) -> dict[str, Any]:
     return {
         "blur_kernel": settings.normalized_blur_kernel,
+        "implementation_id": LATEST_REVIEWED_MATERIALIZATION_IMPLEMENTATION_ID,
         "margin_fraction": settings.margin_fraction,
         "margin_pixels": settings.margin_pixels,
         "method": settings.method,
         "mode": settings.mode,
         "pixel_size": settings.pixel_size,
+        "renderer_schema_version": privacy_rendering.SCHEMA_VERSION,
     }
 
 
@@ -2526,18 +2537,28 @@ def publish_current_revision(
     paths: dict[str, Path],
     publication_guard: dict[str, Any],
     accepted_revision: str | None,
+    publication_currentness_assertion: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    maybe_inject_failure("before_current_pointer_update")
-    pointer_update = write_current_pointer(
-        package_root=package_root,
-        session_dir=session_dir,
-        case_id=case_id,
-        role=role,
-        revision_manifest=revision_manifest,
-        paths=paths,
-        publication_guard=publication_guard,
-        accepted_revision=accepted_revision,
-    )
+    with session_write_lock():
+        maybe_inject_failure("before_current_pointer_update")
+        assert_publication_guard_current(
+            package_root=package_root,
+            session_dir=session_dir,
+            case_id=case_id,
+            expected_guard=publication_guard,
+        )
+        if publication_currentness_assertion is not None:
+            publication_currentness_assertion()
+        pointer_update = write_current_pointer(
+            package_root=package_root,
+            session_dir=session_dir,
+            case_id=case_id,
+            role=role,
+            revision_manifest=revision_manifest,
+            paths=paths,
+            publication_guard=publication_guard,
+            accepted_revision=accepted_revision,
+        )
     return {
         "current_pointer": pointer_update,
         "schema_version": "latest_reviewed_publication_updates.v2",
@@ -2716,6 +2737,7 @@ def current_latest_reviewed_role(
     if expected_revision and expected_revision not in current_revision_candidates:
         if session_dir is None:
             return {}
+    if session_dir is not None:
         try:
             media_current = latest_pointer_media_matches_current(
                 package_root=package_root,

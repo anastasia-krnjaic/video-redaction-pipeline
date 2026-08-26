@@ -53,6 +53,9 @@ function humanEvent(event: AuditEvent): string {
   if (event.event_type === 'manual_correction_saved' || event.event_type === 'correction_saved') {
     return `Manual ${categoryText(String(after.category || ''))} correction saved, frames ${String(after.source_frame_start ?? '?')}-${String(after.source_frame_end ?? '?')}`;
   }
+  if (event.event_type === 'manual_correction_retracted') {
+    return `Manual ${categoryText(String(after.category || ''))} correction removed, frames ${String(after.source_frame_start ?? '?')}-${String(after.source_frame_end ?? '?')}`;
+  }
   if (event.event_type === 'checkpoint_created') return `Checkpoint "${String(after.name || 'Checkpoint')}" created`;
   if (event.event_type === 'restore_checkpoint') return `Restored checkpoint "${String(after.name || 'Checkpoint')}"`;
   if (event.event_type === 'checkpoint_deleted') return `Checkpoint "${String(after.name || 'Checkpoint')}" deleted`;

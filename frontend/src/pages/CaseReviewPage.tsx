@@ -8,6 +8,7 @@ import {
   loadWorkingState,
   mergeEntities,
   previewCorrection,
+  removeCorrection as removeCorrectionRequest,
   resetToAutomaticBaseline,
   requestLatestReviewedBuild,
   retryMaterializationJob,
@@ -23,7 +24,6 @@ import {
   CorrectionVideoOverlay,
   PendingCorrectionOverlay,
   resetSingleFrameDraftForSourceFrame,
-  type PendingCorrectionRegion,
 } from '../components/CorrectionEditor';
 import { EntityFocusOverlay, type EntityFocusTarget } from '../components/EntityFocusOverlay';
 import { EntityMergeDialog } from '../components/EntityMergeDialog';
@@ -50,6 +50,12 @@ import {
   materializationJobMatchesCurrentProjection,
   type LatestReviewedLifecycleState,
 } from '../state/materialization';
+import {
+  draftHasRenderableGeometry,
+  pendingRegionsForSourceFrame,
+  roleAfterCorrectionSave,
+  validRoleOrAutomatic,
+} from '../state/correctionLifecycle';
 import { decisionFromEvent, workingStateIsOlderThanKnownEvents } from '../state/reviewSync';
 import type {
   Attribution,
@@ -160,6 +166,7 @@ export function CaseReviewPage({
   const [resetEditsConfirmOpen, setResetEditsConfirmOpen] = useState(false);
   const [materializationJobs, setMaterializationJobs] = useState<Record<string, TrackedMaterializationJob>>({});
   const [materializationError, setMaterializationError] = useState<string>();
+  const [removingCorrectionId, setRemovingCorrectionId] = useState<string | null>(null);
   const [focusTarget, setFocusTarget] = useState<EntityFocusTarget | null>(null);
   const decisionsRef = useRef(decisions);
   const eventsRef = useRef(events);
@@ -245,8 +252,12 @@ export function CaseReviewPage({
   const correctionAttentionCount = needsCorrectionBlockerCount(tasks);
   const reviewReady = correctionAttentionCount === 0;
   const allGuidanceAddressed = reviewReady && counts.Open === 0;
+  const latestReviewedBackendStale = finalizationStatus
+    ? finalizationBlockerGroups(finalizationStatus).some((group) => group.key === 'latest_reviewed')
+    : undefined;
   const latestReviewedLifecycle = latestReviewedLifecycleState({
     activeJobs: caseMaterializationJobs,
+    caseLatestReviewedStale: latestReviewedBackendStale,
     caseId,
     latestRole: materializedLatestRole,
     materializationError,
@@ -254,9 +265,19 @@ export function CaseReviewPage({
     sessionId: session?.session_id,
     workingState,
   });
-  const savedCorrectionOverlayActive = mode === 'edit' && savedCorrectionsForCase.length > 0 && latestReviewedLifecycle !== 'CURRENT_REUSABLE';
+  const localDraftOverlayActive = mode === 'edit' && (
+    draftHasRenderableGeometry(draft) ||
+    previewReady ||
+    Boolean(previewToken) ||
+    Boolean(previewRole)
+  );
+  const savedCorrectionOverlayActive = mode === 'edit'
+    && !localDraftOverlayActive
+    && (latestReviewedLifecycle === 'BUILD_REQUIRED' || latestReviewedLifecycle === 'BUILD_RUNNING');
   const pendingCorrectionRegions = useMemo(
-    () => pendingRegionsForSourceFrame(corrections, manualTasks, caseId, currentSourceFrame, savedCorrectionOverlayActive),
+    () => savedCorrectionOverlayActive
+      ? pendingRegionsForSourceFrame(corrections, manualTasks, caseId, currentSourceFrame)
+      : [],
     [caseId, corrections, currentSourceFrame, manualTasks, savedCorrectionOverlayActive],
   );
   const latestReviewedStatus = latestReviewedStatusText({
@@ -325,6 +346,24 @@ export function CaseReviewPage({
   useEffect(() => {
     seekToFrameRef.current = controller.seekToFrame;
   }, [controller.seekToFrame]);
+
+  useEffect(() => {
+    setPreviewReady(false);
+    setPreviewInvalidated(false);
+    setPreviewToken(undefined);
+    setPreviewRole(undefined);
+    setCorrectionSaveStatus(undefined);
+    setMaterializationError(undefined);
+    setRemovingCorrectionId(null);
+    setDraft(initialDraft(caseId, manifest, caseFrameValueRef.current, null));
+    editDraftContextRef.current = null;
+  }, [caseId, manifest, session?.session_id, uiScope]);
+
+  useEffect(() => {
+    if (latestReviewedLifecycle === 'CURRENT_REUSABLE' && correctionSaveStatus?.includes('pending')) {
+      setCorrectionSaveStatus(undefined);
+    }
+  }, [correctionSaveStatus, latestReviewedLifecycle]);
 
   useEffect(() => {
     controllerPlayingRef.current = controller.playing;
@@ -949,6 +988,8 @@ export function CaseReviewPage({
       onError('Start review before saving corrections.');
       return;
     }
+    const preservedFrame = caseFrameValueRef.current;
+    const roleBeforeSave = selectedRoleValueRef.current;
     const {
       event,
       events: responseEvents,
@@ -980,23 +1021,61 @@ export function CaseReviewPage({
     setPreviewInvalidated(false);
     setPreviewToken(undefined);
     setPreviewRole(undefined);
-    setCorrectionSaveStatus(
-      materialization_required
-        ? 'Correction saved — reviewed video build pending'
-        : publication_status === 'deferred'
-          ? 'Correction saved — review still incomplete'
-          : 'Correction saved',
-    );
-    setDraft(initialDraft(caseId, manifest, caseFrameValueRef.current, null));
-    if (selectedRoleValueRef.current === 'correction_preview' || selectedRoleValueRef.current === 'latest_reviewed') {
-      setSelectedRole(preferredManualBaseRole(roles));
-    }
+    const savedStatus = publication_status === 'deferred'
+      ? 'Correction saved — review still incomplete'
+      : 'Correction saved';
+    setCorrectionSaveStatus(savedStatus);
+    window.setTimeout(() => setCorrectionSaveStatus((current) => (
+      current === savedStatus ? undefined : current
+    )), 3000);
+    setDraft(initialDraft(caseId, manifest, preservedFrame, null));
+    setSelectedRole(roleAfterCorrectionSave(roleBeforeSave, roles, Boolean(materialization_required)));
+    window.setTimeout(() => seekToFrameRef.current(preservedFrame), 0);
     if (materialization_job) {
       trackMaterializationJob(
         materialization_job,
         correction.entity_id ? [correction.entity_id] : [],
         'Reviewed video ready',
       );
+    }
+  };
+
+  const removeSavedCorrection = async (correction: Record<string, unknown>) => {
+    if (!session) {
+      onError('Start review before removing corrections.');
+      return;
+    }
+    const correctionId = String(correction.correction_id || '');
+    if (!correctionId) {
+      onError('Saved correction is missing an ID.');
+      return;
+    }
+    const preservedFrame = caseFrameValueRef.current;
+    const preservedRole = selectedRoleValueRef.current;
+    setRemovingCorrectionId(correctionId);
+    setCorrectionSaveStatus(undefined);
+    setPreviewReady(false);
+    setPreviewInvalidated(false);
+    setPreviewToken(undefined);
+    setPreviewRole(undefined);
+    onError(undefined);
+    try {
+      const result = await removeCorrectionRequest({
+        session_id: session.session_id,
+        actor: attribution || { display_name: null },
+        case_id: caseId,
+        correction_id: correctionId,
+        reason: 'Saved correction removed by reviewer.',
+      });
+      appendEvents(result.events || [result.event].filter((event): event is AuditEvent => Boolean(event)));
+      if (result.working_state) applyWorkingStateProjection(result.working_state);
+      setSelectedRole(validRoleOrAutomatic(preservedRole, roles));
+      window.setTimeout(() => seekToFrameRef.current(preservedFrame), 0);
+      trackMaterializationJob(result.materialization_job, []);
+    } catch (err) {
+      onError(`Saved correction was not removed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setRemovingCorrectionId(null);
     }
   };
 
@@ -1149,6 +1228,7 @@ export function CaseReviewPage({
 
   const requestReviewedVideoBuild = async () => {
     if (!session?.session_id) return;
+    const preservedFrame = caseFrameValueRef.current;
     setMaterializationError(undefined);
     setCorrectionSaveStatus('Building reviewed video...');
     try {
@@ -1162,6 +1242,10 @@ export function CaseReviewPage({
       trackMaterializationJob(result.materialization_job || result.job, [], 'Reviewed video ready');
       if (!(result.materialization_job || result.job)) {
         setCorrectionSaveStatus(result.latest_reviewed ? 'Reviewed video ready' : undefined);
+        if (result.latest_reviewed) {
+          setSelectedRole('latest_reviewed');
+          window.setTimeout(() => seekToFrameRef.current(preservedFrame), 0);
+        }
         window.setTimeout(() => setCorrectionSaveStatus((current) => (
           current === 'Reviewed video ready' ? undefined : current
         )), 3000);
@@ -1271,7 +1355,7 @@ export function CaseReviewPage({
         <div className="button-row">
           <button
             type="button"
-            disabled={!session?.session_id || latestReviewedLifecycle !== 'BUILD_REQUIRED' || Boolean(activeMaterializationJobKey)}
+            disabled={!session?.session_id || latestReviewedLifecycle !== 'BUILD_REQUIRED' || Boolean(activeMaterializationJobs.length)}
             onClick={() => void requestReviewedVideoBuild()}
           >
             {activeMaterializationJobs.length ? (
@@ -1329,7 +1413,7 @@ export function CaseReviewPage({
               <PendingCorrectionOverlay
                 manifest={manifest}
                 regions={pendingCorrectionRegions}
-                statusLabel={activeMaterializationJobs.length ? 'Correction saved — building reviewed video' : 'Correction saved — pending reviewed-video build'}
+                statusLabel={latestReviewedLifecycle === 'BUILD_RUNNING' ? 'Correction saved — building reviewed video' : 'Correction saved — pending reviewed-video build'}
               />
             ) : null}
           </ReviewVideoPlayer>
@@ -1375,7 +1459,9 @@ export function CaseReviewPage({
               onGoToSourceFrame={controller.seekToSourceFrame}
               onInspectCorrection={controller.seekToSourceFrame}
               onPreview={previewDraftCorrection}
+              onRemoveCorrection={removeSavedCorrection}
               onSave={saveCorrection}
+              removingCorrectionId={removingCorrectionId}
             />
           </aside>
         )}
@@ -1603,12 +1689,6 @@ function formatMaterializationStatus(job: MaterializationJob): string {
   return `Updating reviewed video: ${rawStage}${changedFrames}`;
 }
 
-function preferredManualBaseRole(roles: MediaVersion[]): string {
-  if (roles.some((role) => role.role === 'original')) return 'original';
-  if (roles.some((role) => role.role === 'automatic')) return 'automatic';
-  return defaultRole(roles);
-}
-
 function pendingMediaChangesForCase(workingState: WorkingState | undefined, caseId: CaseId): number {
   const currentRevision = String(workingState?.active_projection_hash || '');
   const latest = (workingState?.materialized_latest_reviewed || {})[caseId] as Record<string, unknown> | undefined;
@@ -1623,83 +1703,6 @@ function pendingMediaChangesForCase(workingState: WorkingState | undefined, case
     .filter((entity) => String((entity as Record<string, unknown>).case_id || '') === caseId)
     .length;
   return corrections + entityActions;
-}
-
-function pendingRegionsForSourceFrame(
-  corrections: Record<string, unknown>[],
-  manualTasks: Task[],
-  caseId: CaseId,
-  sourceFrame: number,
-  includeAllSavedCorrections = false,
-): PendingCorrectionRegion[] {
-  const pendingIds = new Set(
-    manualTasks
-      .filter((task) => task.case_id === caseId)
-      .filter((task) => task.normal_task_class === 'correction_verification')
-      .filter((task) => task.actionable === false && task.publication_status !== 'published')
-      .map((task) => String(task.correction_id || correctionIdFromTask(task)))
-      .filter(Boolean),
-  );
-  if (!pendingIds.size && !includeAllSavedCorrections) return [];
-  return corrections
-    .filter((correction) => String(correction.case_id || '') === caseId)
-    .filter((correction) => includeAllSavedCorrections || pendingIds.has(String(correction.correction_id || '')))
-    .filter((correction) => correction.operation === 'add_privacy_region' || correction.operation === 'replace_privacy_region')
-    .map((correction) => {
-      const bbox = correctionBoxAtSourceFrame(correction, sourceFrame);
-      if (!bbox) return null;
-      return {
-        bbox_xyxy: bbox,
-        correction_id: String(correction.correction_id || ''),
-        source_frame: sourceFrame,
-      };
-    })
-    .filter((region): region is PendingCorrectionRegion => Boolean(region));
-}
-
-function correctionIdFromTask(task: Task): string {
-  const casePrefix = `correction_verify_${task.case_id}_`;
-  if (task.review_task_id.startsWith(casePrefix)) return task.review_task_id.slice(casePrefix.length);
-  return '';
-}
-
-function correctionBoxAtSourceFrame(
-  correction: Record<string, unknown>,
-  sourceFrame: number,
-): [number, number, number, number] | null {
-  const start = Number(correction.source_frame_start);
-  const end = Number(correction.source_frame_end);
-  if (!Number.isFinite(start) || !Number.isFinite(end) || sourceFrame < start || sourceFrame > end) {
-    return null;
-  }
-  const keyframes = (Array.isArray(correction.keyframe_boxes) ? correction.keyframe_boxes : [])
-    .map((item) => item as { source_frame?: unknown; bbox_xyxy?: unknown })
-    .map((item) => ({
-      source_frame: Number(item.source_frame),
-      bbox_xyxy: Array.isArray(item.bbox_xyxy) ? item.bbox_xyxy.map(Number) : [],
-    }))
-    .filter((item) => Number.isFinite(item.source_frame) && item.bbox_xyxy.length === 4)
-    .sort((left, right) => left.source_frame - right.source_frame);
-  if (!keyframes.length) return null;
-  if (correction.interpolation_method === 'none') {
-    if (keyframes.length === 1) return tupleBox(keyframes[0].bbox_xyxy);
-    const match = keyframes.find((keyframe) => keyframe.source_frame === sourceFrame);
-    return match ? tupleBox(match.bbox_xyxy) : null;
-  }
-  if (keyframes.length === 1) return tupleBox(keyframes[0].bbox_xyxy);
-  for (let index = 0; index < keyframes.length - 1; index += 1) {
-    const left = keyframes[index];
-    const right = keyframes[index + 1];
-    if (sourceFrame < left.source_frame || sourceFrame > right.source_frame) continue;
-    const span = Math.max(1, right.source_frame - left.source_frame);
-    const t = (sourceFrame - left.source_frame) / span;
-    return tupleBox(left.bbox_xyxy.map((value, axis) => Math.round((1 - t) * value + t * right.bbox_xyxy[axis])));
-  }
-  return null;
-}
-
-function tupleBox(values: number[]): [number, number, number, number] {
-  return [values[0], values[1], values[2], values[3]];
 }
 
 function initialDraft(caseId: CaseId, manifest: WorkspaceSummary['cases'][string], caseFrame: number, task?: Task | null): CorrectionDraft {

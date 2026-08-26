@@ -23,7 +23,9 @@ interface Props {
   onGoToSourceFrame: (sourceFrame: number) => void;
   onInspectCorrection?: (sourceFrame: number) => void;
   onPreview: (correction: Correction) => Promise<void>;
+  onRemoveCorrection?: (correction: Record<string, unknown>) => Promise<void>;
   onSave: (correction: Correction, reason: string) => Promise<void>;
+  removingCorrectionId?: string | null;
 }
 
 export function CorrectionEditor({
@@ -39,9 +41,11 @@ export function CorrectionEditor({
   onInspectCorrection,
   onGoToSourceFrame,
   onPreview,
+  onRemoveCorrection,
   onSave,
   previewInvalidated,
   previewReady,
+  removingCorrectionId,
   savedCorrections = [],
   selectedTask,
   sourceVideoHash,
@@ -323,6 +327,8 @@ export function CorrectionEditor({
         latestReviewedCurrent={latestReviewedCurrent}
         savedCorrections={savedCorrections}
         onInspectCorrection={onInspectCorrection || onGoToSourceFrame}
+        onRemoveCorrection={onRemoveCorrection}
+        removingCorrectionId={removingCorrectionId}
       />
       <p className="muted">Correction geometry is stored in source-frame and source-video coordinates.</p>
     </section>
@@ -629,13 +635,18 @@ function SavedCorrectionsSummary({
   buildRunning,
   latestReviewedCurrent,
   onInspectCorrection,
+  onRemoveCorrection,
+  removingCorrectionId,
   savedCorrections,
 }: {
   buildRunning: boolean;
   latestReviewedCurrent: boolean;
   onInspectCorrection: (sourceFrame: number) => void;
+  onRemoveCorrection?: (correction: Record<string, unknown>) => Promise<void>;
+  removingCorrectionId?: string | null;
   savedCorrections: Record<string, unknown>[];
 }) {
+  const [confirmingId, setConfirmingId] = useState<string | null>(null);
   if (!savedCorrections.length) return null;
   const status = latestReviewedCurrent ? 'current' : buildRunning ? 'building' : 'pending build';
   return (
@@ -647,16 +658,46 @@ function SavedCorrectionsSummary({
           const start = Number(correction.source_frame_start ?? correction.source_frame ?? 0);
           const end = Number(correction.source_frame_end ?? start);
           const id = String(correction.correction_id || `correction_${index + 1}`);
+          const category = String(correction.category || 'manual');
+          const removing = removingCorrectionId === id;
+          const confirming = confirmingId === id;
           return (
-            <button
-              type="button"
+            <div
               className="saved-correction-row"
               key={id}
-              onClick={() => onInspectCorrection(start)}
             >
-              <span>{String(correction.category || 'manual')} · {start === end ? `frame ${start}` : `frames ${start}-${end}`}</span>
-              <span>{id.slice(0, 12)}</span>
-            </button>
+              <button type="button" className="saved-correction-inspect" onClick={() => onInspectCorrection(start)}>
+                <span>{category} · {start === end ? `frame ${start}` : `frames ${start}-${end}`}</span>
+                <span>{id.slice(0, 12)}</span>
+              </button>
+              {onRemoveCorrection ? (
+                confirming ? (
+                  <span className="remove-confirmation">
+                    <span>Remove {category} {start === end ? `frame ${start}` : `frames ${start}-${end}`} · {id}</span>
+                    <button
+                      type="button"
+                      className="danger"
+                      disabled={removing}
+                      onClick={() => void onRemoveCorrection(correction).finally(() => setConfirmingId(null))}
+                    >
+                      {removing ? 'Removing...' : 'Confirm remove'}
+                    </button>
+                    <button type="button" disabled={removing} onClick={() => setConfirmingId(null)}>
+                      Cancel
+                    </button>
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="danger"
+                    disabled={Boolean(removingCorrectionId)}
+                    onClick={() => setConfirmingId(id)}
+                  >
+                    Remove
+                  </button>
+                )
+              ) : null}
+            </div>
           );
         })}
       </div>

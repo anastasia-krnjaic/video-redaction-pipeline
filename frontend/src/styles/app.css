@@ -766,16 +766,31 @@ main {
   font-size: 12px;
 }
 
-.saved-correction-row span:first-child {
+.saved-correction-inspect {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  flex: 1;
+  gap: 8px;
+}
+
+.saved-correction-inspect span:first-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.saved-correction-row span:last-child {
+.saved-correction-inspect span:last-child {
   color: var(--muted);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.remove-confirmation {
+  display: grid;
+  gap: 6px;
+  width: 100%;
 }
 
 .operation-status {

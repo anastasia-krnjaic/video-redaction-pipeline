@@ -5590,6 +5590,11 @@ class MaterializationJobManager:
                     accepted_revision=accepted_revision,
                     actor=None,
                     event_reason=str(job.get("reason") or "Latest reviewed media updated."),
+                    publication_currentness_assertion=lambda: self._assert_job_current_for_publication(
+                        key,
+                        job_id,
+                        job,
+                    ),
                 )
             else:
                 self._metric(case_id, "cache_hits", 1)
@@ -5900,6 +5905,36 @@ class MaterializationJobManager:
             ):
                 return True
         return False
+
+    def _assert_job_current_for_publication(
+        self,
+        key: tuple[str, str],
+        job_id: str,
+        job: dict[str, Any],
+    ) -> None:
+        with self.lock:
+            state = self.case_state.get(key) or {}
+            latest_requested = str(state.get("latest_requested") or "")
+            if self._closed:
+                raise reviewed_regions.ReviewedRegionPublicationStaleError(
+                    f"{job.get('case_id')}: Latest reviewed publication cancelled during shutdown"
+                )
+            if job.get("status") != "running":
+                raise reviewed_regions.ReviewedRegionPublicationStaleError(
+                    f"{job.get('case_id')}: Latest reviewed publication job is not running"
+                )
+            if state.get("running") != job_id:
+                raise reviewed_regions.ReviewedRegionPublicationStaleError(
+                    f"{job.get('case_id')}: Latest reviewed publication job is no longer active"
+                )
+            if latest_requested and latest_requested != job_id:
+                raise reviewed_regions.ReviewedRegionPublicationStaleError(
+                    f"{job.get('case_id')}: Latest reviewed publication was superseded by a newer job"
+                )
+            if self._publication_guard_stale_locked(key, job):
+                raise reviewed_regions.ReviewedRegionPublicationStaleError(
+                    f"{job.get('case_id')}: Latest reviewed publication generation is stale"
+                )
 
     def _apply_watchdog_locked(self) -> None:
         now = time.monotonic()
@@ -6973,6 +7008,120 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 }
             )
             return
+        if path == "/api/corrections/remove":
+            from redactor.review_corrections import load_corrections_jsonl
+
+            remove_case_id = require_workspace_case(
+                self.server.package_root,
+                str(payload.get("case_id") or ""),
+            )
+            correction_id = str(payload.get("correction_id") or "").strip()
+            if not correction_id:
+                self.send_json(
+                    {"error": "correction_id is required", "ok": False},
+                    status=HTTPStatus.BAD_REQUEST,
+                )
+                return
+            corrections_by_id = {
+                correction.correction_id: correction
+                for correction in review_working_state.latest_corrections(
+                    load_corrections_jsonl(session_dir / "corrections.jsonl")
+                )
+            }
+            correction = corrections_by_id.get(correction_id)
+            if correction is None:
+                self.send_json(
+                    {"error": "saved correction not found", "ok": False},
+                    status=HTTPStatus.NOT_FOUND,
+                )
+                return
+            if correction.case_id != remove_case_id:
+                self.send_json(
+                    {
+                        "error": "saved correction belongs to a different case",
+                        "ok": False,
+                    },
+                    status=HTTPStatus.CONFLICT,
+                )
+                return
+            before_state = review_working_state.derive_working_state(
+                self.server.package_root,
+                session_dir,
+            )
+            active_correction_ids = {
+                str(item) for item in list(before_state.get("active_correction_ids") or [])
+            }
+            if correction_id not in active_correction_ids:
+                self.send_json(
+                    {
+                        "already_inactive": True,
+                        "correction": correction.to_dict(),
+                        "correction_id": correction_id,
+                        "ok": True,
+                        "working_state": before_state,
+                    }
+                )
+                return
+            before_digest = review_working_state.effective_privacy_region_digest(
+                self.server.package_root,
+                session_dir,
+                case_id=remove_case_id,
+            )
+            event = review_sessions.append_correction_retraction_event(
+                session_dir,
+                actor=actor,
+                correction=correction,
+                before_state={
+                    "active": True,
+                    "active_projection_hash": before_state.get("active_projection_hash"),
+                    "correction": correction.to_dict(),
+                },
+                reason=str(payload.get("reason") or "Saved correction removed."),
+            )
+            state_after_removal = review_working_state.derive_working_state(
+                self.server.package_root,
+                session_dir,
+            )
+            materialization_plan = self.plan_materialization_for_case(
+                session_dir=session_dir,
+                case_id=remove_case_id,
+                actor=actor,
+                operation="manual_correction_retracted",
+                reason="Latest reviewed media updated after saved correction removal.",
+                accepted_revision=str(
+                    state_after_removal.get("active_projection_hash")
+                    or state_after_removal.get("state_hash")
+                    or ""
+                ),
+                before_digest=before_digest,
+                after_state=state_after_removal,
+                affected_entity_ids=[correction.entity_id] if correction.entity_id else [],
+                enqueue_job=False,
+            )
+            self.send_json(
+                {
+                    **materialization_acceptance_fields(
+                        materialization_plan=materialization_plan,
+                        accepted_revision=str(
+                            state_after_removal.get("active_projection_hash")
+                            or state_after_removal.get("state_hash")
+                            or ""
+                        ),
+                    ),
+                    "correction": correction.to_dict(),
+                    "correction_id": correction_id,
+                    "event": event,
+                    "events": [event],
+                    "materialization_job": materialization_plan["job"],
+                    "materialization_plan": materialization_plan["plan"],
+                    "materialization_required": materialization_plan["plan"][
+                        "materialization_required"
+                    ],
+                    "ok": True,
+                    "working_state": state_after_removal,
+                }
+            )
+            return
         if path == "/api/object-policy":
             result = self.apply_object_policy(payload, actor, session_dir)
             status = HTTPStatus.OK if result.get("ok", False) else HTTPStatus.CONFLICT
@@ -7501,6 +7650,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 or compatible_job is not None
             )
         )
+        state_changed = bool(after_hash and before_hash and after_hash != before_hash)
         if review_working_state.latest_reviewed_publication_deferred(self.server.package_root):
             plan = review_working_state.latest_reviewed_publication_deferred_plan(
                 case_id=case_id,
@@ -7561,6 +7711,14 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 },
             }
         if current_reusable:
+            if state_changed:
+                self.server.materialization_jobs.invalidate_cases(
+                    session_dir=session_dir,
+                    case_ids=[case_id],
+                    reason=(
+                        "Accepted review state changed while Latest reviewed was already reusable."
+                    ),
+                )
             return {
                 "job": None,
                 "plan": plan
@@ -9156,6 +9314,7 @@ function fpsValue(caseId) { const fps = String(caseData(caseId)?.fps || '30/1').
 function caseFrameCount(caseId) { return Number(caseData(caseId)?.frame_count || 1); }
 function sourceFrame(caseId, caseFrame = state.frame[caseId]) { return Number(caseData(caseId)?.source_frame_start || 0) + clamp(caseFrame, 0, caseFrameCount(caseId) - 1); }
 function frameTime(caseId, caseFrame = state.frame[caseId]) { return clamp(caseFrame, 0, caseFrameCount(caseId) - 1) / fpsValue(caseId); }
+function frameSeekTime(caseId, caseFrame = state.frame[caseId]) { return (clamp(caseFrame, 0, caseFrameCount(caseId) - 1) + 0.5) / fpsValue(caseId); }
 function timeText(seconds) { const total = Math.max(0, Math.floor(Number(seconds) || 0)); const h = Math.floor(total / 3600); const m = Math.floor((total % 3600) / 60); const s = total % 60; return [h,m,s].map(v => String(v).padStart(2, '0')).join(':'); }
 function hudText(caseId) { const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId) - 1); return `Source frame ${sourceFrame(caseId, frame)} · Case frame ${frame} · ${timeText(frameTime(caseId, frame))}`; }
 function currentActor() { return state.attribution || { display_name: null, application_version: APP_VERSION }; }
@@ -9272,11 +9431,11 @@ function bindTimeline(caseId) {
 }
 function markerClass(task) { const stateName = taskState(task); if (stateName === 'correct' || stateName === 'resolved') return 'resolved'; if (stateName === 'not_sensitive') return 'neutral'; if (stateName === 'needs_correction') return 'blocking'; if (String(task.issue_type || '').includes('false') || String(task.issue_type || '').includes('wrong')) return 'false'; if (task.blocking) return 'blocking'; if (task.severity === 'low' || task.optional) return 'info'; return 'partial'; }
 function markerTooltip(caseId, task) { const startCase = task.source_frame_start - caseData(caseId).source_frame_start; const endCase = task.source_frame_end - caseData(caseId).source_frame_start; const sourceRange = task.source_frame_end !== task.source_frame_start ? `${task.source_frame_start}-${task.source_frame_end}` : `${task.source_frame_start}`; const timeRange = endCase !== startCase ? `${timeText(frameTime(caseId,startCase))}-${timeText(frameTime(caseId,endCase))}` : timeText(frameTime(caseId,startCase)); const decision = taskEffectiveState(task)?.action ? actionLabel(taskEffectiveState(task).action) : 'Open'; return `${cleanTaskTitle(task)}\\n${task.category}\\nSource frame ${sourceRange}\\nCase time ${timeRange}\\n${task.blocking ? 'Blocking' : task.optional ? 'Optional' : 'Review'}\\nDecision: ${decision}`; }
-function updateFrameFromTime(caseId, time) { const next = clamp(Math.round(time * fpsValue(caseId)), 0, caseFrameCount(caseId) - 1); if (next !== state.frame[caseId]) { state.frame[caseId] = next; persistFrame(caseId); updatePlayerUi(caseId); } }
+function updateFrameFromTime(caseId, time) { const next = clamp(Math.floor(time * fpsValue(caseId) + 1e-6), 0, caseFrameCount(caseId) - 1); if (next !== state.frame[caseId]) { state.frame[caseId] = next; persistFrame(caseId); updatePlayerUi(caseId); } }
 function persistFrame(caseId) { localStorage.setItem(storageKey(`frame_${caseId}`), String(state.frame[caseId] || 0)); }
 async function switchVersion(caseId, key) { const video = activeVideo(caseId); const wasPlaying = video && !video.paused; const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId) - 1); if (video) video.pause(); state.frame[caseId] = frame; state.version[caseId] = key; localStorage.setItem(storageKey(`version_${caseId}`), key); persistFrame(caseId); const version = selectedVersion(caseId); if (video) setPlayerSource(video, version.path); const select = document.querySelector(`${caseSelector(caseId)} [data-action="version"]`); if (select) select.value = key; await syncPlayerToState(caseId); if (wasPlaying) await togglePlay(caseId, true); }
 async function syncPlayerToState(caseId) { const video = activeVideo(caseId); if (video) await seekToFrame(caseId, state.frame[caseId] || 0, { keepPaused: true }); }
-async function seekToFrame(caseId, frame, opts = {}) { const video = activeVideo(caseId); if (!video) return; const next = clamp(Math.round(frame), 0, caseFrameCount(caseId) - 1); const wasPlaying = !video.paused && !opts.keepPaused; video.pause(); state.frame[caseId] = next; persistFrame(caseId); await waitMetadata(video, 1600).catch(() => showMediaError(caseId, video.dataset.path, 'metadata')); await seekVideo(video, frameTime(caseId, next)); updatePlayerUi(caseId); if (wasPlaying) await togglePlay(caseId, true); }
+async function seekToFrame(caseId, frame, opts = {}) { const video = activeVideo(caseId); if (!video) return; const next = clamp(Math.round(frame), 0, caseFrameCount(caseId) - 1); const wasPlaying = !video.paused && !opts.keepPaused; video.pause(); state.frame[caseId] = next; persistFrame(caseId); await waitMetadata(video, 1600).catch(() => showMediaError(caseId, video.dataset.path, 'metadata')); await seekVideo(video, frameSeekTime(caseId, next)); updatePlayerUi(caseId); if (wasPlaying) await togglePlay(caseId, true); }
 function stepFrame(delta) { const caseId = visibleCaseId(); if (!isPrimaryCase(caseId)) return; seekToFrame(caseId, (state.frame[caseId] || 0) + delta); }
 async function togglePlay(caseId, forcePlay = false) { const video = activeVideo(caseId); if (!video) return; hideMediaError(caseId); try { await waitMetadata(video, 2000); if (!forcePlay && !video.paused) { video.pause(); return; } await video.play(); } catch (err) { showMediaError(caseId, video.dataset.path || selectedVersion(caseId).path, err.message || 'play failed'); } }
 function updatePlayerUi(caseId) { const panel = casePanel(caseId); if (!panel) return; const frame = clamp(state.frame[caseId] || 0, 0, caseFrameCount(caseId)-1); panel.querySelector('[data-role="hud"]').textContent = hudText(caseId); const range = panel.querySelector('[data-action="scrub"]'); if (range) range.value = String(frame); const time = panel.querySelector('[data-role="time"]'); if (time) time.textContent = `${timeText(frameTime(caseId, frame))} / ${timeText(caseData(caseId).duration_seconds || frameTime(caseId, caseFrameCount(caseId)-1))}`; }

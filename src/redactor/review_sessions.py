@@ -21,6 +21,7 @@ SESSION_LAYOUT_DIRS = ("state", "events", "corrections", "checkpoints", "media")
 EVENT_CORRECTION_PREVIEWED = "correction_previewed"
 EVENT_CORRECTION_SAVED_LEGACY = "correction_saved"
 EVENT_MANUAL_CORRECTION_SAVED = "manual_correction_saved"
+EVENT_MANUAL_CORRECTION_RETRACTED = "manual_correction_retracted"
 EVENT_TASK_RESOLUTION_DERIVED = "task_resolution_derived"
 
 ACTION_LOOKS_CORRECT = "looks_correct"
@@ -65,6 +66,11 @@ BLOCKING_ACTIONS = {
 _SESSION_WRITE_LOCK = threading.RLock()
 _EVENT_CHAIN_CACHE_LOCK = threading.Lock()
 _EVENT_CHAIN_CACHE: dict[tuple[str, int, int], dict[str, Any]] = {}
+
+
+def session_write_lock() -> threading.RLock:
+    """Serialize review-session mutations with final publication checks."""
+    return _SESSION_WRITE_LOCK
 
 
 def allowed_actions_for_task(task: dict[str, Any]) -> tuple[str, ...]:
@@ -513,6 +519,37 @@ def append_correction_event(
     )
     write_correction_jsonl(session_dir / "corrections.jsonl", correction)
     write_correction_jsonl(session_dir / "corrections" / "corrections.jsonl", correction)
+    refresh_session_summary(session_dir)
+    return event
+
+
+def append_correction_retraction_event(
+    session_dir: Path,
+    *,
+    actor: dict[str, Any],
+    correction: ReviewCorrection,
+    before_state: dict[str, Any] | None = None,
+    reason: str = "Saved correction removed.",
+) -> dict[str, Any]:
+    event = append_event(
+        session_dir,
+        event_type=EVENT_MANUAL_CORRECTION_RETRACTED,
+        actor=actor,
+        case_id=correction.case_id,
+        task_id=f"correction_verify_{correction.case_id}_{correction.correction_id}",
+        before_state=before_state,
+        after_state={
+            "case_id": correction.case_id,
+            "category": correction.category,
+            "correction_hash": correction.correction_hash(),
+            "correction_id": correction.correction_id,
+            "correction_revision_id": correction.revision_id,
+            "source_frame_end": correction.source_frame_end,
+            "source_frame_start": correction.source_frame_start,
+        },
+        note=reason,
+        application_hashes={"configuration_freeze_hash": correction.configuration_freeze_hash},
+    )
     refresh_session_summary(session_dir)
     return event
 
