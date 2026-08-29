@@ -208,7 +208,10 @@ export function EntityPanel({
             {sections.length ? (
               sections.map((section) => (
                 <section className="entity-section" key={section.title}>
-                  <h3>{section.title}</h3>
+                  <h3>
+                    <span>{section.title}</span>
+                    <span className="section-count">{section.entities.length}</span>
+                  </h3>
                   {section.entities.map((entity) => (
                     <EntityCard
                       key={entity.entity_id}

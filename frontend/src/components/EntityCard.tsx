@@ -102,9 +102,6 @@ export function EntityCard({
         <p className="muted">
           {observations} observations · {childCount} child tracklets · {entity.review_entity_state || 'review object'}
         </p>
-        {purity === PURITY_LIKELY_MIXED ? (
-          <p className="warning-text">MIXED - contains conflicting simultaneous tracklets</p>
-        ) : null}
         {!canFocus ? (
           <p className="muted">
             {previewStatus === 'NOT_PREPARED' ? 'Preview not loaded' : 'No reliable representative crop'}
@@ -131,11 +128,16 @@ export function EntityCard({
           })}
         </div>
         {purity === PURITY_LIKELY_MIXED && onSplitMixed ? (
-          <button type="button" className="primary" onClick={() => onSplitMixed(entity)} disabled={pending}>
+          <button type="button" className="primary split-mixed-action" onClick={() => onSplitMixed(entity)} disabled={pending}>
             Split mixed entity
           </button>
         ) : null}
       </div>
+      {purity === PURITY_LIKELY_MIXED ? (
+        <div className="entity-card-notices">
+          <p className="warning-text">MIXED - contains conflicting simultaneous tracklets</p>
+        </div>
+      ) : null}
       <div className="entity-operation-status" data-testid="entity-operation-status" role="status" aria-live="polite">
         {pending ? (
           <>

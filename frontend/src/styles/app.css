@@ -892,9 +892,14 @@ main {
 
 .entity-card {
   display: grid;
-  grid-template-columns: auto minmax(78px, 252px) minmax(0, 1fr) auto 34px;
-  gap: var(--space-2);
+  grid-template-areas:
+    "select preview copy actions status"
+    ". notices notices notices notices"
+    ". technical technical technical technical";
+  grid-template-columns: max-content minmax(168px, 216px) minmax(420px, 1fr) minmax(300px, 380px) 24px;
+  gap: 10px 14px;
   align-items: start;
+  min-width: 0;
 }
 
 .entity-card.purity-likely_mixed {
@@ -903,7 +908,9 @@ main {
 }
 
 .entity-select {
-  align-self: center;
+  grid-area: select;
+  align-self: start;
+  padding-top: 6px;
 }
 
 .entity-select input {
@@ -911,20 +918,30 @@ main {
 }
 
 .thumbnail-strip {
+  grid-area: preview;
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 78px));
-  gap: 6px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
   align-items: start;
+  width: 100%;
+  min-width: 168px;
+  max-width: 216px;
 }
 
 .thumbnail-button {
   position: relative;
   display: block;
-  width: 78px;
-  height: 58px;
+  width: 100%;
+  min-height: 72px;
+  aspect-ratio: 4 / 3;
   overflow: hidden;
   padding: 0;
   border-radius: 5px;
+}
+
+.preview-load-button {
+  grid-column: 1 / -1;
+  min-height: 78px;
 }
 
 .thumbnail-button img,
@@ -942,9 +959,10 @@ main {
   justify-content: center;
   padding: 4px;
   color: var(--muted);
-  font-size: 0.68rem;
-  line-height: 1.05;
+  font-size: 0.72rem;
+  line-height: 1.15;
   text-align: center;
+  word-break: normal;
 }
 
 .crop-frame {
@@ -960,20 +978,53 @@ main {
 }
 
 .entity-purity-badge {
-  margin-left: 7px;
+  margin-left: 0;
   vertical-align: middle;
+}
+
+.entity-copy {
+  grid-area: copy;
+  min-width: 0;
+}
+
+.entity-card .task-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.entity-card .task-meta,
+.entity-card .muted {
+  word-break: normal;
+  overflow-wrap: normal;
 }
 
 .entity-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  min-width: 278px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 
+.entity-card > .entity-actions {
+  grid-area: actions;
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: start;
+  justify-items: stretch;
+  min-width: 0;
+  gap: 8px;
+}
+
+.split-mixed-action {
+  justify-self: stretch;
+}
+
 .entity-operation-status {
+  grid-area: status;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -983,8 +1034,23 @@ main {
   align-self: center;
 }
 
+.entity-card-notices {
+  grid-area: notices;
+  min-width: 0;
+}
+
+.entity-card-notices .warning-text {
+  margin: 0;
+  border: 1px solid #fed7aa;
+  border-radius: 6px;
+  background: #fff7ed;
+  padding: 8px 10px;
+  font-weight: 700;
+}
+
 .entity-card details {
-  grid-column: 1 / -1;
+  grid-area: technical;
+  min-width: 0;
 }
 
 .entity-section {
@@ -994,9 +1060,26 @@ main {
 }
 
 .entity-section h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   margin: 0;
   color: #1f2937;
   font-size: 0.95rem;
+}
+
+.section-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 4px 7px;
 }
 
 .candidate-group-list,
@@ -1030,8 +1113,8 @@ main {
 }
 
 .policy-segment {
-  display: inline-flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(118px, 1fr));
   gap: 4px;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -1043,6 +1126,8 @@ main {
   border-color: transparent;
   border-radius: 5px;
   padding: 5px 7px;
+  white-space: normal;
+  line-height: 1.15;
 }
 
 .policy-segment button[aria-pressed="true"][data-policy="redact"] {
@@ -1350,6 +1435,13 @@ pre {
   padding: 0;
 }
 
+.modal-card.large.entity-modal-card {
+  width: min(1400px, calc(100vw - 48px));
+  height: min(940px, calc(100vh - 48px));
+  max-height: min(940px, calc(100vh - 48px));
+  overflow: hidden;
+}
+
 .modal-sticky-header,
 .modal-sticky-footer {
   position: sticky;
@@ -1376,7 +1468,36 @@ pre {
 .modal-scroll-body {
   min-height: 0;
   overflow: auto;
-  padding: 14px 18px;
+  padding: 14px 18px 24px;
+}
+
+@media (max-width: 1180px) {
+  .entity-card {
+    grid-template-areas:
+      "select preview copy status"
+      ". actions actions actions"
+      ". notices notices notices"
+      ". technical technical technical";
+    grid-template-columns: max-content minmax(150px, 190px) minmax(320px, 1fr) 24px;
+  }
+
+  .thumbnail-strip {
+    min-width: 150px;
+    max-width: 190px;
+  }
+
+  .thumbnail-button {
+    min-height: 64px;
+  }
+
+  .entity-card > .entity-actions {
+    grid-template-columns: minmax(0, 1fr) minmax(160px, auto);
+    align-items: stretch;
+  }
+
+  .policy-segment {
+    grid-template-columns: repeat(4, minmax(104px, 1fr));
+  }
 }
 
 .error-text {
@@ -1442,33 +1563,38 @@ pre {
     grid-template-columns: 1fr;
   }
 
-  .entity-card {
-    grid-template-columns: auto minmax(64px, 1fr) minmax(0, 1fr) 34px;
-  }
-
-  .thumbnail-strip {
-    grid-template-columns: repeat(3, minmax(0, 64px));
-  }
-
-  .thumbnail-button {
-    width: 64px;
-    height: 48px;
-  }
-
-  .entity-actions {
-    grid-column: 2 / -1;
-    justify-content: flex-start;
-    min-width: 0;
-  }
-
-  .entity-operation-status {
-    grid-column: 4;
-    grid-row: 1;
+  .modal-card.large.entity-modal-card {
+    width: min(100%, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
   }
 
   .candidate-group-card {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 760px) {
+  .entity-card {
+    grid-template-areas:
+      "select copy status"
+      ". preview preview"
+      ". actions actions"
+      ". notices notices"
+      ". technical technical";
+    grid-template-columns: max-content minmax(0, 1fr) 24px;
+  }
+
+  .thumbnail-strip {
+    max-width: none;
+  }
+
+  .entity-card > .entity-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .policy-segment {
+    grid-template-columns: repeat(2, minmax(112px, 1fr));
   }
 }
 
