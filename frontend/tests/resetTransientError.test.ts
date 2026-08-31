@@ -5,8 +5,8 @@ import { describe, expect, it } from 'vitest';
 describe('reset transient correction errors', () => {
   it('clears preview and correction-local state during case reset', () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/CaseReviewPage.tsx'), 'utf8');
-    const resetBody = source.match(/const resetReviewState = async \(\) => \{(?<body>[\s\S]+?)\n  \};/)?.groups?.body || '';
-    const resetLocalBody = source.match(/const resetLocalCorrectionState = \(nextTask: TaskWithDecision \| null = null\) => \{(?<body>[\s\S]+?)\n  \};/)?.groups?.body || '';
+    const resetBody = source.match(/const resetReviewState = async \(\) => \{(?<body>[\s\S]+?)\n {2}\};/)?.groups?.body || '';
+    const resetLocalBody = source.match(/const resetLocalCorrectionState = \(nextTask: TaskWithDecision \| null = null\) => \{(?<body>[\s\S]+?)\n {2}\};/)?.groups?.body || '';
 
     expect(resetBody).toContain('resetLocalCorrectionState(null)');
     expect(resetLocalBody).toContain('setPreviewReady(false)');
@@ -29,7 +29,7 @@ describe('reset transient correction errors', () => {
 
   it('keeps full-video sweep approval non-optimistic until authoritative state is refreshed', () => {
     const source = fs.readFileSync(path.resolve(process.cwd(), 'src/pages/CaseReviewPage.tsx'), 'utf8');
-    const sweepBody = source.match(/const acknowledgeSweep = async \(\) => \{(?<body>[\s\S]+?)\n  \};/)?.groups?.body || '';
+    const sweepBody = source.match(/const acknowledgeSweep = async \(\) => \{(?<body>[\s\S]+?)\n {2}\};/)?.groups?.body || '';
     const approvalButton = source.match(/<button\s+type="button"\s+className="primary"(?<body>[\s\S]+?)<\/button>/)?.groups?.body || '';
 
     expect(sweepBody).toContain('setSweepBusy(true)');

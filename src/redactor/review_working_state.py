@@ -772,7 +772,7 @@ def derive_active_review_projection(
                         if case_id:
                             entity_case_by_id[entity_id] = case_id
             continue
-        if event_type == "entities_merged":
+        if event_type in {"entities_merged", "entity_merge_candidate_accepted"}:
             primary = dict(after.get("primary") or {})
             primary_id = str(primary.get("entity_id") or "")
             if primary_id:
@@ -790,6 +790,28 @@ def derive_active_review_projection(
                 }
                 if case_id:
                     entity_case_by_id[retired_key] = case_id
+            continue
+        if event_type in {"entity_mixed_split", "entity_tracklet_split"}:
+            parent = dict(after.get("parent") or {})
+            parent_id = str(parent.get("entity_id") or "")
+            if parent_id:
+                if case_id:
+                    parent.setdefault("case_id", case_id)
+                overrides[parent_id] = parent
+                if case_id:
+                    entity_case_by_id[parent_id] = case_id
+            for child in list(after.get("split_entities") or []):
+                if not isinstance(child, dict):
+                    continue
+                child_id = str(child.get("entity_id") or "")
+                if not child_id:
+                    continue
+                updated = dict(child)
+                if case_id:
+                    updated.setdefault("case_id", case_id)
+                overrides[child_id] = updated
+                if case_id:
+                    entity_case_by_id[child_id] = case_id
             continue
         if event_type in {
             "reviewed_media_materialization_completed",
@@ -1736,13 +1758,13 @@ def effective_case_entities(
         entity_id = str(entity.get("entity_id") or "")
         merged = entity | dict(overrides.get(entity_id) or {})
         seen.add(entity_id)
-        if merged.get("current_status") != "merged":
+        if merged.get("current_status") not in {"merged", "split"}:
             effective.append(merged)
     for entity_id, override in sorted(overrides.items()):
         if entity_id in seen:
             continue
         entity = dict(override)
-        if entity.get("current_status") == "merged":
+        if entity.get("current_status") in {"merged", "split"}:
             continue
         if not entity.get("case_id"):
             continue

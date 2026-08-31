@@ -59,7 +59,15 @@ export interface CorrectionDraft {
 
 export interface EffectiveEntity extends Entity {
   current_status?: string;
+  advisory_candidate_matches?: Record<string, unknown>[];
+  entity_refinement?: Record<string, unknown>;
+  mixed_warning?: string;
+  policy_action_availability?: Record<string, unknown>;
+  preview_status?: Record<string, unknown>;
+  purity_classification?: string;
+  raw_tracklets?: Record<string, unknown>[];
   representative_bbox?: [number, number, number, number] | number[] | null;
+  representative_crops?: Record<string, unknown>[];
   aliases?: string[];
   source_entity_ids?: string[];
 }

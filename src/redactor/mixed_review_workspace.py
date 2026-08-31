@@ -107,6 +107,7 @@ class ReviewEntitySource:
     last_frame: int | None = None
     representative_frame: int | None = None
     bboxes: list[tuple[int, int, int, int]] = field(default_factory=list)
+    frame_bboxes: list[tuple[int, tuple[int, int, int, int]]] = field(default_factory=list)
     provenance_counts: Counter[str] = field(default_factory=Counter)
     render_region_count: int = 0
     technical_detector_ids: set[str] = field(default_factory=set)
@@ -982,7 +983,9 @@ def build_entity_sources(
         source.render_region_count += 1
         source.observe_frame(record.source_frame)
         if record.bbox_xyxy is not None:
-            source.bboxes.append(tuple(int(value) for value in record.bbox_xyxy))
+            bbox = tuple(int(value) for value in record.bbox_xyxy)
+            source.bboxes.append(bbox)
+            source.frame_bboxes.append((int(record.source_frame), bbox))
         source.provenance_counts[record.provenance] += 1
         source.technical_track_ids.add(source.source_key)
         source.source_lineage.setdefault("render_region_sources", []).append(record.to_dict())
@@ -1187,7 +1190,10 @@ def add_plate_entity_sources(
             source.observe_frame(frame)
             bbox = track.get("bbox_xyxy")
             if isinstance(bbox, list | tuple) and len(bbox) == 4:
-                source.bboxes.append(tuple(int(value) for value in bbox))
+                parsed = tuple(int(value) for value in bbox)
+                source.bboxes.append(parsed)
+                if frame is not None:
+                    source.frame_bboxes.append((int(frame), parsed))
             source.provenance_counts[str(track.get("provenance") or "tracking")] += 1
     intervals_path = tracking_dir / "review_intervals.json"
     if intervals_path.exists():
@@ -1372,6 +1378,11 @@ def entity_from_source(source: ReviewEntitySource, *, fps: str) -> dict[str, Any
     representative = source.representative_frame
     if representative is None:
         representative = first
+    crop_candidates = ranked_source_crop_candidates(source.frame_bboxes)
+    if crop_candidates:
+        middle = crop_candidates[min(1, len(crop_candidates) - 1)]
+        bbox = tuple(middle["bbox_xyxy"])
+        representative = int(middle["source_frame"])
     task_ids = sorted(source.task_ids)
     return {
         "attached_fragment_track_ids": [],
@@ -1410,6 +1421,7 @@ def entity_from_source(source: ReviewEntitySource, *, fps: str) -> dict[str, Any
         "possible_duplicate_suggestions": [],
         "privacy_action": source.policy,
         "representative_bbox": list(bbox) if bbox is not None else None,
+        "representative_crop_candidates": crop_candidates,
         "representative_source_frame": representative,
         "representative_thumbnail_path": None,
         "review_entity_state": "ready"
@@ -1512,79 +1524,122 @@ def write_one_source_backed_entity_thumbnail(
     width: int | None,
     height: int | None,
 ) -> dict[str, Any]:
-    bbox = parse_bbox(entity.get("representative_bbox"))
-    source_frame = optional_int(entity.get("representative_source_frame"))
     entity_id = str(entity.get("entity_id") or "")
     category = str(entity.get("category") or "")
-    if bbox is None or source_frame is None or not entity_id:
+    crop_specs = entity_crop_specs(entity)
+    if not crop_specs or not entity_id:
         entity["thumbnail_unavailable_reason"] = "representative_geometry_missing"
         return thumbnail_audit_row(entity, status="no_geometry")
 
-    frame_index = source_frame - int(source_frame_start or 0)
-    if frame_index < 0:
-        entity["thumbnail_unavailable_reason"] = "representative_frame_outside_source"
-        return thumbnail_audit_row(entity, status="failed")
-    capture.set(cv.CAP_PROP_POS_FRAMES, frame_index)
-    ok, frame = capture.read()
-    if not ok:
-        entity["thumbnail_unavailable_reason"] = "source_frame_unreadable"
-        return thumbnail_audit_row(entity, status="failed")
-
-    frame_height, frame_width = frame.shape[:2]
-    if width is not None and int(width) != frame_width:
-        entity["thumbnail_unavailable_reason"] = "source_width_mismatch"
-        return thumbnail_audit_row(entity, status="failed")
-    if height is not None and int(height) != frame_height:
-        entity["thumbnail_unavailable_reason"] = "source_height_mismatch"
-        return thumbnail_audit_row(entity, status="failed")
-
-    clamped = clamp_bbox(bbox, frame_width=frame_width, frame_height=frame_height)
-    if clamped is None:
-        entity["thumbnail_unavailable_reason"] = "representative_bbox_out_of_bounds"
+    written: list[dict[str, Any]] = []
+    for spec in crop_specs[:3]:
+        bbox = parse_bbox(spec.get("bbox_xyxy"))
+        source_frame = optional_int(spec.get("source_frame"))
+        if bbox is None or source_frame is None:
+            continue
+        frame_index = source_frame - int(source_frame_start or 0)
+        if frame_index < 0:
+            entity["thumbnail_unavailable_reason"] = "representative_frame_outside_source"
+            continue
+        capture.set(cv.CAP_PROP_POS_FRAMES, frame_index)
+        ok, frame = capture.read()
+        if not ok:
+            entity["thumbnail_unavailable_reason"] = "source_frame_unreadable"
+            continue
+        frame_height, frame_width = frame.shape[:2]
+        if width is not None and int(width) != frame_width:
+            entity["thumbnail_unavailable_reason"] = "source_width_mismatch"
+            continue
+        if height is not None and int(height) != frame_height:
+            entity["thumbnail_unavailable_reason"] = "source_height_mismatch"
+            continue
+        clamped = clamp_bbox(bbox, frame_width=frame_width, frame_height=frame_height)
+        if clamped is None:
+            entity["thumbnail_unavailable_reason"] = "representative_bbox_out_of_bounds"
+            continue
+        crop = padded_crop(frame, clamped, category=category)
+        if crop.size == 0:
+            entity["thumbnail_unavailable_reason"] = "empty_source_crop"
+            continue
+        target_height = 120
+        scale = target_height / max(1, crop.shape[0])
+        resized = cv.resize(
+            crop,
+            (max(1, int(crop.shape[1] * scale)), target_height),
+            interpolation=cv.INTER_AREA,
+        )
+        role = str(spec.get("crop_role") or f"crop_{len(written) + 1}")
+        suffix = "" if not written else f"_{role}"
+        out_path = workspace_dir / "entities" / case_id / "thumbnails" / f"{entity_id}{suffix}.jpg"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        if not cv.imwrite(str(out_path), resized, [int(cv.IMWRITE_JPEG_QUALITY), 88]):
+            entity["thumbnail_unavailable_reason"] = "thumbnail_write_failed"
+            continue
+        relative = relative_to_workspace(out_path, workspace_dir)
+        identity = {
+            "bbox_xyxy": list(clamped),
+            "category": category,
+            "crop_role": role,
+            "entity_id": entity_id,
+            "path": relative,
+            "quality_state": str(spec.get("quality_state") or "REPRESENTATIVE"),
+            "schema_version": "source_backed_entity_thumbnail_identity.v1",
+            "source_frame": source_frame,
+            "source_frame_index": frame_index,
+            "source_sha256": source_sha256,
+            "thumbnail_sha256": media.sha256_file(out_path),
+        }
+        written.append(identity)
+    if not written:
+        entity.setdefault("thumbnail_unavailable_reason", "no_reliable_representative_crop")
         return thumbnail_audit_row(entity, status="no_geometry")
+    first = written[0]
+    entity["representative_bbox"] = list(first["bbox_xyxy"])
+    entity["representative_crops"] = written
+    entity["representative_source_frame"] = first["source_frame"]
+    entity["representative_thumbnail_identity"] = first
+    entity["representative_thumbnail_path"] = first["path"]
+    entity.pop("thumbnail_unavailable_reason", None)
+    return thumbnail_audit_row(entity, status="source_backed")
 
-    x1, y1, x2, y2 = clamped
+
+def entity_crop_specs(entity: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = [
+        dict(item)
+        for item in list(entity.get("representative_crop_candidates") or [])
+        if isinstance(item, dict)
+    ]
+    if candidates:
+        return candidates
+    bbox = parse_bbox(entity.get("representative_bbox"))
+    source_frame = optional_int(entity.get("representative_source_frame"))
+    if bbox is None or source_frame is None:
+        return []
+    return [
+        {
+            "bbox_xyxy": list(bbox),
+            "crop_role": "best_middle",
+            "quality_state": "REPRESENTATIVE",
+            "source_frame": source_frame,
+        }
+    ]
+
+
+def padded_crop(
+    frame: Any,
+    bbox: tuple[int, int, int, int],
+    *,
+    category: str,
+) -> Any:
+    frame_height, frame_width = frame.shape[:2]
+    x1, y1, x2, y2 = bbox
     pad_fraction = 0.42 if category == CATEGORY_FACE else 0.55
     pad = max(10, int(max(x2 - x1, y2 - y1) * pad_fraction))
     left = max(0, x1 - pad)
     top = max(0, y1 - pad)
     right = min(frame_width, x2 + pad)
     bottom = min(frame_height, y2 + pad)
-    crop = frame[top:bottom, left:right]
-    if crop.size == 0:
-        entity["thumbnail_unavailable_reason"] = "empty_source_crop"
-        return thumbnail_audit_row(entity, status="no_geometry")
-
-    target_height = 120
-    scale = target_height / max(1, crop.shape[0])
-    resized = cv.resize(
-        crop,
-        (max(1, int(crop.shape[1] * scale)), target_height),
-        interpolation=cv.INTER_AREA,
-    )
-    out_path = workspace_dir / "entities" / case_id / "thumbnails" / f"{entity_id}.jpg"
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    if not cv.imwrite(str(out_path), resized, [int(cv.IMWRITE_JPEG_QUALITY), 88]):
-        entity["thumbnail_unavailable_reason"] = "thumbnail_write_failed"
-        return thumbnail_audit_row(entity, status="failed")
-
-    relative = relative_to_workspace(out_path, workspace_dir)
-    identity = {
-        "bbox_xyxy": list(clamped),
-        "category": category,
-        "entity_id": entity_id,
-        "path": relative,
-        "schema_version": "source_backed_entity_thumbnail_identity.v1",
-        "source_frame": source_frame,
-        "source_frame_index": frame_index,
-        "source_sha256": source_sha256,
-        "thumbnail_sha256": media.sha256_file(out_path),
-    }
-    entity["representative_bbox"] = list(clamped)
-    entity["representative_thumbnail_identity"] = identity
-    entity["representative_thumbnail_path"] = relative
-    entity.pop("thumbnail_unavailable_reason", None)
-    return thumbnail_audit_row(entity, status="source_backed")
+    return frame[top:bottom, left:right]
 
 
 def thumbnail_audit_row(entity: dict[str, Any], *, status: str) -> dict[str, Any]:
@@ -1598,6 +1653,7 @@ def thumbnail_audit_row(entity: dict[str, Any], *, status: str) -> dict[str, Any
         "representative_source_frame": entity.get("representative_source_frame"),
         "source_sha256": identity.get("source_sha256"),
         "status": status,
+        "representative_crops": list(entity.get("representative_crops") or []),
         "thumbnail_path": entity.get("representative_thumbnail_path"),
         "thumbnail_sha256": identity.get("thumbnail_sha256"),
     }
@@ -1611,6 +1667,61 @@ def parse_bbox(value: Any) -> tuple[int, int, int, int] | None:
     except (TypeError, ValueError):
         return None
     return x1, y1, x2, y2
+
+
+def ranked_source_crop_candidates(
+    samples: list[tuple[int, tuple[int, int, int, int]]],
+) -> list[dict[str, Any]]:
+    if not samples:
+        return []
+    by_frame = sorted(
+        samples,
+        key=lambda item: (
+            item[0],
+            -bbox_area(item[1]),
+            item[1],
+        ),
+    )
+    selected: list[tuple[str, tuple[int, tuple[int, int, int, int]]]] = []
+    positions = [
+        ("best_early", 0),
+        ("best_middle", len(by_frame) // 2),
+        ("best_late", len(by_frame) - 1),
+    ]
+    seen_frames: set[int] = set()
+    for role, index in positions:
+        frame, bbox = by_frame[index]
+        if frame in seen_frames and len(by_frame) > len(seen_frames):
+            replacement = next(
+                (item for item in by_frame if item[0] not in seen_frames),
+                None,
+            )
+            if replacement is not None:
+                frame, bbox = replacement
+        seen_frames.add(frame)
+        selected.append((role, (frame, bbox)))
+    crops: list[dict[str, Any]] = []
+    seen_keys: set[tuple[int, tuple[int, int, int, int]]] = set()
+    for role, (frame, bbox) in selected:
+        key = (frame, bbox)
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        crops.append(
+            {
+                "bbox_area": bbox_area(bbox),
+                "bbox_xyxy": list(bbox),
+                "crop_role": role,
+                "quality_state": "REPRESENTATIVE",
+                "source_frame": frame,
+            }
+        )
+    return crops
+
+
+def bbox_area(bbox: tuple[int, int, int, int]) -> int:
+    x1, y1, x2, y2 = bbox
+    return max(0, x2 - x1) * max(0, y2 - y1)
 
 
 def clamp_bbox(

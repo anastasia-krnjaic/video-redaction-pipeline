@@ -9,6 +9,9 @@ const useManagedServer = process.env.FRONTEND_E2E_NO_SERVER !== '1';
 export default defineConfig({
   testDir: './tests/e2e',
   timeout: 60_000,
+  // These E2E tests mutate one packaged review workspace on disk, so parallel
+  // browser workers can race through the same current session files.
+  workers: 1,
   expect: {
     timeout: 5_000,
   },

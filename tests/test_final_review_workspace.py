@@ -1490,6 +1490,19 @@ def write_policy_entity_package(
         "member_detector_tracker_ids": ["plate_1"],
         "privacy_action": privacy_entities.POLICY_REDACT,
         "representative_source_frame": 0,
+        "source_lineage": {
+            "render_region_sources": [
+                {
+                    "bbox_xyxy": [20, 20, 54, 34],
+                    "provenance": "plate_detector_observation",
+                    "source_frame": 0,
+                    "source_record": {"region_id": "region_1", "track_uid": "plate_1"},
+                }
+            ],
+            "schema_version": "mixed_review_entity_source_lineage.v1",
+            "technical_id": "plate_1",
+            "technical_track_ids": ["plate_1"],
+        },
     }
     write_json(
         package / "review_entities.json",
@@ -3741,8 +3754,8 @@ def test_entity_merge_event_creates_canonical_active_entity(tmp_path: Path) -> N
         session_dir=session_dir,
     )
     assert second["label"] == "Merged Person 02"
-    assert second["current_policy"] == privacy_entities.POLICY_REVIEW_REQUIRED
-    assert second["merge_policy_initialization"]["reason"] == "conflicting_selected_policies"
+    assert second["current_policy"] == privacy_entities.POLICY_REDACT
+    assert second["merge_policy_initialization"]["reason"] == "most_protective_selected_policy"
 
     extended = review_workspace.canonical_merged_entity(
         [active[0], entity_c],
@@ -9876,6 +9889,22 @@ def test_editing_during_explicit_build_does_not_spawn_jobs_and_stale_build_canno
                 "member_detector_tracker_ids": [track_id],
                 "privacy_action": privacy_entities.POLICY_REDACT,
                 "representative_source_frame": index % manifest.frame_count,
+                "source_lineage": {
+                    "render_region_sources": [
+                        {
+                            "bbox_xyxy": [10 + index, 20, 35 + index, 34],
+                            "provenance": "plate_detector_observation",
+                            "source_frame": index % manifest.frame_count,
+                            "source_record": {
+                                "region_id": f"region_{index}",
+                                "track_uid": track_id,
+                            },
+                        }
+                    ],
+                    "schema_version": "mixed_review_entity_source_lineage.v1",
+                    "technical_id": track_id,
+                    "technical_track_ids": [track_id],
+                },
             }
         )
     review_finalization.write_privacy_region_records(

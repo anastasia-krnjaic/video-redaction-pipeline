@@ -4,6 +4,7 @@ import type {
   Correction,
   CorrectionPreview,
   Entity,
+  EntityIndex,
   FinalizationStatus,
   MediaVersion,
   MaterializationJob,
@@ -68,6 +69,10 @@ async function postJson<T>(path: string, payload: unknown): Promise<T> {
 
 export function loadWorkspace(): Promise<WorkspaceSummary> {
   return getJson<WorkspaceSummary>(`${API_PREFIX}/workspace/summary`);
+}
+
+export function loadEntityIndex(sessionId: string): Promise<EntityIndex> {
+  return getJson<EntityIndex>(`${API_PREFIX}/entities?session_id=${encodeURIComponent(sessionId)}`);
 }
 
 export function loadSessionState(sessionId: string): Promise<SessionState> {
@@ -221,6 +226,94 @@ export async function mergeEntities(payload: {
     retired_entity_uuids: response.retired_entity_uuids || [],
     resulting_policy: response.resulting_policy,
     working_state: response.working_state,
+  };
+}
+
+export async function acceptMergeCandidate(payload: {
+  session_id: string;
+  actor: Attribution | Record<string, unknown>;
+  case_id: CaseId;
+  candidate_id: string;
+  entity_ids: string[];
+}): Promise<{
+  event: AuditEvent;
+  materialization_job?: MaterializationJob;
+  merged_entity: EffectiveEntity;
+  retired_entity_uuids: string[];
+  resulting_policy?: string;
+  working_state?: WorkingState;
+}> {
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/entity-refinement/accept-merge`, payload);
+  if (!response.event) throw new Error('Accept candidate response did not include an event.');
+  if (!response.merged_entity) throw new Error('Accept candidate response did not include the merged entity.');
+  return {
+    event: response.event,
+    materialization_job: response.materialization_job,
+    merged_entity: response.merged_entity,
+    retired_entity_uuids: response.retired_entity_uuids || [],
+    resulting_policy: response.resulting_policy,
+    working_state: response.working_state,
+  };
+}
+
+export async function rejectMergeCandidate(payload: {
+  session_id: string;
+  actor: Attribution | Record<string, unknown>;
+  case_id: CaseId;
+  candidate_id: string;
+  entity_ids: string[];
+  reason?: string;
+}): Promise<{ event: AuditEvent; working_state?: WorkingState }> {
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/entity-refinement/reject-merge`, payload);
+  if (!response.event) throw new Error('Reject candidate response did not include an event.');
+  return { event: response.event, working_state: response.working_state };
+}
+
+export async function splitMixedEntity(payload: {
+  session_id: string;
+  actor: Attribution | Record<string, unknown>;
+  case_id: CaseId;
+  entity_id: string;
+}): Promise<{ event: AuditEvent; materialization_job?: MaterializationJob; split_entities: EffectiveEntity[]; working_state?: WorkingState }> {
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/entity-refinement/split-mixed`, payload);
+  if (!response.event) throw new Error('Split mixed entity response did not include an event.');
+  return {
+    event: response.event,
+    materialization_job: response.materialization_job,
+    split_entities: (response.split_entities || []) as EffectiveEntity[],
+    working_state: response.working_state,
+  };
+}
+
+export async function splitTrackletOut(payload: {
+  session_id: string;
+  actor: Attribution | Record<string, unknown>;
+  case_id: CaseId;
+  entity_id: string;
+  tracklet_id: string;
+}): Promise<{ event: AuditEvent; materialization_job?: MaterializationJob; split_entities: EffectiveEntity[]; working_state?: WorkingState }> {
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/entity-refinement/split-tracklet`, payload);
+  if (!response.event) throw new Error('Split tracklet response did not include an event.');
+  return {
+    event: response.event,
+    materialization_job: response.materialization_job,
+    split_entities: (response.split_entities || []) as EffectiveEntity[],
+    working_state: response.working_state,
+  };
+}
+
+export async function prepareEntityPreviews(payload: {
+  session_id: string;
+  actor: Attribution | Record<string, unknown>;
+  case_id: CaseId;
+  entity_id: string;
+}): Promise<{ entity: EffectiveEntity; preview_status?: Record<string, unknown>; representative_crops: Record<string, unknown>[] }> {
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/entity-refinement/previews`, payload);
+  if (!response.entity) throw new Error('Entity preview response did not include the entity.');
+  return {
+    entity: response.entity,
+    preview_status: response.preview_status as Record<string, unknown> | undefined,
+    representative_crops: (response.representative_crops || []) as Record<string, unknown>[],
   };
 }
 

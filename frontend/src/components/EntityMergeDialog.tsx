@@ -1,20 +1,23 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { EffectiveEntity } from '../types/domain';
 import { policyLabel } from '../state/reviewState';
+import { formatFrameRanges, mostProtectivePolicy, temporalConflictRangesForEntities } from '../state/entityRefinement';
 
 interface Props {
   entities: EffectiveEntity[];
   open: boolean;
   onCancel: () => void;
+  onInspectFrame?: (frame: number) => void;
   onMerge: (entities: EffectiveEntity[]) => Promise<void>;
 }
 
-export function EntityMergeDialog({ entities, onCancel, onMerge, open }: Props) {
+export function EntityMergeDialog({ entities, onCancel, onInspectFrame, onMerge, open }: Props) {
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
-  const hasOverlap = useMemo(() => anyOverlap(entities), [entities]);
+  const conflictRanges = useMemo(() => temporalConflictRangesForEntities(entities), [entities]);
+  const conflictFrame = conflictRanges[0]?.start;
   const policies = new Set(entities.map((entity) => entity.current_policy || entity.privacy_action || entity.default_privacy_policy || 'review_required'));
-  const resultingPolicy = policies.size === 1 ? [...policies][0] : 'review_required';
+  const resultingPolicy = mostProtectivePolicy(entities);
 
   useEffect(() => {
     if (open) {
@@ -51,11 +54,20 @@ export function EntityMergeDialog({ entities, onCancel, onMerge, open }: Props) 
           </button>
         </div>
         <div className="modal-scroll-body">
-          {hasOverlap ? (
-            <p className="warning-text">Selected objects have overlapping source-frame spans. The merge is still allowed because you are confirming it manually.</p>
+          {conflictRanges.length ? (
+            <div className="merge-disabled-explanation warning-text">
+              <span>
+                Selected objects coexist on source frames {formatFrameRanges(conflictRanges)}, so they cannot be the same identity.
+              </span>
+              {conflictFrame !== undefined && onInspectFrame ? (
+                <button type="button" onClick={() => onInspectFrame(conflictFrame)}>
+                  Inspect frames {formatFrameRanges(conflictRanges)}
+                </button>
+              ) : null}
+            </div>
           ) : null}
           {policies.size > 1 ? (
-            <p className="warning-text">Selected policies conflict. The merged object will be marked Needs review.</p>
+            <p className="warning-text">Selected policies conflict. The merged object will inherit the most protective policy.</p>
           ) : null}
           <div className="merge-candidates">
             {entities.map((entity) => (
@@ -82,29 +94,11 @@ export function EntityMergeDialog({ entities, onCancel, onMerge, open }: Props) 
           <button type="button" onClick={onCancel} disabled={saving}>
             Cancel
           </button>
-          <button type="button" className="primary" onClick={confirm} disabled={saving || entities.length < 2}>
+          <button type="button" className="primary" onClick={confirm} disabled={saving || entities.length < 2 || Boolean(conflictRanges.length)}>
             Merge selected
           </button>
         </div>
       </div>
     </section>
   );
-}
-
-function anyOverlap(entities: EffectiveEntity[]): boolean {
-  for (let index = 0; index < entities.length; index += 1) {
-    for (let other = index + 1; other < entities.length; other += 1) {
-      if (overlap(entities[index], entities[other])) return true;
-    }
-  }
-  return false;
-}
-
-function overlap(left: EffectiveEntity, right: EffectiveEntity): boolean {
-  const l1 = left.first_visible_source_frame;
-  const l2 = left.last_visible_source_frame;
-  const r1 = right.first_visible_source_frame;
-  const r2 = right.last_visible_source_frame;
-  if ([l1, l2, r1, r2].some((value) => typeof value !== 'number')) return false;
-  return Math.max(l1 as number, r1 as number) <= Math.min(l2 as number, r2 as number);
 }
