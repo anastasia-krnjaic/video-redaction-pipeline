@@ -1,3 +1,5 @@
+import { useEffect, useRef, useState } from 'react';
+import type { RefObject } from 'react';
 import type { EffectiveEntity, EntityPolicy } from '../types/domain';
 import { policyLabel } from '../state/reviewState';
 import {
@@ -8,16 +10,43 @@ import {
   PURITY_LIKELY_MIXED,
 } from '../state/entityRefinement';
 
+export interface EntityPreviewRequestOptions {
+  force?: boolean;
+  manual?: boolean;
+}
+
+export type EntityPreviewImageStatus = 'loading' | 'loaded' | 'error';
+
+export interface RepresentativeCrop {
+  bbox_xyxy?: number[];
+  crop_role?: string;
+  path?: string;
+  raw_tracklet_id?: string;
+  source_frame?: number;
+}
+
+interface EntityCropButtonProps {
+  compact?: boolean;
+  crop: RepresentativeCrop;
+  entity: EffectiveEntity;
+  imageKey?: string;
+  onImageStatusChange?: (imageKey: string, status: EntityPreviewImageStatus) => void;
+  onJump: (entity: EffectiveEntity) => void;
+  onRetryPreview?: () => void;
+}
+
 interface Props {
   entity: EffectiveEntity;
   onJump: (entity: EffectiveEntity) => void;
   onPolicy: (entity: EffectiveEntity, policy: EntityPolicy) => void;
-  onLoadPreviews?: (entity: EffectiveEntity) => void;
+  onLoadPreviews?: (entity: EffectiveEntity, options?: EntityPreviewRequestOptions) => void;
   onSelect: (checked: boolean) => void;
   onSplitMixed?: (entity: EffectiveEntity) => void;
   onSplitTracklet?: (entity: EffectiveEntity, trackletId: string) => void;
   pending?: boolean;
+  previewError?: string;
   previewPending?: boolean;
+  previewRoot?: RefObject<Element>;
   selected: boolean;
 }
 
@@ -32,9 +61,12 @@ export function EntityCard({
   onSplitMixed,
   onSplitTracklet,
   pending,
+  previewError,
   previewPending,
+  previewRoot,
   selected,
 }: Props) {
+  const cardRef = useRef<HTMLElement>(null);
   const policy = (entity.current_policy || entity.privacy_action || entity.default_privacy_policy || 'review_required') as EntityPolicy;
   const observations = Number(entity.evidence_summary?.review_observation_count || entity.evidence_summary?.region_count || 0);
   const childCount = childTrackletCount(entity);
@@ -44,9 +76,37 @@ export function EntityCard({
   const canFocus = crops.length > 0 || Boolean(representativeBBox(entity) && typeof entity.representative_source_frame === 'number');
   const rawTracklets = Array.isArray(entity.raw_tracklets) ? entity.raw_tracklets : [];
   const previewStatus = previewStatusValue(entity);
+  const shouldAutoLoadPreview = previewStatus === 'NOT_PREPARED' && !crops.length && !previewPending && !previewError && Boolean(onLoadPreviews);
+
+  useEffect(() => {
+    if (!shouldAutoLoadPreview || !onLoadPreviews) return undefined;
+    const card = cardRef.current;
+    if (!card || typeof IntersectionObserver === 'undefined') {
+      onLoadPreviews(entity);
+      return undefined;
+    }
+
+    let requested = false;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (requested || !entries.some((entry) => entry.isIntersecting || entry.intersectionRatio > 0)) return;
+        requested = true;
+        onLoadPreviews(entity);
+        observer.disconnect();
+      },
+      { root: previewRoot?.current || null, rootMargin: '120px 0px', threshold: 0.01 },
+    );
+    observer.observe(card);
+    return () => observer.disconnect();
+  }, [entity, onLoadPreviews, previewRoot, shouldAutoLoadPreview]);
+
+  const requestPreviewAfterExpansion = () => {
+    if (shouldAutoLoadPreview) onLoadPreviews?.(entity);
+  };
 
   return (
     <article
+      ref={cardRef}
       className={`entity-card purity-${purity.toLowerCase()}`}
       data-entity-id={entity.entity_id}
       data-category={entity.category}
@@ -60,34 +120,32 @@ export function EntityCard({
       <div className="thumbnail-strip" aria-label={`${entity.label} representative crops`}>
         {crops.length ? (
           crops.map((crop, index) => (
-            <button
-              type="button"
-              className="thumbnail-button"
+            <EntityCropButton
               key={`${crop.path || 'crop'}-${crop.source_frame || index}`}
-              onClick={() => onJump(cropEntityTarget(entity, crop))}
-              title={`Jump to source frame ${crop.source_frame ?? '?'}`}
-            >
-              {crop.path ? (
-                <img src={`/${crop.path}`} alt={`${entity.label} crop at source frame ${crop.source_frame ?? '?'}`} />
-              ) : (
-                <span className="thumbnail-placeholder">No reliable representative crop</span>
-              )}
-              <span className="crop-frame">F{crop.source_frame ?? '?'}</span>
-            </button>
+              crop={crop}
+              entity={entity}
+              onJump={onJump}
+              onRetryPreview={onLoadPreviews ? () => onLoadPreviews(entity, { force: true, manual: true }) : undefined}
+            />
           ))
-        ) : previewStatus === 'NOT_PREPARED' && onLoadPreviews ? (
+        ) : previewError && onLoadPreviews ? (
           <button
             type="button"
-            className="thumbnail-button preview-load-button"
-            onClick={() => onLoadPreviews(entity)}
+            className="thumbnail-button preview-load-button preview-retry-button"
+            onClick={() => onLoadPreviews(entity, { force: true, manual: true })}
             disabled={previewPending}
+            title={previewError}
           >
-            <span className="thumbnail-placeholder">{previewPending ? 'Loading previews' : 'Load previews'}</span>
+            <span className="thumbnail-placeholder">{previewPending ? 'Retrying preview' : 'Retry preview'}</span>
           </button>
-        ) : (
+        ) : previewStatus === 'NOT_PREPARED' ? (
           <span className="thumbnail-placeholder">
-            {previewStatus === 'NOT_PREPARED' ? 'Preview not loaded' : 'No reliable representative crop'}
+            {previewPending ? 'Loading previews' : 'Preview will load when visible'}
           </span>
+        ) : previewPending ? (
+          <span className="thumbnail-placeholder">Loading previews</span>
+        ) : (
+          <span className="thumbnail-placeholder">No reliable representative crop</span>
         )}
       </div>
       <div className="entity-copy">
@@ -103,8 +161,14 @@ export function EntityCard({
           {observations} observations · {childCount} child tracklets · {entity.review_entity_state || 'review object'}
         </p>
         {!canFocus ? (
-          <p className="muted">
-            {previewStatus === 'NOT_PREPARED' ? 'Preview not loaded' : 'No reliable representative crop'}
+          <p className={previewError ? 'error-text' : 'muted'}>
+            {previewError
+              ? `Preview failed: ${previewError}`
+              : previewStatus === 'NOT_PREPARED'
+                ? previewPending
+                  ? 'Preparing representative crops'
+                  : 'Representative crops load automatically as this card enters view'
+                : 'No reliable representative crop'}
           </p>
         ) : null}
       </div>
@@ -146,7 +210,12 @@ export function EntityCard({
           </>
         ) : null}
       </div>
-      <details className="technical">
+      <details
+        className="technical"
+        onToggle={(event) => {
+          if (event.currentTarget.open) requestPreviewAfterExpansion();
+        }}
+      >
         <summary>Technical details</summary>
         <pre>
           {JSON.stringify(
@@ -179,22 +248,107 @@ export function EntityCard({
   );
 }
 
-function representativeBBox(entity: EffectiveEntity): number[] | null {
+export function EntityCropButton({
+  compact,
+  crop,
+  entity,
+  imageKey,
+  onImageStatusChange,
+  onJump,
+  onRetryPreview,
+}: EntityCropButtonProps) {
+  const path = typeof crop.path === 'string' ? crop.path : '';
+  const statusKey = imageKey || `${entity.entity_id}:${path}:${crop.source_frame ?? ''}`;
+  const [imageStatus, setImageStatus] = useState<EntityPreviewImageStatus>(path ? 'loading' : 'error');
+  const [retryVersion, setRetryVersion] = useState(0);
+  const sourceFrame = crop.source_frame ?? entity.representative_source_frame ?? '?';
+  const canRetry = Boolean(path && onRetryPreview && imageStatus === 'error');
+  const canJump = Boolean(path && imageStatus === 'loaded');
+  const imageSrc = path ? `/${path}${retryVersion ? `${path.includes('?') ? '&' : '?'}retry=${retryVersion}` : ''}` : '';
+
+  useEffect(() => {
+    setImageStatus(path ? 'loading' : 'error');
+  }, [path, crop.source_frame]);
+
+  useEffect(() => {
+    onImageStatusChange?.(statusKey, imageStatus);
+  }, [imageStatus, onImageStatusChange, statusKey]);
+
+  const handleClick = () => {
+    if (canRetry) {
+      setRetryVersion((version) => version + 1);
+      setImageStatus('loading');
+      onRetryPreview?.();
+      return;
+    }
+    if (canJump) onJump(cropEntityTarget(entity, crop));
+  };
+
+  const placeholderText = !path
+    ? 'No reliable representative crop'
+    : imageStatus === 'error'
+      ? canRetry
+        ? 'Preview image unavailable. Retry preview'
+        : 'Preview image unavailable'
+      : 'Loading preview';
+  const className = [
+    'thumbnail-button',
+    compact ? 'thumbnail-button-compact' : '',
+    `image-${imageStatus}`,
+    canRetry ? 'preview-retry-button' : '',
+  ].filter(Boolean).join(' ');
+
+  return (
+    <button
+      type="button"
+      className={className}
+      aria-busy={imageStatus === 'loading' ? 'true' : 'false'}
+      aria-disabled={!canJump && !canRetry ? 'true' : undefined}
+      aria-label={
+        canRetry
+          ? `Retry preview for ${entity.label}`
+          : canJump
+            ? `Jump to ${entity.label} source frame ${sourceFrame}`
+            : `${entity.label} preview loading`
+      }
+      onClick={handleClick}
+      title={
+        canRetry
+          ? `Retry preview for ${entity.label}`
+          : canJump
+            ? `Jump to source frame ${sourceFrame}`
+            : placeholderText
+      }
+    >
+      {path ? (
+        <img
+          src={imageSrc}
+          alt=""
+          aria-hidden="true"
+          draggable={false}
+          onLoad={() => setImageStatus('loaded')}
+          onError={() => setImageStatus('error')}
+        />
+      ) : null}
+      {imageStatus !== 'loaded' ? (
+        <span className="thumbnail-placeholder thumbnail-image-state">
+          {imageStatus === 'loading' ? <span className="inline-spinner" aria-hidden="true" /> : null}
+          <span>{placeholderText}</span>
+        </span>
+      ) : null}
+      <span className="crop-frame">F{sourceFrame}</span>
+    </button>
+  );
+}
+
+export function representativeBBox(entity: EffectiveEntity): number[] | null {
   if (Array.isArray(entity.representative_bbox) && entity.representative_bbox.length === 4) return entity.representative_bbox;
   const quality = entity.representative_quality as Record<string, unknown> | undefined;
   const bbox = quality?.bbox_xyxy;
   return Array.isArray(bbox) && bbox.length === 4 ? bbox : null;
 }
 
-interface RepresentativeCrop {
-  bbox_xyxy?: number[];
-  crop_role?: string;
-  path?: string;
-  raw_tracklet_id?: string;
-  source_frame?: number;
-}
-
-function representativeCrops(entity: EffectiveEntity): RepresentativeCrop[] {
+export function representativeCrops(entity: EffectiveEntity): RepresentativeCrop[] {
   const status = previewStatusValue(entity);
   const crops = Array.isArray(entity.representative_crops)
     ? entity.representative_crops
@@ -214,12 +368,12 @@ function representativeCrops(entity: EffectiveEntity): RepresentativeCrop[] {
   return [];
 }
 
-function previewStatusValue(entity: EffectiveEntity): string {
+export function previewStatusValue(entity: EffectiveEntity): string {
   const status = entity.preview_status?.status;
   return typeof status === 'string' ? status : 'NOT_PREPARED';
 }
 
-function cropEntityTarget(entity: EffectiveEntity, crop: RepresentativeCrop): EffectiveEntity {
+export function cropEntityTarget(entity: EffectiveEntity, crop: RepresentativeCrop): EffectiveEntity {
   return {
     ...entity,
     representative_bbox: crop.bbox_xyxy || entity.representative_bbox,

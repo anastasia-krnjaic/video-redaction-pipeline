@@ -4,6 +4,7 @@ import type {
   Correction,
   CorrectionPreview,
   Entity,
+  EntityIndex,
   FinalizationStatus,
   MediaVersion,
   MaterializationJob,
@@ -68,6 +69,10 @@ async function postJson<T>(path: string, payload: unknown): Promise<T> {
 
 export function loadWorkspace(): Promise<WorkspaceSummary> {
   return getJson<WorkspaceSummary>(`${API_PREFIX}/workspace/summary`);
+}
+
+export function loadEntityIndex(sessionId: string): Promise<EntityIndex> {
+  return getJson<EntityIndex>(`${API_PREFIX}/entities?session_id=${encodeURIComponent(sessionId)}`);
 }
 
 export function loadSessionState(sessionId: string): Promise<SessionState> {

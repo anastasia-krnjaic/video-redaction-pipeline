@@ -1543,6 +1543,46 @@ def test_visual_descriptor_and_candidate_selectivity_are_content_based(tmp_path:
     assert all(candidate["category"] == CATEGORY_FACE for candidate in candidates)
 
 
+def test_source_descriptors_remain_authoritative_after_preview_cache(tmp_path: Path) -> None:
+    left = refinement_entity(
+        "night",
+        "stable_face_a",
+        "Person A",
+        descriptor_values=descriptor(0),
+        start=0,
+        end=1,
+    )
+    right = refinement_entity(
+        "night",
+        "stable_face_b",
+        "Person B",
+        descriptor_values=descriptor(0),
+        start=4,
+        end=5,
+    )
+    preview_crop = {
+        "bbox_xyxy": [10, 10, 30, 30],
+        "crop_role": "best_middle",
+        "metadata_schema_version": entity_refinement.DERIVED_PREVIEW_METADATA_VERSION,
+        "path": "entities/night/derived_thumbnails/cache.jpg",
+        "quality_state": "REPRESENTATIVE",
+        "source_frame": 0,
+        "visual_descriptor": descriptor(1),
+        "visual_descriptor_version": entity_refinement.VISUAL_DESCRIPTOR_VERSION,
+    }
+    left["representative_crops"] = [preview_crop]
+    right["representative_crops"] = [preview_crop | {"source_frame": 4}]
+
+    candidate = entity_refinement.deterministic_candidate(
+        "candidate_stable_descriptor",
+        left,
+        right,
+    )
+
+    assert candidate["has_visual_evidence"] is True
+    assert candidate["similarity"] == 1.0
+
+
 def test_temporal_conflict_dominates_visual_similarity(tmp_path: Path) -> None:
     left = refinement_entity(
         "night",

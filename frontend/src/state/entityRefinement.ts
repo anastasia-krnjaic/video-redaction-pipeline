@@ -5,6 +5,10 @@ export const PURITY_PURE = 'PURE';
 export const PURITY_LIKELY_MIXED = 'LIKELY_MIXED';
 export const PURITY_LOW_QUALITY = 'LOW_QUALITY';
 export const PURITY_UNVERIFIED = 'UNVERIFIED';
+export const CANDIDATE_POSSIBLE = 'POSSIBLE_CANDIDATE';
+export const CANDIDATE_REJECT_TEMPORAL_CONFLICT = 'REJECT_TEMPORAL_CONFLICT';
+export const CANDIDATE_REJECT_VISUAL_MISMATCH = 'REJECT_VISUAL_MISMATCH';
+export const CANDIDATE_INSUFFICIENT = 'INSUFFICIENT_EVIDENCE';
 
 export type EntityPurity =
   | typeof PURITY_PURE
@@ -18,6 +22,16 @@ export type EntitySection =
   | 'Unverified fragments'
   | 'Low-quality / likely false positives'
   | 'Likely mixed';
+
+export interface SourceFrameRange {
+  end: number;
+  start: number;
+}
+
+export interface EntityConflictRange extends SourceFrameRange {
+  entityIds: string[];
+  labels: string[];
+}
 
 const policyRank: Record<string, number> = {
   not_sensitive: 0,
@@ -103,10 +117,99 @@ export function mergeSelectedEligibility(entities: EffectiveEntity[]): { enabled
   if (entities.some((entity) => entityPurity(entity) === PURITY_LIKELY_MIXED)) {
     return { enabled: false, reason: 'Split mixed entities before merging.' };
   }
-  if (anyOverlap(entities)) {
-    return { enabled: false, reason: 'Selected objects have simultaneous source-frame conflict.' };
+  const conflicts = temporalConflictRangesForEntities(entities);
+  if (conflicts.length) {
+    return {
+      enabled: false,
+      reason: `Selected objects coexist on source frame${pluralFrameRanges(conflicts)} ${formatFrameRanges(conflicts)}, so they cannot be the same identity.`,
+    };
   }
   return { enabled: true, reason: 'Merge selected review objects.' };
+}
+
+export function temporalConflictRangesForEntities(entities: EffectiveEntity[]): EntityConflictRange[] {
+  const ranges: EntityConflictRange[] = [];
+  for (let index = 0; index < entities.length; index += 1) {
+    for (let other = index + 1; other < entities.length; other += 1) {
+      const range = overlapRange(entities[index], entities[other]);
+      if (!range) continue;
+      ranges.push({
+        ...range,
+        entityIds: [entities[index].entity_id, entities[other].entity_id],
+        labels: [entities[index].label, entities[other].label],
+      });
+    }
+  }
+  return ranges;
+}
+
+export function candidateAcceptEligibility(candidate: Record<string, unknown>): { enabled: boolean; reason: string } {
+  const classification = String(candidate.classification || CANDIDATE_INSUFFICIENT);
+  if (classification === CANDIDATE_POSSIBLE) return { enabled: true, reason: 'Reviewer may accept this visual merge candidate.' };
+  if (classification === CANDIDATE_REJECT_TEMPORAL_CONFLICT) {
+    return {
+      enabled: false,
+      reason: `These objects coexist on source frame${pluralFrameRanges(candidateConflictRanges(candidate))} ${formatFrameRanges(candidateConflictRanges(candidate))}, so they cannot be the same identity.`,
+    };
+  }
+  if (classification === CANDIDATE_REJECT_VISUAL_MISMATCH) {
+    return { enabled: false, reason: 'Visual evidence points to different objects; merge acceptance is disabled.' };
+  }
+  return { enabled: false, reason: 'Insufficient visual evidence to merge safely; this is not a temporal conflict.' };
+}
+
+export function candidateExplanation(candidate: Record<string, unknown>): string {
+  const classification = String(candidate.classification || CANDIDATE_INSUFFICIENT);
+  if (classification === CANDIDATE_POSSIBLE) {
+    return 'Possible visual match. The similarity score is only a triage signal; accept only after comparing representative crops and source frames.';
+  }
+  if (classification === CANDIDATE_REJECT_TEMPORAL_CONFLICT) {
+    return `Temporal conflict: the objects coexist on source frame${pluralFrameRanges(candidateConflictRanges(candidate))} ${formatFrameRanges(candidateConflictRanges(candidate))}, so they cannot be the same identity.`;
+  }
+  if (classification === CANDIDATE_REJECT_VISUAL_MISMATCH) {
+    return 'Visual evidence does not match closely enough for a safe merge.';
+  }
+  return 'Insufficient visual evidence: there is not enough reliable preview evidence to merge safely.';
+}
+
+export function candidateConflictRanges(candidate: Record<string, unknown>): SourceFrameRange[] {
+  const entityIds = candidateEntityIds(candidate);
+  const intervals = dict(candidate.source_intervals);
+  if (entityIds.length >= 2 && intervals) {
+    const ranges = entityIds
+      .map((entityId) => sourceFrameRangeFromValue(intervals[entityId]))
+      .filter((range): range is SourceFrameRange => Boolean(range));
+    if (ranges.length >= 2) {
+      let start = ranges[0].start;
+      let end = ranges[0].end;
+      for (const range of ranges.slice(1)) {
+        start = Math.max(start, range.start);
+        end = Math.min(end, range.end);
+      }
+      if (start <= end) return [{ start, end }];
+    }
+  }
+  const sampleFrames = Array.isArray(candidate.temporal_conflict_sample_frames)
+    ? candidate.temporal_conflict_sample_frames
+      .map((frame) => (typeof frame === 'number' && Number.isFinite(frame) ? Math.trunc(frame) : null))
+      .filter((frame): frame is number => frame !== null)
+      .sort((left, right) => left - right)
+    : [];
+  return compactFramesToRanges(sampleFrames);
+}
+
+export function firstCandidateConflictFrame(candidate: Record<string, unknown>): number | null {
+  const range = candidateConflictRanges(candidate)[0];
+  if (range) return range.start;
+  const frame = Array.isArray(candidate.temporal_conflict_sample_frames)
+    ? candidate.temporal_conflict_sample_frames.find((item) => typeof item === 'number' && Number.isFinite(item))
+    : null;
+  return typeof frame === 'number' ? Math.trunc(frame) : null;
+}
+
+export function formatFrameRanges(ranges: SourceFrameRange[]): string {
+  if (!ranges.length) return 'unknown';
+  return ranges.map((range) => (range.start === range.end ? String(range.start) : `${range.start}-${range.end}`)).join(', ');
 }
 
 export function rejectedCandidateIds(events: AuditEvent[]): Set<string> {
@@ -144,20 +247,44 @@ function isPurity(value: unknown): value is EntityPurity {
   );
 }
 
-function anyOverlap(entities: EffectiveEntity[]): boolean {
-  for (let index = 0; index < entities.length; index += 1) {
-    for (let other = index + 1; other < entities.length; other += 1) {
-      if (overlap(entities[index], entities[other])) return true;
-    }
-  }
-  return false;
-}
-
-function overlap(left: EffectiveEntity, right: EffectiveEntity): boolean {
+function overlapRange(left: EffectiveEntity, right: EffectiveEntity): SourceFrameRange | null {
   const l1 = left.first_visible_source_frame;
   const l2 = left.last_visible_source_frame;
   const r1 = right.first_visible_source_frame;
   const r2 = right.last_visible_source_frame;
-  if ([l1, l2, r1, r2].some((value) => typeof value !== 'number')) return false;
-  return Math.max(l1 as number, r1 as number) <= Math.min(l2 as number, r2 as number);
+  if ([l1, l2, r1, r2].some((value) => typeof value !== 'number')) return null;
+  const start = Math.max(l1 as number, r1 as number);
+  const end = Math.min(l2 as number, r2 as number);
+  return start <= end ? { start, end } : null;
+}
+
+function sourceFrameRangeFromValue(value: unknown): SourceFrameRange | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const start = typeof value[0] === 'number' && Number.isFinite(value[0]) ? Math.trunc(value[0]) : null;
+  const end = typeof value[1] === 'number' && Number.isFinite(value[1]) ? Math.trunc(value[1]) : null;
+  if (start === null || end === null) return null;
+  return start <= end ? { start, end } : { start: end, end: start };
+}
+
+function compactFramesToRanges(frames: number[]): SourceFrameRange[] {
+  const unique = [...new Set(frames)].sort((left, right) => left - right);
+  const ranges: SourceFrameRange[] = [];
+  for (const frame of unique) {
+    const last = ranges[ranges.length - 1];
+    if (last && frame === last.end + 1) {
+      last.end = frame;
+    } else {
+      ranges.push({ start: frame, end: frame });
+    }
+  }
+  return ranges;
+}
+
+function dict(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function pluralFrameRanges(ranges: SourceFrameRange[]): string {
+  if (ranges.length === 1 && ranges[0].start === ranges[0].end) return '';
+  return 's';
 }

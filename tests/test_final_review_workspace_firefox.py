@@ -4,12 +4,13 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import urllib.request
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+import cv2 as cv
+import numpy as np
 import pytest
 
 from redactor import case_manifests, entity_refinement, media, review_workspace
@@ -132,29 +133,29 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
 
 
 def write_synthetic_video(path: Path) -> None:
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise FileNotFoundError("ffmpeg was not found on PATH")
     path.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-y",
-            "-f",
-            "lavfi",
-            "-i",
-            "testsrc2=duration=1:size=96x64:rate=10",
-            "-c:v",
-            "mpeg4",
-            "-pix_fmt",
-            "yuv420p",
-            str(path),
-        ],
-        check=True,
+    writer = cv.VideoWriter(
+        str(path),
+        cv.VideoWriter_fourcc(*"mp4v"),
+        10,
+        (96, 64),
     )
+    if not writer.isOpened():
+        raise RuntimeError(f"could not create synthetic video: {path}")
+    try:
+        for frame_number in range(10):
+            frame = np.full((64, 96, 3), 32, dtype=np.uint8)
+            if frame_number in {0, 4}:
+                cv.rectangle(frame, (10, 10), (30, 30), (0, 0, 220), -1)
+            if frame_number in {2, 7}:
+                cv.rectangle(frame, (10, 10), (30, 30), (0, 180, 0), -1)
+            if frame_number in {1, 3}:
+                cv.rectangle(frame, (10, 10), (30, 30), (220, 0, 0), -1)
+            if frame_number in {3, 4, 5}:
+                cv.rectangle(frame, (40, 10), (60, 30), (0, 180, 180), -1)
+            writer.write(frame)
+    finally:
+        writer.release()
 
 
 def write_case(package: Path, case_id: str) -> case_manifests.CaseManifest:
@@ -627,6 +628,8 @@ def write_entity_refinement_firefox_workspace(package: Path) -> str:
         ("entities/night/thumbnails/night_person_01.svg", "#047857", "01"),
         ("entities/night/thumbnails/night_person_12.svg", "#0891b2", "12"),
         ("entities/night/thumbnails/night_person_09.svg", "#7c3aed", "09"),
+        ("entities/night/thumbnails/night_conflict_a.svg", "#be123c", "CA"),
+        ("entities/night/thumbnails/night_conflict_b.svg", "#c2410c", "CB"),
     ):
         write_svg_thumbnail(package, relative_path, color=color, label=label)
 
@@ -718,6 +721,22 @@ def write_entity_refinement_firefox_workspace(package: Path) -> str:
                     descriptor_values=firefox_descriptor(1),
                     start=7,
                     end=8,
+                ),
+                refinement_firefox_entity(
+                    "night",
+                    "night_conflict_a",
+                    "Conflict A",
+                    descriptor_values=firefox_descriptor(2),
+                    start=1,
+                    end=4,
+                ),
+                refinement_firefox_entity(
+                    "night",
+                    "night_conflict_b",
+                    "Conflict B",
+                    descriptor_values=firefox_descriptor(2),
+                    start=3,
+                    end=6,
                 ),
             ],
         },
@@ -831,14 +850,24 @@ def test_final_review_workspace_firefox_entity_refinement_v1(tmp_path: Path) -> 
                 entity_dialog = page.get_by_role("dialog", name="Review objects")
                 entity_dialog.wait_for(state="visible", timeout=5_000)
                 entity_dialog.get_by_role("button", name="People").click()
+                assert entity_dialog.get_by_role("button", name="Load previews").count() == 0
                 mixed = entity_dialog.locator(
                     '.entity-card[data-entity-id="entity_merged_bd6717c585d53525a416bb90"]'
                 )
                 mixed.wait_for(state="visible", timeout=5_000)
+                page.wait_for_function(
+                    """
+                    () => Boolean(document.querySelector(
+                      '.entity-card[data-entity-id="entity_merged_bd6717c585d53525a416bb90"] img[src*="derived_thumbnails"]'
+                    ))
+                    """,
+                    timeout=10_000,
+                )
                 assert mixed.get_attribute("data-purity") == "LIKELY_MIXED"
                 assert mixed.locator('[data-policy="redact"]').is_enabled()
                 assert mixed.locator('[data-policy="keep_visible"]').is_disabled()
                 assert mixed.locator('[data-policy="not_sensitive"]').is_disabled()
+                record_step(report, "day_automatic_visible_preview")
                 with page.expect_response(
                     lambda response: "/api/v1/entity-refinement/split-mixed" in response.url
                 ) as split_response:
@@ -857,27 +886,116 @@ def test_final_review_workspace_firefox_entity_refinement_v1(tmp_path: Path) -> 
                 record_step(report, "day_mixed_split_workflow")
 
                 entity_dialog.get_by_role("button", name="Close").last.click()
+                failed_preview_image = {"used": False}
+
+                def fail_one_preview_image(route: Any) -> None:
+                    if not failed_preview_image["used"]:
+                        failed_preview_image["used"] = True
+                        route.abort()
+                        return
+                    route.continue_()
+
+                page.route(
+                    "**/entities/night/derived_thumbnails/*.jpg**",
+                    fail_one_preview_image,
+                )
                 page.get_by_role("button", name="Night").click()
                 page.get_by_role("button", name="Entities").click()
                 entity_dialog = page.get_by_role("dialog", name="Review objects")
                 entity_dialog.wait_for(state="visible", timeout=5_000)
                 entity_dialog.get_by_role("button", name="People").click()
                 before_reject_count = entity_dialog.locator(".entity-card").count()
-                assert entity_dialog.locator(".candidate-group-card").count() >= 2
+                page.wait_for_function(
+                    """
+                    () => document.querySelectorAll('.entity-card .thumbnail-button.image-loaded').length >= 2
+                    """,
+                    timeout=10_000,
+                )
+                assert entity_dialog.locator(".candidate-group-card").count() >= 3
+                possible_cards = entity_dialog.locator(
+                    ".candidate-group-card",
+                    has_text="Possible merge",
+                )
+                assert possible_cards.count() >= 2
+                first_possible = possible_cards.first
+                first_possible.wait_for(state="visible", timeout=5_000)
+                entity_dialog.get_by_text("Preview image unavailable").first.wait_for(
+                    state="visible", timeout=5_000
+                )
+                assert "similarity score is only a triage signal" in first_possible.inner_text()
+                entity_dialog.get_by_role(
+                    "button", name=re.compile("Retry preview for")
+                ).first.click()
+                page.wait_for_function(
+                    """
+                    () => document.querySelectorAll(
+                      '.candidate-group-card[data-evidence-ready="true"]'
+                    ).length >= 2
+                    """,
+                    timeout=10_000,
+                )
+                assert first_possible.locator(".candidate-comparison-grid").is_visible()
+                assert first_possible.locator(".candidate-evidence-side").count() == 2
+                assert first_possible.locator(".candidate-evidence-crops img").count() >= 2
+                assert first_possible.get_by_role(
+                    "button", name="Accept merge candidate"
+                ).is_enabled()
+                assert possible_cards.nth(1).get_by_role(
+                    "button", name="Accept merge candidate"
+                ).is_enabled()
+                record_step(report, "night_candidate_comparison_evidence_and_retry")
+                conflict_card = entity_dialog.locator(
+                    ".candidate-group-card",
+                    has_text="Temporal conflict",
+                ).first
+                conflict_card.wait_for(state="visible", timeout=5_000)
+                assert "coexist" in conflict_card.inner_text()
+                assert "3-4" in conflict_card.inner_text()
+                assert conflict_card.get_by_role(
+                    "button", name="Accept merge candidate"
+                ).is_disabled()
+                assert conflict_card.get_by_role(
+                    "button", name="Reject candidate"
+                ).is_enabled()
+                conflict_card.get_by_role(
+                    "button", name=re.compile("Inspect conflict frames")
+                ).click()
+                entity_dialog.wait_for(state="hidden", timeout=5_000)
+                wait_for_timeline_frame(page, "night", {"3"})
+                record_step(report, "night_temporal_conflict_explained_and_seeked")
+
+                page.get_by_role("button", name="Entities").click()
+                entity_dialog = page.get_by_role("dialog", name="Review objects")
+                entity_dialog.wait_for(state="visible", timeout=5_000)
+                entity_dialog.get_by_role("button", name="People").click()
+                possible_card = entity_dialog.locator(
+                    '.candidate-group-card[data-evidence-ready="true"]',
+                    has_text="Possible merge",
+                ).first
+                possible_card.wait_for(state="visible", timeout=5_000)
                 with page.expect_response(
                     lambda response: "/api/v1/entity-refinement/reject-merge" in response.url
                 ) as reject_response:
-                    entity_dialog.locator(".candidate-group-card").first.get_by_role(
-                        "button", name="Reject"
-                    ).click()
+                    possible_card.get_by_role("button", name="Reject candidate").click()
                 reject_payload = reject_response.value.json()
                 assert reject_payload["event"]["event_type"] == "entity_merge_candidate_rejected"
                 assert entity_dialog.locator(".entity-card").count() == before_reject_count
+                page.wait_for_function(
+                    """
+                    () => document.querySelectorAll('.candidate-group-card').length === 2
+                    """,
+                    timeout=5_000,
+                )
 
+                possible_card = entity_dialog.locator(
+                    '.candidate-group-card[data-evidence-ready="true"]',
+                    has_text="Possible merge",
+                ).first
+                possible_card.wait_for(state="visible", timeout=5_000)
                 with page.expect_response(
                     lambda response: "/api/v1/entity-refinement/accept-merge" in response.url
                 ) as accept_response:
-                    entity_dialog.locator(".candidate-group-card").first.get_by_role(
+                    possible_card.get_by_role(
                         "button", name="Accept merge candidate"
                     ).click()
                 accept_payload = accept_response.value.json()

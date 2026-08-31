@@ -1579,25 +1579,46 @@ def deterministic_visual_similarity(left: dict[str, Any], right: dict[str, Any])
 
 
 def entity_visual_descriptors(entity: dict[str, Any]) -> list[tuple[float, ...]]:
-    descriptors: list[tuple[float, ...]] = []
-    for crop in representative_crops(entity):
-        descriptor = crop.get("visual_descriptor")
-        if isinstance(descriptor, list) and descriptor:
-            try:
-                descriptors.append(tuple(float(item) for item in descriptor))
-            except (TypeError, ValueError):
-                continue
+    stable_descriptors: list[tuple[float, ...]] = []
+    preview_descriptors: list[tuple[float, ...]] = []
+    collect_visual_descriptors(
+        representative_crops(entity),
+        stable_descriptors=stable_descriptors,
+        preview_descriptors=preview_descriptors,
+    )
     for tracklet in list(entity.get("raw_tracklets") or []):
         if not isinstance(tracklet, dict):
             continue
-        for crop in representative_crops(tracklet):
-            descriptor = crop.get("visual_descriptor")
-            if isinstance(descriptor, list) and descriptor:
-                try:
-                    descriptors.append(tuple(float(item) for item in descriptor))
-                except (TypeError, ValueError):
-                    continue
-    return descriptors[:9]
+        collect_visual_descriptors(
+            representative_crops(tracklet),
+            stable_descriptors=stable_descriptors,
+            preview_descriptors=preview_descriptors,
+        )
+    return (stable_descriptors or preview_descriptors)[:9]
+
+
+def collect_visual_descriptors(
+    crops: list[dict[str, Any]],
+    *,
+    stable_descriptors: list[tuple[float, ...]],
+    preview_descriptors: list[tuple[float, ...]],
+) -> None:
+    for crop in crops:
+        descriptor = crop.get("visual_descriptor")
+        if not isinstance(descriptor, list) or not descriptor:
+            continue
+        try:
+            parsed = tuple(float(item) for item in descriptor)
+        except (TypeError, ValueError):
+            continue
+        if crop_uses_derived_preview_cache(crop):
+            preview_descriptors.append(parsed)
+        else:
+            stable_descriptors.append(parsed)
+
+
+def crop_uses_derived_preview_cache(crop: dict[str, Any]) -> bool:
+    return str(crop.get("metadata_schema_version") or "") == DERIVED_PREVIEW_METADATA_VERSION
 
 
 def ensure_crop_descriptor(crop: dict[str, Any], *, package_root: Path | None) -> dict[str, Any]:

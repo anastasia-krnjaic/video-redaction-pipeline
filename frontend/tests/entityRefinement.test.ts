@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  candidateAcceptEligibility,
+  candidateConflictRanges,
   candidateEntityIds,
+  candidateExplanation,
   entityPurity,
+  firstCandidateConflictFrame,
   mergeSelectedEligibility,
   mostProtectivePolicy,
   policyAllowed,
   sectionEntities,
+  temporalConflictRangesForEntities,
   visibleCandidateMatches,
 } from '../src/state/entityRefinement';
 import type { AuditEvent } from '../src/types/api';
@@ -86,8 +91,11 @@ describe('entity refinement UI helpers', () => {
     expect(mergeSelectedEligibility(entities.slice(0, 2)).enabled).toBe(true);
     expect(mergeSelectedEligibility(overlapping)).toEqual({
       enabled: false,
-      reason: 'Selected objects have simultaneous source-frame conflict.',
+      reason: 'Selected objects coexist on source frames 15-20, so they cannot be the same identity.',
     });
+    expect(temporalConflictRangesForEntities(overlapping)).toEqual([
+      { end: 20, entityIds: ['left', 'right'], labels: ['Person 01', 'Person 01'], start: 15 },
+    ]);
     expect(mergeSelectedEligibility(mixedSelection)).toEqual({
       enabled: false,
       reason: 'Split mixed entities before merging.',
@@ -132,5 +140,49 @@ describe('entity refinement UI helpers', () => {
       'night_person_01',
     ]);
     expect(visibleCandidateMatches(left, [rejected])).toHaveLength(0);
+  });
+
+  it('explains disabled candidate actions differently for conflicts and weak evidence', () => {
+    const temporal = {
+      candidate_id: 'candidate_conflict',
+      classification: 'REJECT_TEMPORAL_CONFLICT',
+      entity_ids: ['left', 'right'],
+      similarity: 0.94,
+      source_intervals: {
+        left: [10, 20],
+        right: [15, 25],
+      },
+      temporal_conflict_sample_frames: [15, 16, 17, 18, 19],
+    };
+    const insufficient = {
+      candidate_id: 'candidate_weak',
+      classification: 'INSUFFICIENT_EVIDENCE',
+      entity_ids: ['one', 'two'],
+      similarity: 0.72,
+    };
+    const possible = {
+      candidate_id: 'candidate_possible',
+      classification: 'POSSIBLE_CANDIDATE',
+      entity_ids: ['one', 'two'],
+      similarity: 0.94,
+    };
+
+    expect(candidateConflictRanges(temporal)).toEqual([{ end: 20, start: 15 }]);
+    expect(firstCandidateConflictFrame(temporal)).toBe(15);
+    expect(candidateAcceptEligibility(temporal)).toEqual({
+      enabled: false,
+      reason: 'These objects coexist on source frames 15-20, so they cannot be the same identity.',
+    });
+    expect(candidateExplanation(temporal)).toContain('Temporal conflict');
+    expect(candidateAcceptEligibility(insufficient)).toEqual({
+      enabled: false,
+      reason: 'Insufficient visual evidence to merge safely; this is not a temporal conflict.',
+    });
+    expect(candidateExplanation(insufficient)).toContain('Insufficient visual evidence');
+    expect(candidateAcceptEligibility(possible)).toEqual({
+      enabled: true,
+      reason: 'Reviewer may accept this visual merge candidate.',
+    });
+    expect(candidateExplanation(possible)).toContain('similarity score is only a triage signal');
   });
 });

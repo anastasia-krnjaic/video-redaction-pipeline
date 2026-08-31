@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   acceptMergeCandidate,
   acknowledgeFullVideoSweep,
   createCheckpoint,
   deleteCheckpoint,
+  loadEntityIndex,
   loadFinalizationStatus,
   loadMaterializationJob,
   prepareEntityPreviews,
@@ -123,6 +124,32 @@ interface TrackedMaterializationJob {
   preserveFrame: number;
 }
 
+interface EntityPreviewQueueItem {
+  entity: EffectiveEntity;
+  force: boolean;
+  manual: boolean;
+  sessionId: string;
+}
+
+const ENTITY_PREVIEW_CONCURRENCY = 3;
+const activeEntityPreviewPrepareKeys = new Set<string>();
+const entityPreviewQueueDrainers = new Set<() => void>();
+
+function entityPreviewPrepareKey(item: EntityPreviewQueueItem): string {
+  return `${item.sessionId}:${item.entity.case_id}:${item.entity.entity_id}`;
+}
+
+function reserveEntityPreviewPrepare(key: string): boolean {
+  if (activeEntityPreviewPrepareKeys.size >= ENTITY_PREVIEW_CONCURRENCY) return false;
+  activeEntityPreviewPrepareKeys.add(key);
+  return true;
+}
+
+function releaseEntityPreviewPrepare(key: string): void {
+  if (!activeEntityPreviewPrepareKeys.delete(key)) return;
+  for (const drain of entityPreviewQueueDrainers) drain();
+}
+
 export function CaseReviewPage({
   attribution,
   caseId,
@@ -158,6 +185,7 @@ export function CaseReviewPage({
   const [pendingTaskIds, setPendingTaskIds] = useState<Set<string>>(() => new Set());
   const [pendingEntityIds, setPendingEntityIds] = useState<Set<string>>(() => new Set());
   const [pendingPreviewEntityIds, setPendingPreviewEntityIds] = useState<Set<string>>(() => new Set());
+  const [previewErrorsByEntity, setPreviewErrorsByEntity] = useState<Record<string, string>>({});
   const [entityPreviewOverrides, setEntityPreviewOverrides] = useState<Record<string, EffectiveEntity>>({});
   const [latestRole, setLatestRole] = useState<MediaVersion | undefined>();
   const [deferredLatestRole, setDeferredLatestRole] = useState<MediaVersion | undefined>();
@@ -189,6 +217,14 @@ export function CaseReviewPage({
   const controllerPlayingRef = useRef(false);
   const caseFrameValueRef = useRef(caseFrame);
   const editDraftContextRef = useRef<string | null>(null);
+  const activePreviewEntityIdsRef = useRef<Set<string>>(new Set());
+  const attributionRef = useRef(attribution);
+  const caseIdRef = useRef(caseId);
+  const mountedRef = useRef(true);
+  const previewErrorsByEntityRef = useRef(previewErrorsByEntity);
+  const previewQueueRef = useRef<EntityPreviewQueueItem[]>([]);
+  const queuedPreviewEntityIdsRef = useRef<Set<string>>(new Set());
+  const sessionRef = useRef(session);
 
   const allTasks = useMemo(
     () => [...baseTasks, ...manualTasks].filter((task) => task.case_id === caseId),
@@ -225,20 +261,25 @@ export function CaseReviewPage({
     return countsByEntity;
   }, [taskRows]);
   const entityPanelOverrides = useMemo(() => {
-    const merged: Record<string, EffectiveEntity> = { ...entityOverrides };
-    for (const [entityId, preview] of Object.entries(entityPreviewOverrides)) {
-      merged[entityId] = {
-        ...(merged[entityId] || {}),
-        ...preview,
-      } as EffectiveEntity;
+    const merged: Record<string, EffectiveEntity> = { ...entityPreviewOverrides };
+    for (const [entityId, override] of Object.entries(entityOverrides)) {
+      merged[entityId] = mergeEntityPresentationOverride(merged[entityId], override);
     }
     return merged;
   }, [entityOverrides, entityPreviewOverrides]);
 
   useEffect(() => {
+    previewQueueRef.current = [];
+    queuedPreviewEntityIdsRef.current.clear();
     setEntityPreviewOverrides({});
     setPendingPreviewEntityIds(new Set());
+    setPreviewErrorsByEntity({});
   }, [caseId, session?.session_id]);
+  useEffect(() => () => {
+    mountedRef.current = false;
+    previewQueueRef.current = [];
+    queuedPreviewEntityIdsRef.current.clear();
+  }, []);
 
   const roles = useMemo(() => {
     const sessionLatestRole = previewRole || latestRole || materializedLatestRole;
@@ -327,6 +368,14 @@ export function CaseReviewPage({
   });
 
   useEffect(() => {
+    attributionRef.current = attribution;
+  }, [attribution]);
+
+  useEffect(() => {
+    caseIdRef.current = caseId;
+  }, [caseId]);
+
+  useEffect(() => {
     eventsRef.current = events;
   }, [events]);
 
@@ -351,8 +400,16 @@ export function CaseReviewPage({
   }, [onWorkingStateChange]);
 
   useEffect(() => {
+    previewErrorsByEntityRef.current = previewErrorsByEntity;
+  }, [previewErrorsByEntity]);
+
+  useEffect(() => {
     selectedRoleValueRef.current = selectedRole;
   }, [selectedRole]);
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
 
   useEffect(() => {
     taskResolutionsRef.current = taskResolutions;
@@ -1120,32 +1177,152 @@ export function CaseReviewPage({
     }
   };
 
-  const loadEntityPreviews = async (entity: EffectiveEntity) => {
-    if (!session) {
-      onError('Start review before loading entity previews.');
+  const clearPendingEntityPreview = useCallback((entityId: string) => {
+    setPendingPreviewEntityIds((current) => {
+      const next = new Set(current);
+      next.delete(entityId);
+      return next;
+    });
+  }, []);
+
+  const refreshEntityPresentation = useCallback((sessionId: string, refreshCaseId: CaseId) => {
+    void loadEntityIndex(sessionId)
+      .then((index) => {
+        if (sessionRef.current?.session_id !== sessionId || caseIdRef.current !== refreshCaseId) return;
+        const refreshedEntities = (index.cases?.[refreshCaseId] || []) as EffectiveEntity[];
+        if (!refreshedEntities.length) return;
+        setEntityPreviewOverrides((current) => {
+          const next: Record<string, EffectiveEntity> = { ...current };
+          let changed = false;
+          for (const entity of refreshedEntities) {
+            const entityId = String(entity.entity_id || '');
+            if (!entityId) continue;
+            next[entityId] = entity;
+            changed = true;
+          }
+          return changed ? next : current;
+        });
+      })
+      .catch(() => {
+        // Advisory refresh is presentation-only; explicit preview errors stay on the card.
+      });
+  }, []);
+
+  const drainEntityPreviewQueue = useCallback(() => {
+    if (!mountedRef.current) return;
+    const currentSession = sessionRef.current;
+    if (!currentSession) return;
+    while (activePreviewEntityIdsRef.current.size < ENTITY_PREVIEW_CONCURRENCY && previewQueueRef.current.length) {
+      const item = previewQueueRef.current.shift();
+      if (!item) return;
+      const entityId = item.entity.entity_id;
+      queuedPreviewEntityIdsRef.current.delete(entityId);
+      if (activePreviewEntityIdsRef.current.has(entityId)) continue;
+      if (sessionRef.current?.session_id !== item.sessionId || caseIdRef.current !== item.entity.case_id) {
+        clearPendingEntityPreview(entityId);
+        continue;
+      }
+      if (!item.force && !entityNeedsPreparedPreview(item.entity)) {
+        clearPendingEntityPreview(entityId);
+        continue;
+      }
+      const prepareKey = entityPreviewPrepareKey(item);
+      if (!reserveEntityPreviewPrepare(prepareKey)) {
+        queuedPreviewEntityIdsRef.current.add(entityId);
+        previewQueueRef.current.unshift(item);
+        return;
+      }
+
+      activePreviewEntityIdsRef.current.add(entityId);
+      void prepareEntityPreviews({
+        session_id: item.sessionId,
+        actor: attributionRef.current || { display_name: null },
+        case_id: item.entity.case_id,
+        entity_id: entityId,
+      })
+        .then((result) => {
+          if (!mountedRef.current || sessionRef.current?.session_id !== item.sessionId || caseIdRef.current !== item.entity.case_id) return;
+          setEntityPreviewOverrides((current) => ({
+            ...current,
+            [entityId]: result.entity,
+          }));
+          setPreviewErrorsByEntity((current) => {
+            if (!current[entityId]) return current;
+            const next = { ...current };
+            delete next[entityId];
+            return next;
+          });
+        })
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          if (mountedRef.current && sessionRef.current?.session_id === item.sessionId && caseIdRef.current === item.entity.case_id) {
+            setPreviewErrorsByEntity((current) => ({ ...current, [entityId]: message }));
+          }
+          if (item.manual) onError(`Entity previews were not loaded: ${message}`);
+        })
+        .finally(() => {
+          releaseEntityPreviewPrepare(prepareKey);
+          activePreviewEntityIdsRef.current.delete(entityId);
+          if (!mountedRef.current) return;
+          if (!queuedPreviewEntityIdsRef.current.has(entityId) && !activePreviewEntityIdsRef.current.has(entityId)) {
+            clearPendingEntityPreview(entityId);
+          }
+          drainEntityPreviewQueue();
+          if (
+            activePreviewEntityIdsRef.current.size === 0 &&
+            previewQueueRef.current.length === 0 &&
+            sessionRef.current?.session_id === item.sessionId &&
+            caseIdRef.current === item.entity.case_id
+          ) {
+            refreshEntityPresentation(item.sessionId, item.entity.case_id);
+          }
+        });
+    }
+  }, [clearPendingEntityPreview, onError, refreshEntityPresentation]);
+
+  const loadEntityPreviews = useCallback((entity: EffectiveEntity, options: { force?: boolean; manual?: boolean } = {}) => {
+    const currentSession = sessionRef.current;
+    if (!currentSession) {
+      if (options.manual) onError('Start review before loading entity previews.');
       return;
     }
-    setPendingPreviewEntityIds((current) => new Set([...current, entity.entity_id]));
-    try {
-      const result = await prepareEntityPreviews({
-        session_id: session.session_id,
-        actor: attribution || { display_name: null },
-        case_id: caseId,
-        entity_id: entity.entity_id,
-      });
-      setEntityPreviewOverrides((current) => ({
-        ...current,
-        [entity.entity_id]: result.entity,
-      }));
-    } catch (err) {
-      onError(`Entity previews were not loaded: ${err instanceof Error ? err.message : String(err)}`);
-    } finally {
-      setPendingPreviewEntityIds((current) => {
-        const next = new Set(current);
-        next.delete(entity.entity_id);
+    if (entity.case_id !== caseIdRef.current) return;
+    if (!options.force && previewErrorsByEntityRef.current[entity.entity_id]) return;
+    if (!options.force && !entityNeedsPreparedPreview(entity)) return;
+    if (activePreviewEntityIdsRef.current.has(entity.entity_id) || queuedPreviewEntityIdsRef.current.has(entity.entity_id)) return;
+
+    if (options.force) {
+      setPreviewErrorsByEntity((current) => {
+        if (!current[entity.entity_id]) return current;
+        const next = { ...current };
+        delete next[entity.entity_id];
         return next;
       });
     }
+    queuedPreviewEntityIdsRef.current.add(entity.entity_id);
+    previewQueueRef.current.push({
+      entity,
+      force: Boolean(options.force),
+      manual: Boolean(options.manual),
+      sessionId: currentSession.session_id,
+    });
+    setPendingPreviewEntityIds((current) => new Set([...current, entity.entity_id]));
+    drainEntityPreviewQueue();
+  }, [drainEntityPreviewQueue, onError]);
+
+  useEffect(() => {
+    entityPreviewQueueDrainers.add(drainEntityPreviewQueue);
+    return () => {
+      entityPreviewQueueDrainers.delete(drainEntityPreviewQueue);
+    };
+  }, [drainEntityPreviewQueue]);
+
+  const inspectEntitySourceFrame = (sourceFrame: number) => {
+    setEntitiesOpen(false);
+    setMergeSelection([]);
+    setFocusTarget(null);
+    controller.pause();
+    controller.seekToSourceFrame(sourceFrame);
   };
 
   const saveCorrection = async (correction: Correction, reason: string) => {
@@ -1640,11 +1817,13 @@ export function CaseReviewPage({
         overrides={entityPanelOverrides}
         pendingEntityIds={pendingEntityIds}
         pendingPreviewEntityIds={pendingPreviewEntityIds}
+        previewErrorsByEntity={previewErrorsByEntity}
         relatedTaskCountByEntity={relatedTaskCountByEntity}
         unresolvedCount={unresolvedCount}
         onAcceptCandidate={acceptCandidate}
         onClose={() => setEntitiesOpen(false)}
         onFilterChange={setEntityFilter}
+        onInspectFrame={inspectEntitySourceFrame}
         onJump={(entity) => {
           setEntitiesOpen(false);
           controller.pause();
@@ -1673,6 +1852,7 @@ export function CaseReviewPage({
         entities={mergeSelection}
         open={mergeSelection.length >= 2}
         onCancel={() => setMergeSelection([])}
+        onInspectFrame={inspectEntitySourceFrame}
         onMerge={merge}
       />
       {checkpointDeleteTarget ? (
@@ -1930,6 +2110,51 @@ function isTextEntryTarget(element: Element | null): boolean {
 function unresolvedEvidenceCount(workspace: WorkspaceSummary, caseId: CaseId): number {
   const byCase = workspace.entities.unresolved_evidence_by_case as Record<string, { fragment_count?: number } | undefined> | undefined;
   return Number(byCase?.[caseId]?.fragment_count || 0);
+}
+
+function mergeEntityPresentationOverride(preview: EffectiveEntity | undefined, authoritative: EffectiveEntity): EffectiveEntity {
+  if (!preview) return authoritative;
+  return {
+    ...preview,
+    ...authoritative,
+    ...entityPreviewPresentationFields(preview),
+  } as EffectiveEntity;
+}
+
+function entityPreviewPresentationFields(entity: EffectiveEntity): Partial<EffectiveEntity> {
+  const fields: Partial<EffectiveEntity> = {};
+  for (const key of [
+    'advisory_candidate_matches',
+    'entity_refinement',
+    'mixed_warning',
+    'preview_status',
+    'purity_classification',
+    'raw_tracklets',
+    'representative_bbox',
+    'representative_crops',
+    'representative_source_frame',
+    'representative_thumbnail_path',
+    'thumbnail_unavailable_reason',
+  ] as const) {
+    if (Object.prototype.hasOwnProperty.call(entity, key)) {
+      fields[key] = entity[key] as never;
+    }
+  }
+  return fields;
+}
+
+function entityNeedsPreparedPreview(entity: EffectiveEntity): boolean {
+  const status = entity.preview_status?.status;
+  const previewStatus = typeof status === 'string' ? status : 'NOT_PREPARED';
+  return previewStatus === 'NOT_PREPARED' && !entityHasRepresentativeCrops(entity);
+}
+
+function entityHasRepresentativeCrops(entity: EffectiveEntity): boolean {
+  return Array.isArray(entity.representative_crops)
+    && entity.representative_crops.some((crop) => {
+      const item = crop as Record<string, unknown>;
+      return typeof item.path === 'string' && item.path.length > 0 && typeof item.source_frame === 'number';
+    });
 }
 
 function entityRepresentativeBBox(entity: EffectiveEntity): [number, number, number, number] | null {
