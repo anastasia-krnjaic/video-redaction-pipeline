@@ -6485,9 +6485,10 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         if path == "/api/session-state":
             query = parse_qs(parsed.query)
             session_id = str((query.get("session_id") or [""])[0])
+            explicit_session_requested = bool(session_id)
             session_dir = (
                 review_sessions.session_directory(self.server.package_root, session_id)
-                if session_id
+                if explicit_session_requested
                 else self.current_or_new_session_dir()
             )
             if not session_dir.exists():
@@ -6512,7 +6513,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 session_dir,
                 working_state,
             )
-            pointer = write_current_session_pointer(self.server.package_root, session_dir)
+            pointer = (
+                current_session_pointer_payload(self.server.package_root, session_dir)
+                if explicit_session_requested
+                else write_current_session_pointer(self.server.package_root, session_dir)
+            )
             self.send_json(
                 {
                     "attribution": review_sessions.load_reviewer_attribution(session_dir),
@@ -9802,11 +9807,11 @@ def valid_current_session_dir(package_root: Path) -> Path | None:
     return session_dir
 
 
-def write_current_session_pointer(package_root: Path, session_dir: Path) -> dict[str, Any]:
+def current_session_pointer_payload(package_root: Path, session_dir: Path) -> dict[str, Any]:
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
     session = read_json_file(session_dir / "review_session.json")
-    pointer = {
+    return {
         "case_manifest_hashes": dict(session.get("case_manifest_hashes") or {}),
         "event_chain_head": review_sessions.last_event_hash(session_dir),
         "schema_version": "review_workspace_current_session.v1",
@@ -9816,6 +9821,10 @@ def write_current_session_pointer(package_root: Path, session_dir: Path) -> dict
         "workspace_identity_hashes": workspace_identity_hashes(package_root),
         "workspace_path": package_root.as_posix(),
     }
+
+
+def write_current_session_pointer(package_root: Path, session_dir: Path) -> dict[str, Any]:
+    pointer = current_session_pointer_payload(package_root, session_dir)
     write_json(current_session_pointer_path(package_root), pointer)
     return pointer
 

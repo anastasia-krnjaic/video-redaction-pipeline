@@ -3,15 +3,8 @@ import { loadCurrentSessionState, loadSessionState, loadWorkspace } from '../api
 import type { AuditEvent, Session, TaskDecision, WorkspaceSummary, Attribution, WorkingState } from '../types/api';
 import { normalizeDecisionsByCase, normalizeTaskResolutionsByCase } from '../state/reviewState';
 import type { DecisionsByCase, TaskResolutionsByCase } from '../types/domain';
+import { explicitSessionRequestFromSearch } from '../utils/sessionRouting';
 import { removeStoredValue, writeStoredString } from './usePersistentState';
-
-function readUrlSessionId(): string | null {
-  const params = new URLSearchParams(window.location.search);
-  const raw = params.get('session_id') || params.get('sessionId');
-  const sessionId = raw?.trim();
-  if (!sessionId) return null;
-  return /^session_[A-Za-z0-9]+$/.test(sessionId) ? sessionId : null;
-}
 
 export interface WorkspaceLoadState {
   workspace?: WorkspaceSummary;
@@ -65,6 +58,17 @@ export function useWorkspace(): WorkspaceLoadState {
     if (!key) return;
     removeStoredValue(key);
     setResumableSessionId(undefined);
+  };
+
+  const clearLoadedSession = () => {
+    setSessionState(null);
+    setSessionLoadKind(undefined);
+    setAttribution(null);
+    setDecisions({});
+    setTaskResolutions({});
+    setEvents([]);
+    setCorrections([]);
+    setWorkingState(undefined);
   };
 
   const applySessionPayload = (
@@ -131,20 +135,30 @@ export function useWorkspace(): WorkspaceLoadState {
         setWorkspace(loaded);
         const storageKey = lastSessionStorageKey(loaded);
         setWorkspaceStorageKey(storageKey);
-        const urlSessionId = readUrlSessionId();
-        const currentSessionId = String((loaded.current_session as Record<string, unknown> | undefined)?.session_id || '');
-        setResumableSessionId(currentSessionId || undefined);
-        if (urlSessionId) {
+        const explicitSession = explicitSessionRequestFromSearch(window.location.search);
+        if (explicitSession.requested) {
+          if (!explicitSession.sessionId) {
+            clearLoadedSession();
+            setResumableSessionId(undefined);
+            setError(explicitSession.error || 'Invalid requested review session.');
+            return;
+          }
           try {
-            const payload = await loadSessionState(urlSessionId);
+            const payload = await loadSessionState(explicitSession.sessionId);
             if (cancelled) return;
             applySessionPayload(payload, 'resumed', loaded);
             return;
-          } catch {
-            removeStoredValue(storageKey);
+          } catch (err) {
+            if (cancelled) return;
+            clearLoadedSession();
             setResumableSessionId(undefined);
+            const detail = err instanceof Error ? err.message : String(err);
+            setError(`Could not load requested review session ${explicitSession.sessionId}: ${detail}`);
+            return;
           }
         }
+        const currentSessionId = String((loaded.current_session as Record<string, unknown> | undefined)?.session_id || '');
+        setResumableSessionId(currentSessionId || undefined);
         const payload = await loadCurrentSessionState();
         if (cancelled) return;
         applySessionPayload(payload, payload.events.length > 1 ? 'resumed' : 'new', loaded);

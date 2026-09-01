@@ -2145,7 +2145,17 @@ def test_session_state_auto_resumes_server_current_session_pointer(tmp_path: Pat
         explicit = get_json(f"{base_url}/api/v1/session-state?session_id={first_id}")
         assert explicit["session"]["session_id"] == first_id
         pointer = json.loads((package / "current_session.json").read_text(encoding="utf-8"))
-        assert pointer["session_id"] == first_id
+        assert pointer["session_id"] == second_id
+
+        missing_status, missing = get_json_error(
+            f"{base_url}/api/v1/session-state?session_id=session_missing123"
+        )
+        assert missing_status == 404
+        assert missing["error"] == "review session not found"
+        pointer_after_missing = json.loads(
+            (package / "current_session.json").read_text(encoding="utf-8")
+        )
+        assert pointer_after_missing["session_id"] == second_id
     finally:
         server.shutdown()
         server.server_close()
