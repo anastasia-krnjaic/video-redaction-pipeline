@@ -6,6 +6,7 @@ import {
   deleteCheckpoint,
   loadEntityIndex,
   loadFinalizationStatus,
+  loadMaterializationJobs,
   loadMaterializationJob,
   prepareEntityPreviews,
   loadWorkingState,
@@ -62,7 +63,7 @@ import {
   roleAfterCorrectionSave,
   validRoleOrAutomatic,
 } from '../state/correctionLifecycle';
-import { decisionFromEvent, workingStateIsOlderThanKnownEvents } from '../state/reviewSync';
+import { decisionFromEvent, mergeAuditEvents, workingStateIsOlderThanKnownEvents } from '../state/reviewSync';
 import { candidateEntityIds } from '../state/entityRefinement';
 import type {
   Attribution,
@@ -114,7 +115,7 @@ interface Props {
   onEventsChange: (events: AuditEvent[]) => void;
   onManualTasksChange: (tasks: Task[]) => void;
   onTaskResolutionsChange: (resolutions: TaskResolutionsByCase) => void;
-  onWorkingStateChange: (state?: WorkingState) => void;
+  onWorkingStateChange: (state?: WorkingState, responseEvents?: AuditEvent[]) => boolean;
 }
 
 interface TrackedMaterializationJob {
@@ -195,7 +196,9 @@ export function CaseReviewPage({
   const [previewToken, setPreviewToken] = useState<string>();
   const [correctionSaveStatus, setCorrectionSaveStatus] = useState<string>();
   const [sweepBusy, setSweepBusy] = useState(false);
+  const [buildSubmitPending, setBuildSubmitPending] = useState(false);
   const [finalizationStatus, setFinalizationStatus] = useState<FinalizationStatus>();
+  const [finalizationLoading, setFinalizationLoading] = useState(false);
   const [checkpointName, setCheckpointName] = useState('');
   const [checkpointBusy, setCheckpointBusy] = useState<string | null>(null);
   const [checkpointDeleteTarget, setCheckpointDeleteTarget] = useState<Record<string, unknown> | null>(null);
@@ -230,6 +233,7 @@ export function CaseReviewPage({
     () => [...baseTasks, ...manualTasks].filter((task) => task.case_id === caseId),
     [baseTasks, caseId, manualTasks],
   );
+  const latestEventHash = events[events.length - 1]?.event_hash || String(events.length);
   const taskRows = useMemo(
     () => tasksForCase(allTasks, decisions, caseId, taskResolutions),
     [allTasks, caseId, decisions, taskResolutions],
@@ -285,7 +289,26 @@ export function CaseReviewPage({
     const sessionLatestRole = previewRole || latestRole || materializedLatestRole;
     return publicVideoRoles(manifest.video_roles, sessionLatestRole);
   }, [latestRole, manifest.video_roles, materializedLatestRole, previewRole]);
-  const selectedVersion = roles.find((role) => role.role === selectedRole) || roles.find((role) => role.role === defaultRole(roles));
+  const selectedVersionFromRoles = roles.find((role) => role.role === selectedRole);
+  const fallbackVersion = roles.find((role) => role.role === defaultRole(roles));
+  const [lastPlayableSelectedVersion, setLastPlayableSelectedVersion] = useState<MediaVersion>();
+  useEffect(() => {
+    setLastPlayableSelectedVersion(undefined);
+  }, [caseId, session?.session_id]);
+  useEffect(() => {
+    if (!selectedVersionFromRoles?.path) return;
+    setLastPlayableSelectedVersion(selectedVersionFromRoles);
+  }, [
+    selectedVersionFromRoles?.path,
+    selectedVersionFromRoles?.role,
+    selectedVersionFromRoles?.sha256,
+    selectedVersionFromRoles?.source_frame_start,
+    selectedVersionFromRoles?.source_frame_end,
+  ]);
+  const selectedVersion =
+    selectedVersionFromRoles ||
+    (lastPlayableSelectedVersion?.role === selectedRole ? lastPlayableSelectedVersion : undefined) ||
+    fallbackVersion;
   const controller = useVideoController(manifest, selectedVersion, caseFrame, setCaseFrame);
   const [draft, setDraft] = useState<CorrectionDraft>(() => initialDraft(caseId, manifest, caseFrame, selectedTask));
   const currentSourceFrame = caseToSourceFrame(manifest, caseFrame);
@@ -315,17 +338,29 @@ export function CaseReviewPage({
     : undefined;
   const correctionAttentionCount = needsCorrectionBlockerCount(tasks);
   const reviewReady = correctionAttentionCount === 0;
+  const finalizationStatusForCase = finalizationStatus?.case_id === caseId ? finalizationStatus : undefined;
+  const finalizationGroupsForCase = useMemo(
+    () => finalizationBlockerGroups(finalizationStatusForCase),
+    [finalizationStatusForCase],
+  );
+  const backendReviewBlockerGroups = useMemo(
+    () => reviewBlockingFinalizationGroups(finalizationGroupsForCase),
+    [finalizationGroupsForCase],
+  );
   const allGuidanceAddressed = reviewReady && counts.Open === 0;
-  const latestReviewedBackendStale = finalizationStatus
-    ? finalizationBlockerGroups(finalizationStatus).some((group) => group.key === 'latest_reviewed')
+  const latestReviewedBackendStale = finalizationStatusForCase
+    ? finalizationGroupsForCase.some((group) => group.key === 'latest_reviewed')
     : undefined;
+  const caseLatestReviewedStaleForLifecycle = finalizationStatusForCase
+    ? latestReviewedBackendStale
+    : false;
   const latestReviewedLifecycle = latestReviewedLifecycleState({
     activeJobs: caseMaterializationJobs,
-    caseLatestReviewedStale: latestReviewedBackendStale,
+    caseLatestReviewedStale: caseLatestReviewedStaleForLifecycle,
     caseId,
     latestRole: materializedLatestRole,
     materializationError,
-    reviewReady,
+    reviewReady: reviewReady && backendReviewBlockerGroups.length === 0,
     sessionId: session?.session_id,
     workingState,
   });
@@ -346,19 +381,32 @@ export function CaseReviewPage({
   );
   const latestReviewedStatus = latestReviewedStatusText({
     activeJobs: activeMaterializationJobs,
-    finalizationStatus,
+    finalizationStatus: finalizationStatusForCase,
     lifecycleState: latestReviewedLifecycle,
     latestRole: materializedLatestRole,
     materializationError,
-    reviewReady,
+    reviewReady: reviewReady && backendReviewBlockerGroups.length === 0,
   });
   const latestReviewedCurrent = latestReviewedStatus === 'Reviewed video ready';
   const sweepAcknowledgement = (workingState?.sweep_acknowledgements as Record<string, unknown> | undefined)?.[caseId] as Record<string, unknown> | undefined;
   const sweepAcknowledged = Boolean(sweepAcknowledgement);
   const sweepStale = sweepAcknowledged && (
     !latestReviewedCurrent ||
-    finalizationBlockerGroups(finalizationStatus).some((group) => group.key === 'full_video_approval')
+    finalizationGroupsForCase.some((group) => group.key === 'full_video_approval')
   );
+  const approvalGate = fullVideoApprovalGateText({
+    activeJobs: activeMaterializationJobs,
+    backendReviewBlockerGroups,
+    buildSubmitting: buildSubmitPending,
+    finalizationGroups: finalizationGroupsForCase,
+    finalizationKnown: Boolean(finalizationStatusForCase) && !finalizationLoading,
+    latestReviewedCurrent,
+    latestReviewedStatus,
+    sessionReady: Boolean(session?.session_id),
+    sweepAcknowledged,
+    sweepBusy,
+    sweepStale,
+  });
   const lifecycleMessage = reviewLifecycleMessage({
     correctionAttentionCount,
     latestReviewedStatus,
@@ -455,32 +503,37 @@ export function CaseReviewPage({
 
   useEffect(() => {
     let cancelled = false;
+    setFinalizationStatus(undefined);
     if (!session?.session_id) {
-      setFinalizationStatus(undefined);
+      setFinalizationLoading(false);
       return undefined;
     }
+    setFinalizationLoading(true);
     const load = async () => {
       try {
         const status = await loadFinalizationStatus({
           case_id: caseId,
           session_id: session.session_id,
         });
-        if (!cancelled) setFinalizationStatus(status);
+        if (!cancelled && status.case_id === caseId) setFinalizationStatus(status);
       } catch {
         if (!cancelled) setFinalizationStatus(undefined);
+      } finally {
+        if (!cancelled) setFinalizationLoading(false);
       }
     };
     void load();
     return () => {
       cancelled = true;
     };
-  }, [caseId, session?.session_id, workingState?.active_projection_hash, workingState?.current_event_chain_head]);
+  }, [caseId, latestEventHash, session?.session_id, workingState?.active_projection_hash, workingState?.current_event_chain_head]);
 
   useEffect(() => {
     if (!roles.some((role) => role.role === selectedRole)) {
+      if (selectedRole === 'latest_reviewed' && !workingState) return;
       setSelectedRole(defaultRole(roles));
     }
-  }, [roles, selectedRole, setSelectedRole]);
+  }, [roles, selectedRole, setSelectedRole, workingState]);
 
   useEffect(() => {
     if (mode !== 'review') return;
@@ -592,6 +645,9 @@ export function CaseReviewPage({
               return next;
             });
           }
+          const appliedJobWorkingState = tracked.job.working_state
+            ? applyWorkingStateProjection(tracked.job.working_state)
+            : false;
           const jobMatchesCurrentProjection = materializationJobMatchesCurrentProjection(
             tracked.job,
             workingStateRef.current,
@@ -600,10 +656,8 @@ export function CaseReviewPage({
               sessionId: session?.session_id,
             },
           );
-          if (jobMatchesCurrentProjection && tracked.job.working_state) {
-            applyWorkingStateProjection(tracked.job.working_state);
-          }
-          if (jobMatchesCurrentProjection && tracked.job.latest_reviewed && tracked.job.case_id === caseId) {
+          const jobCanUpdateVisibleLatest = appliedJobWorkingState || jobMatchesCurrentProjection;
+          if (jobCanUpdateVisibleLatest && tracked.job.latest_reviewed && tracked.job.case_id === caseId) {
             const manualPlaybackActive = modeRef.current === 'edit' && controllerPlayingRef.current;
             setLatestRoleWithoutPlaybackInterruption(tracked.job.latest_reviewed);
             if (!manualPlaybackActive) {
@@ -713,11 +767,7 @@ export function CaseReviewPage({
   };
 
   const appendEvents = (nextEvents: AuditEvent[]) => {
-    const seen = new Set(eventsRef.current.map((event) => event.event_hash));
-    const combined = [
-      ...eventsRef.current,
-      ...nextEvents.filter((event) => !seen.has(event.event_hash)),
-    ];
+    const combined = mergeAuditEvents(eventsRef.current, nextEvents);
     eventsRef.current = combined;
     onEventsChange(combined);
   };
@@ -773,13 +823,40 @@ export function CaseReviewPage({
     }));
   };
 
+  useEffect(() => {
+    let cancelled = false;
+    if (!session?.session_id) return undefined;
+    const loadActiveJobs = async () => {
+      try {
+        const response = await loadMaterializationJobs({
+          active_only: true,
+          case_id: caseId,
+          session_id: session.session_id,
+        });
+        if (cancelled) return;
+        for (const job of response.jobs || []) {
+          trackMaterializationJob(job, job.affected_entity_ids || [], 'Reviewed video ready');
+        }
+      } catch {
+        // The job list is advisory UI hydration; build polling continues for jobs
+        // returned directly from accepted mutations.
+      }
+    };
+    void loadActiveJobs();
+    return () => {
+      cancelled = true;
+    };
+  }, [caseId, session?.session_id]);
+
   const applyWorkingStateProjection = (state?: WorkingState, responseEvents: AuditEvent[] = []) => {
     if (!state) return false;
-    if (workingStateIsOlderThanKnownEvents(state, eventsRef.current, responseEvents)) {
+    if (
+      workingStateIsOlderThanKnownEvents(state, eventsRef.current, responseEvents) ||
+      !onWorkingStateChange(state, responseEvents)
+    ) {
       return false;
     }
     workingStateRef.current = state;
-    onWorkingStateChange(state);
     const nextDecisions = normalizeDecisionsByCase(
       state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
       state.task_decisions as Record<string, TaskDecision> | undefined,
@@ -790,8 +867,6 @@ export function CaseReviewPage({
     );
     decisionsRef.current = nextDecisions;
     taskResolutionsRef.current = nextResolutions;
-    onDecisionsChange(nextDecisions);
-    onTaskResolutionsChange(nextResolutions);
     onManualTasksChange((Array.isArray(state.active_manual_tasks) ? state.active_manual_tasks : []) as Task[]);
     onEntityOverridesChange((state.object_policy_overrides || {}) as Record<string, EffectiveEntity>);
     onCorrectionsChange((Array.isArray(state.manual_corrections) ? state.manual_corrections : []) as Record<string, unknown>[]);
@@ -824,6 +899,7 @@ export function CaseReviewPage({
           note: groupActionNote(task, action),
         });
         const responseEvents = result.events || [];
+        appendEvents(responseEvents);
         if (result.working_state && applyWorkingStateProjection(result.working_state, responseEvents)) {
           nextDecisions = normalizeDecisionsByCase(
             result.working_state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
@@ -845,7 +921,6 @@ export function CaseReviewPage({
           onDecisionsChange(nextDecisions);
           onTaskResolutionsChange(nextResolutions);
         }
-        appendEvents(responseEvents);
       } else {
         const childTask = task.child_tasks[0] || task;
         const { decision, event, working_state } = await saveDecision({
@@ -862,6 +937,7 @@ export function CaseReviewPage({
                 : 'Needs correction',
         });
         const responseEvents = [event].filter(Boolean);
+        appendEvents(responseEvents);
         if (working_state && applyWorkingStateProjection(working_state, responseEvents)) {
           nextDecisions = normalizeDecisionsByCase(
             working_state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
@@ -879,7 +955,6 @@ export function CaseReviewPage({
           onDecisionsChange(nextDecisions);
           onTaskResolutionsChange(nextResolutions);
         }
-        appendEvents(responseEvents);
       }
       if (action === ACTIONS.needsCorrection) {
         openCorrectionEditor(task);
@@ -1467,6 +1542,7 @@ export function CaseReviewPage({
       const result = await createCheckpoint({
         session_id: session.session_id,
         actor: attribution || { display_name: null },
+        case_id: caseId,
         name: checkpointName.trim() || `Checkpoint ${checkpoints.length + 1}`,
       });
       appendEvents([result.event]);
@@ -1573,6 +1649,7 @@ export function CaseReviewPage({
     const preservedFrame = caseFrameValueRef.current;
     setMaterializationError(undefined);
     setCorrectionSaveStatus('Building reviewed video...');
+    setBuildSubmitPending(true);
     try {
       const result = await requestLatestReviewedBuild({
         session_id: session.session_id,
@@ -1595,6 +1672,8 @@ export function CaseReviewPage({
     } catch (err) {
       setMaterializationError(err instanceof Error ? err.message : String(err));
       setCorrectionSaveStatus(undefined);
+    } finally {
+      setBuildSubmitPending(false);
     }
   };
 
@@ -1657,27 +1736,30 @@ export function CaseReviewPage({
           <button type="button" onClick={() => void createNamedCheckpoint()} disabled={checkpointBusy === 'create'}>
             {checkpointBusy === 'create' ? 'Creating...' : 'Create checkpoint'}
           </button>
-          {checkpoints.map((checkpoint) => (
+          {checkpoints.map((checkpoint) => {
+            const checkpointLabel = checkpointDisplayLabel(checkpoint, workspace, caseId);
+            return (
             <span className="checkpoint-item" key={String(checkpoint['checkpoint_uuid'])}>
               <button
                 type="button"
                 onClick={() => void restoreNamedCheckpoint(String(checkpoint['checkpoint_uuid']))}
                 disabled={checkpointBusy === `restore:${String(checkpoint['checkpoint_uuid'])}`}
-                title={String(checkpoint['created_at_utc'] || '')}
+                title={checkpointTooltip(checkpoint, workspace)}
               >
-                {checkpointBusy === `restore:${String(checkpoint['checkpoint_uuid'])}` ? 'Restoring...' : `Restore ${String(checkpoint['name'] || 'Checkpoint')}`}
+                {checkpointBusy === `restore:${String(checkpoint['checkpoint_uuid'])}` ? 'Restoring...' : `Restore ${checkpointLabel}`}
               </button>
               <button
                 type="button"
                 className="danger-icon"
-                aria-label={`Delete checkpoint ${String(checkpoint['name'] || 'Checkpoint')}`}
+                aria-label={`Delete checkpoint ${checkpointLabel}`}
                 onClick={() => setCheckpointDeleteTarget(checkpoint)}
                 disabled={checkpointBusy === `delete:${String(checkpoint['checkpoint_uuid'])}`}
               >
                 x
               </button>
             </span>
-          ))}
+          );
+          })}
           <button type="button" className="danger" onClick={() => setResetEditsConfirmOpen(true)} disabled={checkpointBusy === 'reset-edits'}>
             {checkpointBusy === 'reset-edits' ? 'Resetting...' : 'Reset this case to Automatic baseline'}
           </button>
@@ -1697,10 +1779,15 @@ export function CaseReviewPage({
         <div className="button-row">
           <button
             type="button"
-            disabled={!session?.session_id || latestReviewedLifecycle !== 'BUILD_REQUIRED' || Boolean(activeMaterializationJobs.length)}
+            disabled={
+              !session?.session_id ||
+              latestReviewedLifecycle !== 'BUILD_REQUIRED' ||
+              buildSubmitPending ||
+              Boolean(activeMaterializationJobs.length)
+            }
             onClick={() => void requestReviewedVideoBuild()}
           >
-            {activeMaterializationJobs.length ? (
+            {buildSubmitPending || activeMaterializationJobs.length ? (
               <>
                 <span className="inline-spinner" aria-hidden="true" /> Building reviewed video...
               </>
@@ -1711,7 +1798,7 @@ export function CaseReviewPage({
           <button
             type="button"
             className="primary"
-            disabled={!latestReviewedCurrent || sweepBusy || (sweepAcknowledged && !sweepStale)}
+            disabled={Boolean(approvalGate)}
             onClick={() => void acknowledgeSweep()}
           >
             {sweepBusy ? (
@@ -1722,6 +1809,9 @@ export function CaseReviewPage({
               'Approve full-video review'
             )}
           </button>
+          <p className={approvalGate ? 'approval-gate-copy muted' : 'approval-gate-copy success-text'}>
+            {approvalGate || 'Ready for your full-video approval.'}
+          </p>
         </div>
       </section>
       <div className="workspace-layout">
@@ -1909,6 +1999,47 @@ function publicVideoRoles(roles: MediaVersion[], latestRole?: MediaVersion): Med
   ].filter((role): role is MediaVersion => Boolean(role));
 }
 
+function checkpointDisplayLabel(
+  checkpoint: Record<string, unknown>,
+  workspace: WorkspaceSummary,
+  currentCaseId: CaseId,
+): string {
+  const name = String(checkpoint['name'] || 'Checkpoint');
+  const context = checkpointContextLabel(checkpoint, workspace, currentCaseId);
+  const timestamp = checkpointShortTimestamp(checkpoint);
+  return [context, name, timestamp].filter(Boolean).join(' · ');
+}
+
+function checkpointTooltip(checkpoint: Record<string, unknown>, workspace: WorkspaceSummary): string {
+  const context = checkpointContextLabel(checkpoint, workspace);
+  const timestamp = checkpointLongTimestamp(checkpoint);
+  return [
+    `${context} checkpoint.`,
+    'Restore applies the saved whole-session review state.',
+    timestamp ? `Created ${timestamp}.` : '',
+  ].filter(Boolean).join(' ');
+}
+
+function checkpointContextLabel(
+  checkpoint: Record<string, unknown>,
+  workspace: WorkspaceSummary,
+  currentCaseId?: CaseId,
+): string {
+  const rawCaseId = String(checkpoint['created_from_case_id'] || checkpoint['case_context_id'] || '');
+  if (!rawCaseId) return 'Session-wide';
+  const caseName = workspace.cases[rawCaseId]?.display_name || rawCaseId;
+  if (currentCaseId && rawCaseId === currentCaseId) return `Created from ${caseName}`;
+  return `Created from ${caseName}`;
+}
+
+function checkpointShortTimestamp(checkpoint: Record<string, unknown>): string {
+  return String(checkpoint['created_at_utc'] || '').replace('T', ' ').replace(/Z$/, 'Z');
+}
+
+function checkpointLongTimestamp(checkpoint: Record<string, unknown>): string {
+  return String(checkpoint['created_at_utc'] || '');
+}
+
 function nearestNextOpenGroup(
   previousGroups: ReviewGroup[],
   nextGroups: ReviewGroup[],
@@ -2011,6 +2142,53 @@ function latestReviewedStatusText({
     return 'Ready to build reviewed video';
   }
   return 'Reviewed video ready';
+}
+
+function fullVideoApprovalGateText({
+  activeJobs,
+  backendReviewBlockerGroups,
+  buildSubmitting,
+  finalizationGroups,
+  finalizationKnown,
+  latestReviewedCurrent,
+  latestReviewedStatus,
+  sessionReady,
+  sweepAcknowledged,
+  sweepBusy,
+  sweepStale,
+}: {
+  activeJobs: TrackedMaterializationJob[];
+  backendReviewBlockerGroups: FinalizationBlockerGroup[];
+  buildSubmitting: boolean;
+  finalizationGroups: FinalizationBlockerGroup[];
+  finalizationKnown: boolean;
+  latestReviewedCurrent: boolean;
+  latestReviewedStatus: ReviewedVideoStatus;
+  sessionReady: boolean;
+  sweepAcknowledged: boolean;
+  sweepBusy: boolean;
+  sweepStale: boolean;
+}): string | undefined {
+  if (!sessionReady) return 'Start or resume the review session before approving.';
+  if (!finalizationKnown) return 'Checking current case approval gates...';
+  if (sweepBusy) return 'Recording full-video approval...';
+  if (buildSubmitting || activeJobs.length) return 'Reviewed-video build is still running.';
+  if (backendReviewBlockerGroups.length) return blockerGroupSummary(backendReviewBlockerGroups);
+  if (!latestReviewedCurrent) return latestReviewedStatus;
+  const nonSweepBlockers = finalizationGroups.filter((group) => group.key !== 'full_video_approval');
+  if (nonSweepBlockers.length) {
+    return blockerGroupSummary(nonSweepBlockers);
+  }
+  if (sweepAcknowledged && !sweepStale) return 'Full-video review already approved for this reviewed video.';
+  return undefined;
+}
+
+function reviewBlockingFinalizationGroups(groups: FinalizationBlockerGroup[]): FinalizationBlockerGroup[] {
+  return groups.filter((group) => group.key !== 'full_video_approval' && group.key !== 'latest_reviewed');
+}
+
+function blockerGroupSummary(groups: FinalizationBlockerGroup[]): string {
+  return groups.map((group) => `${group.label}: ${group.count}`).join('; ');
 }
 
 function reviewLifecycleMessage({

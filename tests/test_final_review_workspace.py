@@ -2858,6 +2858,54 @@ def test_initial_latest_reviewed_publish_reuses_automatic_without_heavy_job(
         server.server_close()
 
 
+def test_active_materialization_jobs_are_listed_by_session_and_case(
+    tmp_path: Path,
+) -> None:
+    package, day, night, session_dir = write_duplicate_task_case_package(tmp_path)
+    server = review_workspace.serve_workspace(package, port=0)
+    server.materialization_jobs.debounce_seconds = 60
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    state = review_working_state.derive_working_state(package, session_dir)
+    try:
+        day_job = server.materialization_jobs.enqueue(
+            session_dir=session_dir,
+            case_id=day.case_id,
+            actor={"reviewer_id": "analyst"},
+            reason="test day build hydration",
+            accepted_revision=state["active_projection_hash"],
+        )
+        night_job = server.materialization_jobs.enqueue(
+            session_dir=session_dir,
+            case_id=night.case_id,
+            actor={"reviewer_id": "analyst"},
+            reason="test night build hydration",
+            accepted_revision=state["active_projection_hash"],
+        )
+
+        day_jobs = get_json(
+            f"{base_url}/api/v1/materialization-jobs"
+            f"?session_id={session_dir.name}&case_id={day.case_id}&active_only=true"
+        )
+        night_jobs = get_json(
+            f"{base_url}/api/v1/materialization-jobs"
+            f"?session_id={session_dir.name}&case_id={night.case_id}&active_only=true"
+        )
+        all_jobs = get_json(
+            f"{base_url}/api/v1/materialization-jobs"
+            f"?session_id={session_dir.name}&active_only=true"
+        )
+
+        assert [job["job_id"] for job in day_jobs["jobs"]] == [day_job["job_id"]]
+        assert [job["job_id"] for job in night_jobs["jobs"]] == [night_job["job_id"]]
+        assert {job["job_id"] for job in all_jobs["jobs"]} == {
+            day_job["job_id"],
+            night_job["job_id"],
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_workspace_server_shutdown_cancels_pending_materialization_timer(
     tmp_path: Path,
 ) -> None:
@@ -2901,6 +2949,103 @@ def test_workspace_server_shutdown_cancels_pending_materialization_timer(
     assert not timer.is_alive()
 
 
+def test_full_video_sweep_latest_blocker_is_not_grouped_as_rebuild_required() -> None:
+    groups = review_workspace.finalization_blocker_groups(
+        [
+            "day: full-video sweep has not been acknowledged",
+            "day: full-video sweep has not been acknowledged for Latest reviewed",
+        ]
+    )
+
+    assert groups == [
+        {
+            "blockers": [
+                "day: full-video sweep has not been acknowledged",
+                "day: full-video sweep has not been acknowledged for Latest reviewed",
+            ],
+            "count": 2,
+            "key": "full_video_approval",
+            "label": "Full-video approval is stale or missing",
+        }
+    ]
+
+
+def test_checkpoint_creation_records_created_from_case_context(tmp_path: Path) -> None:
+    package = tmp_path / "package"
+    manifest, _entity = write_policy_entity_package(package)
+    session_dir = create_session(package, manifest)
+
+    checkpoint, event = review_working_state.create_checkpoint(
+        package,
+        session_dir,
+        actor={"reviewer_id": "analyst"},
+        case_context_id=manifest.case_id,
+        name="Before approval",
+    )
+
+    assert checkpoint["created_from_case_id"] == manifest.case_id
+    assert event["after_state"]["created_from_case_id"] == manifest.case_id
+    assert review_working_state.load_checkpoints(session_dir)[0]["created_from_case_id"] == manifest.case_id
+
+
+def test_static_review_decision_skips_working_state_derivation_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "package"
+    manifest, _entity = write_policy_entity_package(package)
+    write_json(
+        package / "reviewer_tasks.json",
+        {
+            "tasks": [
+                {
+                    "allowed_actions": [
+                        review_sessions.ACTION_LOOKS_CORRECT,
+                        review_sessions.ACTION_PRIVACY_LEAK,
+                        review_sessions.ACTION_NOT_SENSITIVE,
+                    ],
+                    "blocking": False,
+                    "case_id": manifest.case_id,
+                    "category": CATEGORY_PLATE,
+                    "correction_required": False,
+                    "normal_task_class": "plate_track_review_required",
+                    "review_task_id": "task_fast",
+                    "source_frame_end": 0,
+                    "source_frame_start": 0,
+                    "technical_only": False,
+                }
+            ]
+        },
+    )
+    session_dir = create_session(package, manifest)
+
+    def fail_derive(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("ordinary decisions must not derive working state")
+
+    monkeypatch.setattr(review_working_state, "derive_working_state", fail_derive)
+    server = review_workspace.serve_workspace(package, port=0)
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        response = post_json(
+            f"{base_url}/api/v1/decisions",
+            {
+                "action": review_sessions.ACTION_LOOKS_CORRECT,
+                "actor": {"reviewer_id": "analyst"},
+                "case_id": manifest.case_id,
+                "note": "correct",
+                "session_id": session_dir.name,
+                "task_id": "task_fast",
+            },
+        )
+
+        assert response["ok"] is True
+        assert response["event"]["task_id"] == "task_fast"
+        assert "working_state" not in response
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> None:
     package = tmp_path / "package"
     manifest, _entity = write_policy_entity_package(package)
@@ -2942,9 +3087,10 @@ def test_review_decision_does_not_start_materialization_job(tmp_path: Path) -> N
                 "task_id": "task_1",
             },
         )
-        after_state = response["working_state"]
+        after_state = review_working_state.derive_working_state(package, session_dir)
 
         assert response["ok"] is True
+        assert "working_state" not in response
         assert server.materialization_jobs.jobs == {}
         assert after_state["active_projection_hash"] == before_state["active_projection_hash"]
         assert after_state["audit_projection_hash"] != before_state["audit_projection_hash"]
@@ -3160,7 +3306,10 @@ def test_corrupt_decision_snapshot_is_rebuilt_from_event_log(tmp_path: Path) -> 
         evidence_dir = session_dir / "state" / "recovery_evidence"
 
         assert response["ok"] is True
-        assert response["working_state"]["task_decisions_by_case"][manifest.case_id]["task_2"][
+        after_state = review_working_state.derive_working_state(package, session_dir)
+
+        assert "working_state" not in response
+        assert after_state["task_decisions_by_case"][manifest.case_id]["task_2"][
             "action"
         ] == review_sessions.ACTION_NOT_SENSITIVE
         assert (
@@ -3268,7 +3417,8 @@ def test_review_decision_group_api_is_atomic_and_records_children(tmp_path: Path
                 == stable_hash(["group_child_1", "group_child_2"])
             )
             assert event["application_hashes"]["review_group_id"] == "group:synthetic"
-        state = response["working_state"]
+        state = review_working_state.derive_working_state(package, session_dir)
+        assert "working_state" not in response
         assert set(state["task_decisions_by_case"][manifest.case_id]) == {
             "group_child_1",
             "group_child_2",

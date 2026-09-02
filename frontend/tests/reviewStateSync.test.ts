@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { decisionFromEvent, workingStateIsOlderThanKnownEvents } from '../src/state/reviewSync';
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  decisionFromEvent,
+  eventListIsOlderThanKnownEvents,
+  mergeAuditEvents,
+  mergeDecisionsByEventOrder,
+  workingStateIsOlderThanKnownEvents,
+} from '../src/state/reviewSync';
 import type { AuditEvent, WorkingState } from '../src/types/api';
 
 function event(hash: string, previous: string | null, taskId: string): AuditEvent {
@@ -56,5 +64,63 @@ describe('review workspace state synchronization', () => {
       event_hash: 'hash_a',
       task_id: 'task_a',
     });
+  });
+
+  it('orders merged audit events by hash chain instead of response arrival', () => {
+    const first = event('hash_a', 'session_started', 'task_a');
+    const second = event('hash_b', 'hash_a', 'task_b');
+
+    expect(mergeAuditEvents([second], [first]).map((item) => item.event_hash)).toEqual([
+      'hash_a',
+      'hash_b',
+    ]);
+  });
+
+  it('detects a delayed session payload older than locally accepted events', () => {
+    const sessionStarted = event('session_started_hash', null, 'session');
+    const acceptedDecision = event('hash_a', 'session_started_hash', 'task_a');
+
+    expect(eventListIsOlderThanKnownEvents([sessionStarted], [sessionStarted, acceptedDecision])).toBe(true);
+    expect(eventListIsOlderThanKnownEvents([sessionStarted, acceptedDecision], [sessionStarted])).toBe(false);
+  });
+
+  it('does not let an older overlapping decision response replace a newer decision', () => {
+    const first = event('hash_a', 'session_started', 'task_a');
+    const second = event('hash_b', 'hash_a', 'task_a');
+
+    const merged = mergeDecisionsByEventOrder(
+      {
+        day: {
+          task_a: {
+            action: 'not_sensitive',
+            case_id: 'day',
+            decision_status: 'green',
+            event_hash: 'hash_b',
+            task_id: 'task_a',
+          },
+        },
+      },
+      {
+        day: {
+          task_a: {
+            action: 'looks_correct',
+            case_id: 'day',
+            decision_status: 'green',
+            event_hash: 'hash_a',
+            task_id: 'task_a',
+          },
+        },
+      },
+      [first, second],
+    );
+
+    expect(merged.day.task_a.action).toBe('not_sensitive');
+  });
+
+  it('keeps routine decision posts alive across route unloads', () => {
+    const clientSource = fs.readFileSync(path.resolve(process.cwd(), 'src/api/client.ts'), 'utf8');
+
+    expect(clientSource).toContain("`${API_PREFIX}/decisions`, payload, { keepalive: true }");
+    expect(clientSource).toContain("`${API_PREFIX}/decision-groups`, payload, { keepalive: true }");
   });
 });

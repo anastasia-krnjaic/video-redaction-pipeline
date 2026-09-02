@@ -1,7 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { loadCurrentSessionState, loadSessionState, loadWorkspace } from '../api/client';
 import type { AuditEvent, Session, TaskDecision, WorkspaceSummary, Attribution, WorkingState } from '../types/api';
 import { normalizeDecisionsByCase, normalizeTaskResolutionsByCase } from '../state/reviewState';
+import {
+  eventListIsOlderThanKnownEvents,
+  mergeAuditEvents,
+  mergeDecisionsByEventOrder,
+  workingStateIsOlderThanKnownEvents,
+} from '../state/reviewSync';
 import type { DecisionsByCase, TaskResolutionsByCase } from '../types/domain';
 import { explicitSessionRequestFromSearch } from '../utils/sessionRouting';
 import { removeStoredValue, writeStoredString } from './usePersistentState';
@@ -26,7 +32,7 @@ export interface WorkspaceLoadState {
   setTaskResolutions: (resolutions: TaskResolutionsByCase) => void;
   setEvents: (events: AuditEvent[]) => void;
   setCorrections: (corrections: Record<string, unknown>[]) => void;
-  setWorkingState: (state?: WorkingState) => void;
+  setWorkingState: (state?: WorkingState, responseEvents?: AuditEvent[]) => boolean;
   refreshSession: (sessionId?: string, loadKind?: 'new' | 'resumed') => Promise<void>;
   setError: (error?: string) => void;
 }
@@ -37,14 +43,44 @@ export function useWorkspace(): WorkspaceLoadState {
   const [error, setError] = useState<string>();
   const [session, setSessionState] = useState<Session | null>(null);
   const [attribution, setAttribution] = useState<Attribution>(null);
-  const [decisions, setDecisions] = useState<DecisionsByCase>({});
-  const [taskResolutions, setTaskResolutions] = useState<TaskResolutionsByCase>({});
-  const [events, setEvents] = useState<AuditEvent[]>([]);
-  const [corrections, setCorrections] = useState<Record<string, unknown>[]>([]);
-  const [workingState, setWorkingState] = useState<WorkingState>();
+  const [decisions, setDecisionsState] = useState<DecisionsByCase>({});
+  const [taskResolutions, setTaskResolutionsState] = useState<TaskResolutionsByCase>({});
+  const [events, setEventsState] = useState<AuditEvent[]>([]);
+  const [corrections, setCorrectionsState] = useState<Record<string, unknown>[]>([]);
+  const [workingState, setWorkingStateState] = useState<WorkingState>();
   const [resumableSessionId, setResumableSessionId] = useState<string>();
   const [workspaceStorageKey, setWorkspaceStorageKey] = useState<string>();
   const [sessionLoadKind, setSessionLoadKind] = useState<'new' | 'resumed'>();
+  const decisionsRef = useRef(decisions);
+  const eventsRef = useRef(events);
+  const sessionRef = useRef(session);
+  const taskResolutionsRef = useRef(taskResolutions);
+  const correctionsRef = useRef(corrections);
+  const workingStateRef = useRef(workingState);
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    decisionsRef.current = decisions;
+  }, [decisions]);
+
+  useEffect(() => {
+    eventsRef.current = events;
+  }, [events]);
+
+  useEffect(() => {
+    taskResolutionsRef.current = taskResolutions;
+  }, [taskResolutions]);
+
+  useEffect(() => {
+    correctionsRef.current = corrections;
+  }, [corrections]);
+
+  useEffect(() => {
+    workingStateRef.current = workingState;
+  }, [workingState]);
 
   const storeLastSessionId = (loadedWorkspace: WorkspaceSummary | undefined, sessionId: string) => {
     const key = loadedWorkspace ? lastSessionStorageKey(loadedWorkspace) : workspaceStorageKey;
@@ -62,13 +98,19 @@ export function useWorkspace(): WorkspaceLoadState {
 
   const clearLoadedSession = () => {
     setSessionState(null);
+    sessionRef.current = null;
     setSessionLoadKind(undefined);
     setAttribution(null);
-    setDecisions({});
-    setTaskResolutions({});
-    setEvents([]);
-    setCorrections([]);
-    setWorkingState(undefined);
+    decisionsRef.current = {};
+    taskResolutionsRef.current = {};
+    eventsRef.current = [];
+    correctionsRef.current = [];
+    workingStateRef.current = undefined;
+    setDecisionsState({});
+    setTaskResolutionsState({});
+    setEventsState([]);
+    setCorrectionsState([]);
+    setWorkingStateState(undefined);
   };
 
   const applySessionPayload = (
@@ -76,24 +118,90 @@ export function useWorkspace(): WorkspaceLoadState {
     loadKind: 'new' | 'resumed',
     loadedWorkspace?: WorkspaceSummary,
   ) => {
+    const incomingEvents = payload.events || [];
+    const currentSessionId = sessionRef.current?.session_id;
+    if (
+      currentSessionId === payload.session.session_id &&
+      eventListIsOlderThanKnownEvents(incomingEvents, eventsRef.current)
+    ) {
+      return;
+    }
     setSessionState(payload.session);
+    sessionRef.current = payload.session;
     setSessionLoadKind(loadKind);
     setAttribution(payload.attribution);
-    setDecisions(normalizeDecisionsByCase(payload.decisions_by_case, payload.decisions || {}));
-    setTaskResolutions(
-      normalizeTaskResolutionsByCase(
-        payload.working_state?.task_resolutions_by_case as
-          | Record<string, Record<string, TaskDecision>>
-          | undefined,
-        payload.working_state?.task_resolutions as Record<string, TaskDecision> | undefined,
-      ),
+    const nextDecisions = normalizeDecisionsByCase(payload.decisions_by_case, payload.decisions || {});
+    const nextTaskResolutions = normalizeTaskResolutionsByCase(
+      payload.working_state?.task_resolutions_by_case as
+        | Record<string, Record<string, TaskDecision>>
+        | undefined,
+      payload.working_state?.task_resolutions as Record<string, TaskDecision> | undefined,
     );
-    setEvents(payload.events || []);
-    setCorrections(payload.corrections || []);
-    setWorkingState(payload.working_state);
+    decisionsRef.current = nextDecisions;
+    taskResolutionsRef.current = nextTaskResolutions;
+    eventsRef.current = incomingEvents;
+    correctionsRef.current = payload.corrections || [];
+    workingStateRef.current = payload.working_state;
+    setDecisionsState(nextDecisions);
+    setTaskResolutionsState(nextTaskResolutions);
+    setEventsState(incomingEvents);
+    setCorrectionsState(payload.corrections || []);
+    setWorkingStateState(payload.working_state);
     storeLastSessionId(loadedWorkspace, payload.session.session_id);
     replaceUrlSessionId(payload.session.session_id);
   };
+
+  const mergeEvents = useCallback((incomingEvents: AuditEvent[]) => {
+    const merged = mergeAuditEvents(eventsRef.current, incomingEvents);
+    eventsRef.current = merged;
+    setEventsState(merged);
+  }, []);
+
+  const mergeDecisions = useCallback((incomingDecisions: DecisionsByCase) => {
+    const merged = mergeDecisionsByEventOrder(decisionsRef.current, incomingDecisions, eventsRef.current);
+    decisionsRef.current = merged;
+    setDecisionsState(merged);
+  }, []);
+
+  const mergeTaskResolutions = useCallback((incomingResolutions: TaskResolutionsByCase) => {
+    const merged = mergeDecisionsByEventOrder(taskResolutionsRef.current, incomingResolutions, eventsRef.current);
+    taskResolutionsRef.current = merged;
+    setTaskResolutionsState(merged);
+  }, []);
+
+  const mergeCorrections = useCallback((incomingCorrections: Record<string, unknown>[]) => {
+    const merged = mergeCorrectionsByIdentity(correctionsRef.current, incomingCorrections);
+    correctionsRef.current = merged;
+    setCorrectionsState(merged);
+  }, []);
+
+  const applyWorkingState = useCallback((state?: WorkingState, responseEvents: AuditEvent[] = []) => {
+    if (!state) {
+      workingStateRef.current = undefined;
+      setWorkingStateState(undefined);
+      return true;
+    }
+    if (workingStateIsOlderThanKnownEvents(state, eventsRef.current, responseEvents)) {
+      return false;
+    }
+    const nextDecisions = normalizeDecisionsByCase(
+      state.task_decisions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+      state.task_decisions as Record<string, TaskDecision> | undefined,
+    );
+    const nextTaskResolutions = normalizeTaskResolutionsByCase(
+      state.task_resolutions_by_case as Record<string, Record<string, TaskDecision>> | undefined,
+      state.task_resolutions as Record<string, TaskDecision> | undefined,
+    );
+    workingStateRef.current = state;
+    decisionsRef.current = nextDecisions;
+    taskResolutionsRef.current = nextTaskResolutions;
+    correctionsRef.current = (Array.isArray(state.manual_corrections) ? state.manual_corrections : []) as Record<string, unknown>[];
+    setWorkingStateState(state);
+    setDecisionsState(nextDecisions);
+    setTaskResolutionsState(nextTaskResolutions);
+    setCorrectionsState(correctionsRef.current);
+    return true;
+  }, []);
 
   const refreshSession = useMemo(
     () => async (sessionId?: string, loadKind?: 'new' | 'resumed') => {
@@ -107,6 +215,7 @@ export function useWorkspace(): WorkspaceLoadState {
 
   const setSession = (nextSession: Session | null) => {
     setSessionState(nextSession);
+    sessionRef.current = nextSession;
     setSessionLoadKind(nextSession ? 'new' : undefined);
     if (nextSession) {
       storeLastSessionId(workspace, nextSession.session_id);
@@ -190,11 +299,11 @@ export function useWorkspace(): WorkspaceLoadState {
     resumeStoredSession,
     setSession,
     setAttribution,
-    setDecisions,
-    setTaskResolutions,
-    setEvents,
-    setCorrections,
-    setWorkingState,
+    setDecisions: mergeDecisions,
+    setTaskResolutions: mergeTaskResolutions,
+    setEvents: mergeEvents,
+    setCorrections: mergeCorrections,
+    setWorkingState: applyWorkingState,
     refreshSession,
     setError,
   };
@@ -219,4 +328,23 @@ function replaceUrlSessionId(sessionId: string | null): void {
   else url.searchParams.delete('session_id');
   url.searchParams.delete('sessionId');
   window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`);
+}
+
+function mergeCorrectionsByIdentity(
+  current: Record<string, unknown>[],
+  incoming: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  if (!incoming.length) return current;
+  const byIdentity = new Map<string, Record<string, unknown>>();
+  const order: string[] = [];
+  const add = (correction: Record<string, unknown>, fallbackIndex: number) => {
+    const identity = String(
+      correction.correction_id || correction.revision_id || correction.correction_hash || `index:${fallbackIndex}`,
+    );
+    if (!byIdentity.has(identity)) order.push(identity);
+    byIdentity.set(identity, correction);
+  };
+  current.forEach(add);
+  incoming.forEach((correction, index) => add(correction, current.length + index));
+  return order.map((identity) => byIdentity.get(identity)).filter((item): item is Record<string, unknown> => Boolean(item));
 }

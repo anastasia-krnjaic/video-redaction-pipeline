@@ -4849,10 +4849,10 @@ def finalization_blocker_groups(blockers: list[str]) -> list[dict[str, Any]]:
 
 def finalization_blocker_group_key(blocker: str) -> str:
     text = blocker.lower()
-    if "latest reviewed" in text or "latest_reviewed" in text or "stale_latest" in text:
-        return "latest_reviewed"
     if "sweep" in text or "full-video" in text:
         return "full_video_approval"
+    if "latest reviewed" in text or "latest_reviewed" in text or "stale_latest" in text:
+        return "latest_reviewed"
     if "object policy" in text or "policy" in text:
         return "entity_policy"
     if "task" in text or "reviewer-added issue" in text:
@@ -5234,6 +5234,32 @@ class MaterializationJobManager:
             self._apply_watchdog_locked()
             job = self.jobs.get(job_id)
             return dict(job) if job else None
+
+    def list_jobs(
+        self,
+        *,
+        session_id: str | None = None,
+        case_id: str | None = None,
+        active_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        with self.lock:
+            self._apply_watchdog_locked()
+            jobs = []
+            for job in self.jobs.values():
+                if session_id and job.get("session_id") != session_id:
+                    continue
+                if case_id and job.get("case_id") != case_id:
+                    continue
+                if active_only and job.get("status") not in {"queued", "running"}:
+                    continue
+                jobs.append(dict(job))
+            return sorted(
+                jobs,
+                key=lambda item: (
+                    str(item.get("created_at_utc") or ""),
+                    str(item.get("job_id") or ""),
+                ),
+            )
 
     def compatible_active_job(
         self,
@@ -6196,6 +6222,34 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 }
             )
             return True
+        if path == "/api/v1/materialization-jobs":
+            query = parse_qs(parsed.query)
+            session_dir = self.session_dir_from_query(query)
+            if session_dir is None:
+                return True
+            raw_case_id = str((query.get("case_id") or [""])[0])
+            case_id = (
+                require_workspace_case(self.server.package_root, raw_case_id)
+                if raw_case_id
+                else None
+            )
+            active_only = str((query.get("active_only") or [""])[0]).lower() in {
+                "1",
+                "true",
+                "yes",
+            }
+            self.send_json(
+                {
+                    "jobs": self.server.materialization_jobs.list_jobs(
+                        session_id=session_dir.name,
+                        case_id=case_id,
+                        active_only=active_only,
+                    ),
+                    "ok": True,
+                    "schema_version": "reviewed_media_materialization_job_list.v1",
+                }
+            )
+            return True
         if path.startswith("/api/v1/materialization-jobs/"):
             job_id = path.removeprefix("/api/v1/materialization-jobs/").strip("/")
             job = self.server.materialization_jobs.get(job_id)
@@ -6617,18 +6671,19 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     status=HTTPStatus.NOT_FOUND,
                 )
                 return
-            gate = review_working_state.correction_verification_decision_gate(
-                self.server.package_root,
-                session_dir,
-                case_id=decision_case_id,
-                task_id=str(payload["task_id"]),
-            )
-            if not gate.get("ok"):
-                self.send_json(
-                    {"error": gate.get("error"), "ok": False, "task": gate.get("task")},
-                    status=HTTPStatus.CONFLICT,
+            if task_requires_correction_verification_gate(task):
+                gate = review_working_state.correction_verification_decision_gate(
+                    self.server.package_root,
+                    session_dir,
+                    case_id=decision_case_id,
+                    task_id=str(payload["task_id"]),
                 )
-                return
+                if not gate.get("ok"):
+                    self.send_json(
+                        {"error": gate.get("error"), "ok": False, "task": gate.get("task")},
+                        status=HTTPStatus.CONFLICT,
+                    )
+                    return
             try:
                 review_sessions.validate_task_action(task, str(payload["action"]))
             except ValueError as exc:
@@ -6647,10 +6702,6 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 {
                     "event": event,
                     "ok": True,
-                    "working_state": review_working_state.derive_working_state(
-                        self.server.package_root,
-                        session_dir,
-                    ),
                 }
             )
             return
@@ -6690,18 +6741,19 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                         status=HTTPStatus.NOT_FOUND,
                     )
                     return
-                gate = review_working_state.correction_verification_decision_gate(
-                    self.server.package_root,
-                    session_dir,
-                    case_id=decision_case_id,
-                    task_id=task_id,
-                )
-                if not gate.get("ok"):
-                    self.send_json(
-                        {"error": gate.get("error"), "ok": False, "task": gate.get("task")},
-                        status=HTTPStatus.CONFLICT,
+                if task_requires_correction_verification_gate(task):
+                    gate = review_working_state.correction_verification_decision_gate(
+                        self.server.package_root,
+                        session_dir,
+                        case_id=decision_case_id,
+                        task_id=task_id,
                     )
-                    return
+                    if not gate.get("ok"):
+                        self.send_json(
+                            {"error": gate.get("error"), "ok": False, "task": gate.get("task")},
+                            status=HTTPStatus.CONFLICT,
+                        )
+                        return
                 try:
                     review_sessions.validate_task_action(task, action)
                 except ValueError as exc:
@@ -6733,10 +6785,6 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     "events": events,
                     "ok": True,
                     "review_group_id": group_id,
-                    "working_state": review_working_state.derive_working_state(
-                        self.server.package_root,
-                        session_dir,
-                    ),
                 }
             )
             return
@@ -7169,6 +7217,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 self.server.package_root,
                 session_dir,
                 actor=actor,
+                case_context_id=payload.get("case_id"),
                 name=str(payload.get("name") or "Checkpoint"),
                 note=payload.get("note"),
             )
@@ -9699,6 +9748,10 @@ def decision_task_for_session(
         ):
             return dict(task)
     return None
+
+
+def task_requires_correction_verification_gate(task: dict[str, Any]) -> bool:
+    return str(task.get("normal_task_class") or "") == "correction_verification"
 
 
 def workspace_identity_hashes(package_root: Path) -> dict[str, str]:

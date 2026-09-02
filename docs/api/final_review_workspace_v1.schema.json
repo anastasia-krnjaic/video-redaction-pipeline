@@ -254,6 +254,12 @@
         "created_at_utc": {
           "type": "string"
         },
+        "created_from_case_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "name": {
           "type": "string"
         },
@@ -1591,6 +1597,9 @@
       "response": "#/definitions/History"
     },
     "GET /api/v1/materialization-jobs/{job_id}": {
+      "response": "#/definitions/MaterializationJob"
+    },
+    "GET /api/v1/materialization-jobs?session_id=...": {
       "response": "#/definitions/MaterializationJob"
     },
     "GET /api/v1/schema": {

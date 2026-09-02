@@ -38,7 +38,12 @@ describe('reset transient correction errors', () => {
     expect(sweepBody).toContain('applyWorkingStateProjection(refreshedWorkingState)');
     expect(sweepBody).toContain('Full-video review was approved, but the refreshed review state could not be loaded');
     expect(sweepBody).toContain('setSweepBusy(false)');
-    expect(approvalButton).toContain('disabled={!latestReviewedCurrent || sweepBusy || (sweepAcknowledged && !sweepStale)}');
+    expect(approvalButton).toContain('disabled={Boolean(approvalGate)}');
+    expect(source).toContain('finalizationStatusForCase');
+    expect(source).toContain('caseLatestReviewedStaleForLifecycle');
+    expect(source).toContain('reviewBlockingFinalizationGroups(finalizationGroupsForCase)');
+    expect(source).toContain("if (selectedRole === 'latest_reviewed' && !workingState) return;");
+    expect(source).toContain('Checking current case approval gates...');
     expect(source).toContain('workingState?.current_event_chain_head');
     expect(source).not.toContain('setSweepAcknowledged');
   });

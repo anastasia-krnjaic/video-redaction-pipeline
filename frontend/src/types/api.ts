@@ -321,6 +321,7 @@ export interface MaterializationJob {
 export interface Checkpoint {
   "checkpoint_uuid": string;
   "created_at_utc": string;
+  "created_from_case_id"?: string | null;
   "name": string;
   "note"?: string;
   "state_hash": string;

@@ -135,4 +135,14 @@ describe('materialization completion revision guard', () => {
       workingState: state('rev_current'),
     })).toBe('BUILD_FAILED_RETRYABLE');
   });
+
+  it('keeps a case-scoped running job visible after another case advances the global revision', () => {
+    expect(latestReviewedLifecycleState({
+      activeJobs: [job({ status: 'running', accepted_working_state_revision: 'day_rev' })],
+      caseId: 'day',
+      reviewReady: true,
+      sessionId: 'session_1',
+      workingState: state('night_rev'),
+    })).toBe('BUILD_RUNNING');
+  });
 });

@@ -2587,18 +2587,25 @@ def create_checkpoint(
     session_dir: Path,
     *,
     actor: dict[str, Any],
+    case_context_id: str | None = None,
     name: str,
     note: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
     ensure_session_layout(session_dir)
+    created_from_case_id = (
+        case_ids.validate_case_id(case_context_id)
+        if case_context_id
+        else None
+    )
     state = derive_working_state(package_root, session_dir)
     checkpoint_id = f"checkpoint_{uuid.uuid4().hex}"
     checkpoint = {
         "associated_latest_reviewed": dict(state.get("materialized_latest_reviewed") or {}),
         "checkpoint_uuid": checkpoint_id,
         "created_at_utc": media.utc_timestamp(),
+        "created_from_case_id": created_from_case_id,
         "current_event_chain_head": state.get("current_event_chain_head"),
         "name": name.strip() or "Checkpoint",
         "note": note or "",
@@ -2629,6 +2636,7 @@ def create_checkpoint(
         before_state=None,
         after_state={
             "checkpoint_uuid": checkpoint_id,
+            "created_from_case_id": created_from_case_id,
             "name": checkpoint["name"],
             "state_hash": state["state_hash"],
         },

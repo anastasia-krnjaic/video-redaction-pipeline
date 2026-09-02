@@ -54,11 +54,16 @@ async function getJson<T>(path: string): Promise<T> {
   return payload as T;
 }
 
-async function postJson<T>(path: string, payload: unknown): Promise<T> {
+async function postJson<T>(
+  path: string,
+  payload: unknown,
+  options: { keepalive?: boolean } = {},
+): Promise<T> {
   const response = await fetch(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
+    headers: { 'Content-Type': 'application/json' },
+    keepalive: options.keepalive,
+    method: 'POST',
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok || (data as JsonResponse).ok === false) {
@@ -109,7 +114,7 @@ export async function saveDecision(payload: {
   action: string;
   note?: string;
 }): Promise<{ decision: TaskDecision; event: AuditEvent; working_state?: WorkingState }> {
-  const response = await postJson<JsonResponse>(`${API_PREFIX}/decisions`, payload);
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/decisions`, payload, { keepalive: true });
   const after = response.event?.after_state as TaskDecision | undefined;
   if (!after) throw new Error('Decision response did not include persisted state.');
   if (!response.event) throw new Error('Decision response did not include an event.');
@@ -129,7 +134,7 @@ export async function saveDecisionGroup(payload: {
   action: string;
   note?: string;
 }): Promise<{ events: AuditEvent[]; working_state?: WorkingState }> {
-  const response = await postJson<JsonResponse>(`${API_PREFIX}/decision-groups`, payload);
+  const response = await postJson<JsonResponse>(`${API_PREFIX}/decision-groups`, payload, { keepalive: true });
   return {
     events: response.events || [],
     working_state: response.working_state,
@@ -391,6 +396,7 @@ export async function previewCorrection(payload: {
 export async function createCheckpoint(payload: {
   session_id: string;
   actor: Attribution | Record<string, unknown>;
+  case_id?: CaseId;
   name: string;
   note?: string;
 }): Promise<{ checkpoint: Record<string, unknown>; event: AuditEvent; working_state?: WorkingState }> {
@@ -442,6 +448,17 @@ export async function deleteCheckpoint(payload: {
 
 export function loadMaterializationJob(jobId: string): Promise<{ ok: true; job: MaterializationJob }> {
   return getJson<{ ok: true; job: MaterializationJob }>(`${API_PREFIX}/materialization-jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function loadMaterializationJobs(payload: {
+  active_only?: boolean;
+  case_id?: CaseId;
+  session_id: string;
+}): Promise<{ ok: true; jobs: MaterializationJob[] }> {
+  const params = new URLSearchParams({ session_id: payload.session_id });
+  if (payload.case_id) params.set('case_id', payload.case_id);
+  if (payload.active_only) params.set('active_only', 'true');
+  return getJson<{ ok: true; jobs: MaterializationJob[] }>(`${API_PREFIX}/materialization-jobs?${params.toString()}`);
 }
 
 export async function retryMaterializationJob(payload: {

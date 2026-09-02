@@ -56,7 +56,8 @@ export function latestReviewedLifecycleState({
     activeJobs.some(
       (job) =>
         (job.status === 'queued' || job.status === 'running') &&
-        materializationJobRepresentsCurrentProjection(job, workingState, { caseId, sessionId }),
+        job.case_id === caseId &&
+        job.session_id === sessionId,
     )
   ) {
     return 'BUILD_RUNNING';

@@ -1377,6 +1377,11 @@ main {
   gap: 3px;
 }
 
+.approval-gate-copy {
+  flex-basis: 100%;
+  margin: 0;
+}
+
 .danger-icon {
   min-width: 26px;
   min-height: 26px;

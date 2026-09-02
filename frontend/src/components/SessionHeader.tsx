@@ -24,10 +24,12 @@ export function SessionHeader({
   resumableSessionId,
   session,
 }: Props) {
-  const bannerClass = error ? 'session-banner error' : session ? 'session-banner ready' : 'session-banner';
+  const bannerClass = error ? 'session-banner error' : busy ? 'session-banner' : session ? 'session-banner ready' : 'session-banner';
   const text = error
     ? error
-    : session
+    : busy
+      ? 'Preparing review session...'
+      : session
       ? `Review session active · ${session.session_id}${attribution?.display_name ? ` · ${attribution.display_name}` : ''}`
       : resumableSessionId
         ? `Ready to resume ${resumableSessionId}.`
