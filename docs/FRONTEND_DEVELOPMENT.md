@@ -39,13 +39,13 @@ npm run generate:api-types
 Serve a generated workspace from the repository root:
 
 ```bash
-redactor serve-final-review-workspace artifacts/cases/example_automatic_preview/review_workspace --open
+redactor serve-final-review-workspace path/to/example_automatic_preview/review_workspace --open
 ```
 
 When the local release artifacts are present, the frozen review workspace can be served with:
 
 ```bash
-redactor serve-final-review-workspace artifacts/reviewed_final_combined_v2_1/run_20260813T210250Z/review_workspace --open
+redactor serve-final-review-workspace path/to/release_review_workspace --open
 ```
 
 The app loads under `/app/<case_id>`. The server supplies `/api/v1/` data and media Range responses.
@@ -55,7 +55,7 @@ The app loads under `/app/<case_id>`. The server supplies `/api/v1/` data and me
 The repository Firefox smoke is run through pytest so it uses the same Python server harness as the backend tests:
 
 ```bash
-REDACTOR_RUN_FIREFOX_E2E=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -rs -p no:cacheprovider --basetemp=/tmp/video_redaction_firefox tests/test_final_review_workspace_firefox.py
+REDACTOR_RUN_FIREFOX_E2E=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -rs -p no:cacheprovider tests/test_final_review_workspace_firefox.py
 ```
 
 ## Frontend Boundary

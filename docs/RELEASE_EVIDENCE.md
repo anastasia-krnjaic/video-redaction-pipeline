@@ -1,36 +1,53 @@
 # Release Evidence
 
-Release evidence is stored under ignored `artifacts/` roots. These artifacts are not required for a clean source checkout, but they preserve local certification, evaluation, delivery, performance, cleanup, and reconciliation proof for the frozen release.
+Release evidence is stored under ignored repository-local artifact roots. These artifacts are not required for a clean source checkout, but they preserve local approval, evaluation, delivery, performance, cleanup, and reconciliation proof for the frozen release.
+
+This document is the canonical index for current Final IDs and package checksums. Paths below are repository-relative evidence locations for local audit only; package identity is carried by manifests and SHA-256 values, not by absolute local paths.
 
 ## Evidence Roots
 
 | Evidence | Relative artifact root |
 | --- | --- |
-| Canonical review workspace | `artifacts/reviewed_final_combined_v2_1/run_20260813T210250Z/review_workspace/` |
-| Final certification | `artifacts/reviewed_final_certification_v1/run_20260816T181759Z/` |
-| Evaluation reconciliation | `artifacts/reviewed_final_evaluation_reconciliation_v1/run_20260816T192539Z/` |
-| Delivery packages | `artifacts/reviewed_final_delivery_v1/run_20260816T181759Z/` |
-| Production-readiness evidence | `artifacts/performance_production_readiness_v1/run_20260816T195729Z/` |
-| Cleanup audit | `artifacts/cleanup_audit_v1/run_20260816T224650Z/` |
-| Session reconciliation | `artifacts/review_session_reconciliation_v1/run_20260815T201114Z/` |
+| Current submission release package | `artifacts/submission_release_v1_0_3/` |
+| Current full final package zips | `artifacts/submission_release_v1_0_3/full_packages/` |
+| Current submission sample | `artifacts/submission_release_v1_0_3/submission/Closure_video_redaction_submission/sample/` |
 
-## Certified Media
+## Current Approved Final Media
 
-| Case | Final revision | Final media SHA-256 |
-| --- | --- | --- |
-| Day | `finalization_aa68ef16b4396b6d` | `f2c16de58e145a7c5073e6fdbf9af9b6c39a9033ce1034a59099901d6333d8a0` |
-| Night | `finalization_80444a7c087a8a59` | `5a010c26f5f3367f14a1fc25327ec93e7f244bf8c22b760946140dd928968e60` |
+| Case | Latest reviewed revision | Finalization ID | Final media SHA-256 |
+| --- | --- | --- | --- |
+| Day | `latest_reviewed_4808aa899c5da1a8` | `finalization_a9cc6da4ac152e74` | `4f0c57731b4d99ed2b4397472c8d991d3debb9962de1b4419cb941cff296d837` |
+| Night | `latest_reviewed_41fcfdd5b7e2349d` | `finalization_2e7257daf1187805` | `cc8982b317c439d7965dd151c562f0c01004b3252cfd5f63266fa95b0a21e88a` |
 
-## Delivery Packages
+For both current cases, the reviewer watched the exact Latest reviewed video in full and recorded explicit full-video approval for that revision. The immutable Final media was then produced from the approved Latest reviewed revision.
+
+## Current Full Final Packages
 
 | Package | Relative path | SHA-256 |
 | --- | --- | --- |
-| Day | `artifacts/reviewed_final_delivery_v1/run_20260816T181759Z/day/day_final_delivery.zip` | `dd20170dd1674899051b42ef36806af0c6160acf265afa73fa4f84af0f006eb0` |
-| Night | `artifacts/reviewed_final_delivery_v1/run_20260816T181759Z/night/night_final_delivery.zip` | `a17a4f7f3bc5bad4eb99ddc61f89c05c44a0c608ca8498ed92ef88d484c98286` |
-| Combined | `artifacts/reviewed_final_delivery_v1/run_20260816T181759Z/combined_day_night_final_delivery.zip` | `dfc71335b72d7e9201fed1407840e2b03aa5f87e9a95cf8cac94e87469437f69` |
+| Day | `artifacts/submission_release_v1_0_3/full_packages/day_final_review_package.zip` | `675a9a9362350824e10bbd941cebf20f041b5237c74f68300156482d1da5791a` |
+| Night | `artifacts/submission_release_v1_0_3/full_packages/night_final_review_package.zip` | `396a51bdbf4988be7e128be35c61de3190896abb0376b5ccc7b4fea593ef023d` |
+
+## Submission Sample
+
+| Field | Value |
+| --- | --- |
+| Case | Night |
+| Source frames | 484-686 inclusive |
+| Frame count | 203 |
+| Duration | About 6.77 seconds |
+| Parent Latest reviewed | `latest_reviewed_41fcfdd5b7e2349d` |
+| Parent Finalization ID | `finalization_2e7257daf1187805` |
+| Parent Final media SHA-256 | `cc8982b317c439d7965dd151c562f0c01004b3252cfd5f63266fa95b0a21e88a` |
+
+The sample evidence root contains machine validation, checksums, a manifest, reviewed-region records, and a human visual acceptance record. The sample was separately watched after generation and accepted with no known visible sensitive-data leak observed. This sample claim is a bounded human visual acceptance record, not a mathematical zero-leak certification for the complete product videos.
+
+## Historical Evidence
+
+Earlier release-candidate Final media and delivery packages are historical only. They are superseded by the current approved Final media and package checksums above and must not be used as current submission evidence.
 
 ## How To Use This Index
 
 Use this document to locate evidence when the ignored artifact roots are present on the release machine. Do not treat these relative paths as required files in a fresh source checkout.
 
-Portable delivery package identity is carried by package manifests and checksums, not by absolute local paths.
+Portable delivery package identity is carried by package manifests and checksums, not by absolute local paths. The current Final evidence here should be read together with [EVALUATION.md](EVALUATION.md), which keeps detector metrics, automatic coverage, reviewed-final geometric evidence, and human full-video review separate.

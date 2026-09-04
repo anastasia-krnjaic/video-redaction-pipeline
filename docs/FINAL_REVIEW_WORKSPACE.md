@@ -9,7 +9,7 @@ Python owns the authoritative state: workspace manifests, media roles, source-fr
 Serve a workspace with:
 
 ```bash
-redactor serve-final-review-workspace artifacts/reviewed_final_combined_v2_1/run_20260813T210250Z/review_workspace --open
+redactor serve-final-review-workspace path/to/review_workspace --open
 ```
 
 For a clean checkout, first generate a workspace with `redactor redact-video` and serve that generated `review_workspace/` directory.
@@ -18,7 +18,7 @@ The server binds locally, serves workspace files from the package root, supports
 
 ## Sessions
 
-The server-owned current-session pointer is authoritative for normal resume. Opening a case without `session_id` resolves to the current session and updates the URL. Explicit `?session_id=...` URLs must load that exact session, and the header must match the URL.
+The server-owned current-session pointer is authoritative for normal resume. Opening a case without `session_id` resolves to the current session and updates the URL. Explicit `?session_id=...` URLs must load that exact session, and the header must match the URL. State-changing review requests carry explicit case/session identity so decisions persist to the intended session and case.
 
 Available session actions:
 
@@ -28,7 +28,7 @@ Available session actions:
 
 There is no Restart review action in the release UI.
 
-Events are append-only and hash-chained. Derived JSON snapshots are rebuildable from the event log and are written atomically.
+Events are append-only and hash-chained. Derived JSON snapshots are rebuildable from the event log and are written atomically. Case-safe persistence prevents one case's entity decisions, corrections, Latest reviewed state, approval, or Final pointer from being published as another case's state.
 
 Validate and summarize a session with:
 
@@ -53,6 +53,8 @@ The normal media roles are:
 - Final: immutable final revision selected by `final/current.json`.
 
 Historical Latest and Final revisions remain on disk but are not current if their pointers, source identity, session identity, reviewed-region hash, media hash, active projection, or sweep binding no longer match.
+
+The player and review cards use source-frame coordinates. Frame seeking is frame-accurate so Manual corrections, entity previews, and approval review refer to the same source-frame basis used by the backend.
 
 ## Guidance
 
@@ -89,7 +91,9 @@ Entities are source-backed people and plates with stable case/category identity.
 - Keep visible applies the supported source-bound keep semantics.
 - Not a person / Not a plate suppresses applicable false-positive regions and derives compatible Not sensitive task state.
 - Needs review reopens visible human review work.
-- Merge creates one canonical active entity and preserves source evidence.
+- Merge creates one canonical active entity and preserves source evidence after human confirmation.
+
+Entity cards expose preview media on demand and can use background-cached previews once generated. The workspace surfaces purity/conflict state so reviewers can avoid broad entity actions when one entity appears to mix true sensitive evidence with false-positive or unrelated evidence.
 
 Entity actions invalidate stale Latest and sweep state when they change reviewed media. They do not create hidden object-policy verification work.
 
@@ -103,7 +107,7 @@ Manual redaction supports:
 
 The editor works in source-frame coordinates. Preview generates real rendered privacy media for the draft and returns a token bound to the current case, session, source media, working-state revision, geometry, and preview output. The geometry overlay remains an outline; it is not the rendered privacy effect.
 
-Save requires the current Preview token. A valid Save persists an immutable correction revision, updates authoritative working state, and marks reviewed media as pending when pixels change. Save does not normally queue or run a full-video Latest reviewed render by itself.
+Save requires the current Preview token. A valid Save persists an immutable correction revision, updates authoritative working state, and marks reviewed media as pending when pixels change. Remove retracts an individual active correction through the same append-only review state rather than deleting history. Save or Remove does not normally queue or run a full-video Latest reviewed render by itself.
 
 Reviewers may save one or more Manual corrections and media-affecting Entity actions before selecting **Build reviewed video**. That explicit build materializes the accumulated reviewed state, either by rendering a new Latest reviewed video or by reusing validated Automatic media when the reviewed state is pixel-identical to Automatic. Superseded jobs cannot publish stale media.
 

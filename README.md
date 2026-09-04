@@ -3,7 +3,7 @@
 Video Redaction Pipeline is a local, reviewable workflow for turning source video into privacy-redacted media while preserving the evidence and human decisions behind the result.
 
 The current automated detection and tracking scope is exactly two sensitive-object
-categories:
+categories: faces and license plates.
 
 - `face`;
 - `license_plate`.
@@ -46,7 +46,7 @@ flowchart LR
     D1 --> E[Automatic privacy regions]
     D2 --> E
     E --> F[Automatic video]
-    F --> G[Guidance, Entities, and Manual correction]
+    F --> G[Guidance, Entities, and Manual corrections]
     G --> H[Pending reviewed state]
     H -->|Build reviewed video| I[Latest reviewed]
     I --> J[Full-video visual approval]
@@ -106,7 +106,9 @@ Guidance is advisory. A reviewer may inspect and adjudicate it, but unreviewed G
 
 ### Entities
 
-Entities are source-backed people and plates assembled from temporal evidence. Entity-level actions apply to the whole selected entity, not only the thumbnail currently visible in the interface.
+Entities are source-backed, privacy-conservative groupings of people and plates assembled from temporal evidence. They help a reviewer apply case policy consistently, but they are advisory review objects rather than open-ended identity recognition.
+
+Entity-level actions apply to the whole selected entity, not only the thumbnail currently visible in the interface.
 
 Typical actions are:
 
@@ -115,7 +117,7 @@ Typical actions are:
 - **Not a person / Not a plate** — reject the entity as a false proposal;
 - **Needs review** — leave the entity unresolved.
 
-Entity actions are powerful and should be used carefully. If one entity accidentally contains both false-positive and true-positive evidence, marking the entire entity as Not a person or Not a plate can remove valid redaction regions. The reviewer should inspect the entity's full interval and verify the rebuilt Latest reviewed video before approval.
+Entity actions are powerful and should be used carefully. The workspace surfaces entity purity/conflict information and requires human confirmation for candidate merges, but the reviewer remains responsible for checking the entity's full interval. If one entity accidentally contains both false-positive and true-positive evidence, marking the entire entity as Not a person or Not a plate can remove valid redaction regions. The reviewer should inspect the entity's full interval and verify the rebuilt Latest reviewed video before approval.
 
 ### Manual correction
 
@@ -131,13 +133,13 @@ The correction lifecycle is intentionally batched:
 
 1. draw a correction;
 2. preview the affected frame or short interval;
-3. save the correction record;
+3. save the correction record, or remove an individual saved correction when it should no longer apply;
 4. continue adding or editing other corrections;
 5. select **Build reviewed video** once when the review changes are ready to materialize.
 
 Manual Preview is local and short: it renders only the draft frame or interval needed to verify the correction before Save.
 
-Saving a correction stores authoritative review state and marks reviewed media as pending. It does **not** normally trigger a full reviewed-video render after every rectangle. Multiple Manual corrections and media-affecting Entity actions can be accumulated before the reviewer explicitly selects **Build reviewed video**. The explicit build applies all pending corrections and media-affecting entity changes in one reviewed-video job.
+Saving or removing a correction stores authoritative review state and marks reviewed media as pending when pixels change. It does **not** normally trigger a full reviewed-video render after every rectangle. Multiple Manual corrections and media-affecting Entity actions can be accumulated before the reviewer explicitly selects **Build reviewed video**. The explicit build applies all pending corrections and media-affecting entity changes in one reviewed-video job.
 
 If the reviewed state is identical to Automatic, the build can reuse the validated Automatic media instead of running a full encode.
 
@@ -173,9 +175,16 @@ Review sessions are append-only and hash-chained. Durable decisions live on the 
 The workspace provides:
 
 - case-scoped decisions and corrections;
+- explicit case/session routing for review actions;
 - atomic JSON and pointer updates;
 - strict event-chain validation;
 - a single-writer lock so the same workspace cannot be edited by two writable servers at once;
+- concurrent-safe, case-safe persistence of reviewer decisions;
+- frame-accurate seeking in source-frame coordinates;
+- individual correction retraction;
+- on-demand entity previews with background caching;
+- entity purity/conflict handling and human-confirmed candidate merges;
+- stale-publication protection for reviewed-video materialization;
 - historical preservation of superseded Latest, sweep, and Final artifacts;
 - explicit **New review session** and case reset actions.
 
@@ -231,7 +240,7 @@ Important limits:
 - numerical evaluation is source-bound and cannot be transferred to a different clip or incompatible source lineage;
 - the current Day product Final is not numerically comparable to the frozen Day plate benchmark source;
 - face reviewed-final numerical scoring is not supported by the frozen face evaluation contract;
-- no global zero-leak claim is made for unreviewed video outside compatible certified windows;
+- the complete product videos do not carry a mathematical or global zero-leak certification;
 - visual review remains authoritative when geometric metrics and visible privacy disagree.
 
 See [docs/EVALUATION.md](docs/EVALUATION.md) for the exact frozen evaluation evidence and limitations.
@@ -287,7 +296,7 @@ redactor redact-video path/to/input.mp4 \
   --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
   --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
   --plate-model models/open-image-models/yolo-v9-s-608-license-plates-end2end.onnx \
-  --output-dir artifacts/cases/example \
+  --output-dir path/to/output_case \
   --overwrite
 ```
 
@@ -305,8 +314,8 @@ Only one writable server should be run for a given workspace.
 npm --prefix frontend run build
 npm --prefix frontend test -- --run
 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check .
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -rs -p no:cacheprovider --basetemp=/tmp/video_redaction_pytest
-REDACTOR_RUN_FIREFOX_E2E=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -rs -p no:cacheprovider --basetemp=/tmp/video_redaction_firefox tests/test_final_review_workspace_firefox.py
+PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -rs -p no:cacheprovider
+REDACTOR_RUN_FIREFOX_E2E=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -rs -p no:cacheprovider tests/test_final_review_workspace_firefox.py
 git diff --check
 ```
 
@@ -343,6 +352,7 @@ Exact test counts and release hashes belong in [docs/RELEASE_EVIDENCE.md](docs/R
 - [Privacy Pipeline Architecture](docs/PRIVACY_PIPELINE_ARCHITECTURE.md)
 - [Unified Case Pipeline Architecture](docs/UNIFIED_CASE_PIPELINE_ARCHITECTURE.md)
 - [Evaluation](docs/EVALUATION.md)
+- [Production System Design One-Page](docs/PRODUCTION_SYSTEM_DESIGN_ONE_PAGE.md)
 - [Production Readiness](docs/PRODUCTION_READINESS.md)
 - [Demo Guide](docs/DEMO_GUIDE.md)
 - [Release Notes](docs/RELEASE_NOTES.md)

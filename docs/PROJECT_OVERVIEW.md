@@ -37,8 +37,8 @@ Guidance remains visible and auditable but does not require one approval click p
 
 The frozen release includes:
 
-- certified Day and Night Final media;
-- Day, Night, and combined delivery zips;
+- current approved Day and Night Final media;
+- Day and Night full final package zips;
 - detector and automatic coverage metrics;
 - Night reviewed-final strict geometric coverage plus visual audit disposition;
 - documented Day reviewed-final source incompatibility;
@@ -49,4 +49,4 @@ See [RELEASE_EVIDENCE.md](RELEASE_EVIDENCE.md).
 
 ## Limits
 
-The project does not claim universal zero leaks. The frozen metrics apply only to their source-bound Ground Truth and policy contracts. Remote multi-user deployment requires additional operational and security hardening beyond the local release workflow.
+The project does not claim universal or mathematical zero leaks for complete product videos. The frozen metrics apply only to their source-bound Ground Truth and policy contracts. Current Final approval means the exact Latest reviewed media was watched through in full, explicitly approved, and published as immutable Final media. Remote multi-user deployment requires additional operational and security hardening beyond the local release workflow.

@@ -12,16 +12,18 @@ The release is ready for local production-style operation with one writable serv
 
 - Single-writer lock for each writable workspace.
 - Server-owned current-session pointer.
+- Explicit session routing for state-changing review actions.
 - Append-only hash-chained events.
 - Strict JSON parsing for durable state.
 - Atomic temp-file, flush, fsync, and replace for state snapshots and pointers.
 - Case-scoped Latest reviewed and Final pointers.
 - Revision-bound full-video sweep before Finalization.
+- Individual correction retraction through append-only state.
 - Fail-closed validation for stale Latest, stale sweep, invalid corrections, missing media, region mismatch, and source/config mismatch.
 
 ## Performance Work
 
-The final production pass optimized orchestration and review/post-processing paths without changing detector outputs, tracker outputs, renderer configuration, Ground Truth, evaluation policy, current Final identities, or delivery package bytes.
+The final production pass optimized orchestration and review/post-processing paths without changing detector outputs, tracker outputs, renderer configuration, Ground Truth, or evaluation policy.
 
 Implemented production hardening:
 
@@ -82,4 +84,4 @@ No tracked source code was removed during cleanup.
 
 ## Deferred Work
 
-Detector inference remains the major heavy workload. The final production pass did not change detector thresholds, tracker semantics, renderer semantics, Ground Truth, evaluation policy, current Finals, or delivery packages.
+Detector inference remains the major heavy workload. The final production pass did not change detector thresholds, tracker semantics, renderer semantics, Ground Truth, or evaluation policy.

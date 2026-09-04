@@ -4,10 +4,10 @@
 
 This release freezes the local video redaction pipeline through product Final publication, delivery packaging, evaluation disposition, production-readiness optimization, cleanup, and documentation.
 
-The release tag recommendation is:
+The current submission release label is:
 
 ```text
-release-v1.0
+submission-release-v1.0.3
 ```
 
 ## Major Capabilities
@@ -17,7 +17,9 @@ release-v1.0
 - Source-bound Final Review Workspace for Day and Night cases.
 - Advisory Guidance model with fail-closed Needs correction.
 - Entity policy workflow for people and plates.
-- Manual correction Preview and Save with real rendered privacy output.
+- Manual correction Preview, Save, and individual correction removal with real rendered privacy output.
+- Explicit session routing, case-safe decision persistence, and stale-publication protection.
+- Frame-accurate seeking, cached entity previews, entity conflict handling, and human-confirmed candidate merges.
 - Immutable Latest reviewed revisions.
 - Revision-bound full-video approval.
 - Immutable case-scoped Final media.
@@ -25,20 +27,21 @@ release-v1.0
 - Frozen detector, automatic, and reviewed-final evaluation disposition.
 - Single-writer, atomic-state, resumable, and telemetry-backed local operation.
 
-## Frozen Finals
+## Current Approved Finals
 
-| Case | Final media SHA-256 |
-| --- | --- |
-| Day | `f2c16de58e145a7c5073e6fdbf9af9b6c39a9033ce1034a59099901d6333d8a0` |
-| Night | `5a010c26f5f3367f14a1fc25327ec93e7f244bf8c22b760946140dd928968e60` |
+| Case | Latest reviewed revision | Finalization ID | Final media SHA-256 |
+| --- | --- | --- | --- |
+| Day | `latest_reviewed_4808aa899c5da1a8` | `finalization_a9cc6da4ac152e74` | `4f0c57731b4d99ed2b4397472c8d991d3debb9962de1b4419cb941cff296d837` |
+| Night | `latest_reviewed_41fcfdd5b7e2349d` | `finalization_2e7257daf1187805` | `cc8982b317c439d7965dd151c562f0c01004b3252cfd5f63266fa95b0a21e88a` |
 
-## Frozen Delivery Packages
+Both current Final videos were watched through in full by the reviewer, approved at the exact Latest reviewed revision, and then published as immutable Finals.
+
+## Current Full Final Packages
 
 | Package | SHA-256 |
 | --- | --- |
-| Day | `dd20170dd1674899051b42ef36806af0c6160acf265afa73fa4f84af0f006eb0` |
-| Night | `a17a4f7f3bc5bad4eb99ddc61f89c05c44a0c608ca8498ed92ef88d484c98286` |
-| Combined | `dfc71335b72d7e9201fed1407840e2b03aa5f87e9a95cf8cac94e87469437f69` |
+| Day | `675a9a9362350824e10bbd941cebf20f041b5237c74f68300156482d1da5791a` |
+| Night | `396a51bdbf4988be7e128be35c61de3190896abb0376b5ccc7b4fea593ef023d` |
 
 ## Evaluation Disposition
 
@@ -48,6 +51,7 @@ release-v1.0
 - Night reviewed-final strict geometric coverage: 284 / 360 = 0.788889.
 - Night visual audit of the 76 strict geometric misses found no true visible privacy leaks.
 - Face reviewed-final numerical scoring is not supported by the frozen face evaluation contract.
+- The Night submission sample covers source frames 484-686 inclusive, is 203 frames/about 6.77 seconds, and has separate machine validation plus human visual acceptance with no known visible sensitive-data leak observed.
 
 See [EVALUATION.md](EVALUATION.md).
 

@@ -9,7 +9,7 @@ From the repository root:
 ```bash
 source .venv/bin/activate
 npm --prefix frontend run build
-redactor serve-final-review-workspace artifacts/reviewed_final_combined_v2_1/run_20260813T210250Z/review_workspace --open
+redactor serve-final-review-workspace path/to/release_review_workspace --open
 ```
 
 If the release artifacts are not present, generate a fresh local workspace first:
@@ -20,18 +20,18 @@ redactor redact-video path/to/input.mp4 \
   --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
   --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
   --plate-model models/open-image-models/yolo-v9-s-608-license-plates-end2end.onnx \
-  --output-dir artifacts/cases/demo_automatic_preview \
+  --output-dir path/to/demo_automatic_preview \
   --overwrite
 
-redactor serve-final-review-workspace artifacts/cases/demo_automatic_preview/review_workspace --open
+redactor serve-final-review-workspace path/to/demo_automatic_preview/review_workspace --open
 ```
 
 For correction demonstrations, use a disposable copy instead of the frozen release workspace:
 
 ```bash
-mkdir -p /tmp/video-redaction-demo
-cp -R artifacts/reviewed_final_combined_v2_1/run_20260813T210250Z/review_workspace /tmp/video-redaction-demo/review_workspace
-redactor serve-final-review-workspace /tmp/video-redaction-demo/review_workspace --open
+DEMO_WORKSPACE="$(mktemp -d)/review_workspace"
+cp -R path/to/release_review_workspace "$DEMO_WORKSPACE"
+redactor serve-final-review-workspace "$DEMO_WORKSPACE" --open
 ```
 
 ## Flow
@@ -40,9 +40,9 @@ redactor serve-final-review-workspace /tmp/video-redaction-demo/review_workspace
 2. Show the media role selector: Original, Automatic, Latest reviewed, and Final when available.
 3. Switch between Original and Automatic to show what the machine pass produced.
 4. Open Guidance and explain that it is advisory and auditable, not a mandatory per-card approval gate.
-5. Open Entities and show source-backed Person and Plate policy actions.
+5. Open Entities and show source-backed Person and Plate policy actions, preview media, and human-confirmed candidate merge behavior.
 6. In a disposable workspace, use Manual redaction to draw one correction, Preview it, and show real rendered privacy pixels inside the region.
-7. Save the correction and point out the saved/applying state and updated reviewed media lifecycle.
+7. Save the correction, remove it if demonstrating retraction, and point out the saved/applying state and updated reviewed media lifecycle.
 8. Show Latest reviewed as the revision that the reviewer watches.
 9. Explain that Approve full-video review is bound to the exact current Latest reviewed revision.
 10. Show Final and the download/package options.
@@ -63,7 +63,7 @@ redactor serve-final-review-workspace /tmp/video-redaction-demo/review_workspace
 
 ## What Not To Modify In A Frozen Workspace
 
-During a release demo of certified Final media:
+During a release demo of approved Final media:
 
 - do not create new decisions;
 - do not create entity actions;

@@ -24,13 +24,13 @@ The application also enforces a per-workspace single-writer lock. If a previous 
 For a locally available release workspace:
 
 ```bash
-redactor serve-final-review-workspace artifacts/reviewed_final_combined_v2_1/run_20260813T210250Z/review_workspace --open
+redactor serve-final-review-workspace path/to/release_review_workspace --open
 ```
 
 For a newly generated workspace:
 
 ```bash
-redactor serve-final-review-workspace artifacts/cases/example_automatic_preview/review_workspace --open
+redactor serve-final-review-workspace path/to/example_automatic_preview/review_workspace --open
 ```
 
 Use one writable server per workspace. Open additional browser tabs against the same server rather than starting a second server on the same workspace.

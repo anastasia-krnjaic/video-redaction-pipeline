@@ -45,7 +45,7 @@ Day reviewed-final plate scoring is unavailable:
 DIFFERENT_SOURCE_NOT_COMPARABLE
 ```
 
-The frozen `day_plate` benchmark is source-bound to `artifacts/eval_day_plate.mp4`, while the product Day Final uses a different full-case source. The correct release interpretation is unavailable, not zero and not failed.
+The frozen `day_plate` benchmark is source-bound to the frozen Day plate evaluation clip, while the product Day Final uses a different full-case source. The correct release interpretation is unavailable, not zero and not failed.
 
 Night reviewed-final strict geometric coverage is:
 
@@ -79,6 +79,14 @@ NOT_SUPPORTED_BY_FROZEN_FACE_EVALUATION_CONTRACT
 ```
 
 The release does not invent a face metric from visual sweep approval. Face evidence remains documented through source lineage, reviewed media validation, region validation, and full-video human approval.
+
+## Current Product Visual Review Evidence
+
+The current Day and Night Final identities are recorded in [RELEASE_EVIDENCE.md](RELEASE_EVIDENCE.md). For both cases, the reviewer watched the exact current Latest reviewed video in full, recorded explicit full-video approval for that revision, and produced immutable Final media from the approved revision.
+
+This evidence supports the current product release workflow. It does not become detector recall, automatic coverage, reviewed-final geometric coverage, or a mathematical/global zero-leak metric.
+
+The selected Night submission sample covers source frames 484-686 inclusive, 203 frames, or about 6.77 seconds. It has separate machine validation and human visual acceptance with no known visible sensitive-data leak observed in that sample. This is a bounded sample acceptance claim only.
 
 ## Evaluation Guardrails
 

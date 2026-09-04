@@ -8,6 +8,7 @@ This inventory classifies the documentation after the release-freeze documentati
 - [FINAL_REVIEW_WORKSPACE.md](FINAL_REVIEW_WORKSPACE.md): current reviewer and backend contract.
 - [DEMO_GUIDE.md](DEMO_GUIDE.md): short live-demo script.
 - [EVALUATION.md](EVALUATION.md): frozen evaluation disposition and limitations.
+- [PRODUCTION_SYSTEM_DESIGN_ONE_PAGE.md](PRODUCTION_SYSTEM_DESIGN_ONE_PAGE.md): one-page architecture and scaling summary.
 - [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md): production hardening and measured release results.
 - [RELEASE_NOTES.md](RELEASE_NOTES.md): release capabilities and known limitations.
 - [RELEASE_EVIDENCE.md](RELEASE_EVIDENCE.md): ignored artifact evidence index.

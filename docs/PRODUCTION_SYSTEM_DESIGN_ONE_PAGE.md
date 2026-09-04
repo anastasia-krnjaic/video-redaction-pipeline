@@ -4,7 +4,7 @@
 
 The system is a source-bound video redaction workflow. Each case begins by ingesting the source video, extracting FFprobe metadata, and recording a source hash. The automated path then runs the supported face and license-plate inference stages, associates detections into temporal tracks, applies deterministic/bounded recovery for defensible short gaps, and renders an immutable **Automatic** video. Automatic is evidence for review, not the final privacy claim.
 
-Human review happens in the local Final Review Workspace. Reviewers inspect Guidance, apply Entity policy, add Manual corrections when needed, preview those corrections on a local short frame or interval, save one or more pending changes, and explicitly select **Build reviewed video**. The build compiles the current reviewed state into a validated **Latest reviewed** revision. Final publication requires a full-video approval bound to that exact Latest reviewed revision, then creates an immutable **Final** video and delivery package.
+Human review happens in the local Final Review Workspace. Reviewers inspect Guidance, apply privacy-conservative Entity policy, add or retract Manual corrections when needed, preview corrections on a local short frame or interval, save one or more pending changes, and explicitly select **Build reviewed video**. The build compiles the current reviewed state into a validated **Latest reviewed** revision. Final publication requires a full-video approval bound to that exact Latest reviewed revision, then creates an immutable **Final** video and delivery package.
 
 ## Inference / GPU Efficiency
 
@@ -12,15 +12,15 @@ The current release is a local implementation, not a distributed GPU service. It
 
 ## Human In The Loop
 
-Guidance highlights intervals that deserve reviewer attention but does not fabricate Correct decisions and does not alone block finalization. Needs correction is fail-closed. Entity actions apply to the whole source-backed person or plate, so reviewers must inspect the interval before rejecting or preserving an entity. Manual Preview verifies draft geometry locally; Save persists authoritative review state; **Build reviewed video** materializes all pending media-affecting changes in one job. Full-video approval remains the final human gate before Final.
+Guidance highlights intervals that deserve reviewer attention but does not fabricate Correct decisions and does not alone block finalization. Needs correction is fail-closed. The player supports frame-accurate seeking in source-frame coordinates. Entity actions apply to the whole source-backed person or plate, use on-demand/background-cached previews, surface purity/conflict risks, and require human confirmation for candidate merges. Manual Preview verifies draft geometry locally; Save or Remove persists authoritative review state; **Build reviewed video** materializes all pending media-affecting changes in one job. Full-video approval remains the final human gate before Final.
 
 ## Storage / Provenance
 
-Portable evidence is built from source hashes, source-frame coordinates, model/config identities, append-only review events, reviewed-region records, revision pointers, media hashes, and validation artifacts. Reviewed-region records preserve category, frame/timestamp basis, geometry, entity/track binding, provenance, detector evidence where available, manual correction identity where applicable, reviewed-region-set identity, and output revision binding. Delivery packages include media, summary manifests, validation state, and packaged reviewed-region records with hashes so the per-redaction record can be verified without local absolute paths.
+Portable evidence is built from source hashes, source-frame coordinates, model/config identities, append-only review events, reviewed-region records, revision pointers, media hashes, and validation artifacts. Reviewed-region records preserve category, frame/timestamp basis, geometry, entity/track binding, provenance, detector evidence where available, manual correction identity or retraction where applicable, reviewed-region-set identity, and output revision binding. Delivery packages include media, summary manifests, validation state, and packaged reviewed-region records with hashes so the per-redaction record can be verified without local absolute paths.
 
 ## Queueing / Concurrency
 
-The local release uses a single-writer workspace lock and background admission for heavy reviewed-video materialization. Media-affecting edits mark Latest reviewed as pending. Explicit build jobs are guarded by the active review-state projection; stale or superseded jobs cannot publish current media. A production service would move this to durable queues, worker leases, idempotent job keys, retry/dead-letter handling, and per-case concurrency controls.
+The local release uses explicit session routing, a single-writer workspace lock, case-scoped decision persistence, and background admission for heavy reviewed-video materialization. Media-affecting edits mark Latest reviewed as pending. Explicit build jobs are guarded by the active review-state projection; stale or superseded jobs cannot publish current media. A production service would move this to durable queues, worker leases, idempotent job keys, retry/dead-letter handling, and per-case concurrency controls.
 
 ## Bottlenecks
 

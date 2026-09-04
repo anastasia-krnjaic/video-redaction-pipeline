@@ -2,8 +2,9 @@
 
 This document describes the frozen plate evaluation implementation for
 `plate_ground_truth_v1.0`. It documents scoring behavior only; it does not
-publish detector recall, automatic coverage, reviewed-final coverage, or any
-real certified plate metric.
+publish the current detector recall, automatic coverage, or reviewed-final
+coverage results. Current frozen release results are recorded in
+[EVALUATION.md](EVALUATION.md).
 
 ## Ground Truth Scope
 
@@ -117,13 +118,13 @@ Required trust gates include:
 - current finalization.
 
 If any gate fails, `publishable_metrics` is false and exact blockers are
-reported. The current real reviewed-final state requires regeneration or
-review evidence before certified reviewed-final metrics can be published.
+reported. Current release dispositions are recorded in [EVALUATION.md](EVALUATION.md)
+after applying these gates.
 
-Allowed future wording when all gates pass is limited to the certified
-windows: no uncovered GT plate frames found in those windows, with human
-final-review evidence present. The scoring path does not claim automated
-pixel-level zero leak.
+Allowed wording when all gates pass is limited to the certified windows: no
+uncovered GT plate frames found in those windows, with human final-review
+evidence present. The scoring path does not claim automated pixel-level zero
+leak.
 
 ## Fail-Closed Behavior
 
@@ -135,11 +136,11 @@ Final pointers, invalid finalization, missing sweep evidence, failed media or
 region validation, and unsupported report schemas.
 
 `--validate-only` validates lineage and inputs and writes non-publishable
-reports without calculating certified scoring metrics.
+reports without calculating scoring metrics.
 
 ## Implementation Separation
 
-The implementation freezes policy and scoring code before real certified
-plate metrics are executed. Synthetic tests may calculate metrics to verify
-policy behavior. Real detector, automatic, and reviewed-final artifacts may be
-parsed only through validation-only flows in this phase.
+The implementation freezes policy and scoring code separately from release
+reporting. Synthetic tests may calculate metrics to verify policy behavior.
+Real detector, automatic, and reviewed-final artifacts are reported through the
+release evaluation disposition rather than by rewriting this policy reference.

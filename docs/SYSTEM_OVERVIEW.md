@@ -9,7 +9,7 @@ The release is frozen at the product behavior level. Functional implementation, 
 Current release checkpoints:
 
 - production-readiness tag: `production-readiness-v1`
-- recommended final release tag: `release-v1.0`
+- current submission release label: `submission-release-v1.0.3`
 - current review policy: `review_guidance_full_sweep.v1`
 
 ## Pipeline Shape
@@ -56,4 +56,4 @@ See [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md).
 
 ## Important Boundaries
 
-The release does not claim universal zero leaks, does not publish detector precision without complete negative Ground Truth, and does not reinterpret Ground Truth after Final publication. Detector inference remains the primary heavy workload and was not semantically changed during production optimization.
+The release does not claim universal or mathematical zero leaks for complete product videos, does not publish detector precision without complete negative Ground Truth, and does not reinterpret Ground Truth after Final publication. Current Final approval means the exact Latest reviewed media was watched through in full, explicitly approved, and published as immutable Final media. Detector inference remains the primary heavy workload and was not semantically changed during production optimization.
