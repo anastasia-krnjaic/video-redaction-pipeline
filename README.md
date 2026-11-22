@@ -2,7 +2,7 @@
 
 A local video privacy-redaction pipeline for **faces and license plates**, combining pretrained detection, temporal tracking, bounded gap recovery, source-frame-accurate rendering, evaluation, and a **React human-review workspace**.
 
-Built by **Anastasia Sokolenko** as an applied computer-vision engineering project around pretrained OpenVINO ADAS and Open Image Models YOLOv9 detectors.
+Built by **Anastasia Krnjaic** as an applied computer-vision engineering project around pretrained OpenVINO ADAS and Open Image Models YOLOv9 detectors.
 
 ![Synthetic face and plate-like targets with privacy redaction](docs/assets/video_redaction_demo.gif)
 
