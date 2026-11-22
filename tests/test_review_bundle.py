@@ -118,15 +118,16 @@ def single_frame_render_validation(
 ) -> dict[str, Any]:
     source = frame if frame is not None else synthetic_large_frame(0)
     authoritative_source = source_frame if source_frame is not None else source
-    render_settings = settings or review_bundle.ReviewRenderConfig(
-        margin_fraction=0.5,
-        pixel_size=8,
-    ).render_settings()
+    render_settings = (
+        settings
+        or review_bundle.ReviewRenderConfig(
+            margin_fraction=0.5,
+            pixel_size=8,
+        ).render_settings()
+    )
     source_path = write_synthetic_video(tmp_path / "source.mp4", [authoritative_source])
     candidate_source = (
-        review_bundle.decode_video_frames(source_path)[0]
-        if source_frame is None
-        else source
+        review_bundle.decode_video_frames(source_path)[0] if source_frame is None else source
     )
     original_path = write_synthetic_video(tmp_path / "original.mp4", [candidate_source])
     rendered = review_bundle.rendering.render_frame(

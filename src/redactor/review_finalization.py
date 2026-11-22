@@ -182,19 +182,10 @@ def finalization_blockers(
                             ),
                             case_id=case_id,
                         )
-                        revision_manifest = dict(
-                            pointer.get("revision_manifest_payload") or {}
-                        )
-                        media_current = (
-                            reviewed_regions.reviewed_region_media_identity_matches(
-                                dict(
-                                    target_digest.get("reviewed_region_identity") or {}
-                                ),
-                                dict(
-                                    revision_manifest.get("reviewed_region_identity")
-                                    or {}
-                                ),
-                            )
+                        revision_manifest = dict(pointer.get("revision_manifest_payload") or {})
+                        media_current = reviewed_regions.reviewed_region_media_identity_matches(
+                            dict(target_digest.get("reviewed_region_identity") or {}),
+                            dict(revision_manifest.get("reviewed_region_identity") or {}),
                         )
                     except (ValueError, reviewed_regions.ReviewedRegionCompilationError):
                         media_current = False
@@ -559,9 +550,7 @@ def finalize_canonical_reviewed_case(
     ]
     if mismatches:
         return {
-            "blockers": [
-                f"{case_id}: finalization request {key} mismatch" for key in mismatches
-            ],
+            "blockers": [f"{case_id}: finalization request {key} mismatch" for key in mismatches],
             "case_id": case_id,
             "finalized": False,
             "request_binding": request_binding,
@@ -597,8 +586,7 @@ def finalize_canonical_reviewed_case(
             )
             if (
                 current.get("case_id") == case_id
-                and current.get("finalization_input_sha256")
-                == finalization_input_sha256
+                and current.get("finalization_input_sha256") == finalization_input_sha256
             ):
                 final_role = current_final_role(package_root, session_dir, case_id=case_id)
                 if final_role:
@@ -657,9 +645,7 @@ def finalize_canonical_reviewed_case(
             "case_id": case_id,
             "final_video_sha256": final_video_sha256,
             "latest_reviewed_region_validation": candidate["region_validation"],
-            "latest_reviewed_region_validation_sha256": candidate[
-                "region_validation_sha256"
-            ],
+            "latest_reviewed_region_validation_sha256": candidate["region_validation_sha256"],
             "latest_reviewed_revision_id": candidate["revision_id"],
             "latest_reviewed_video_sha256": candidate["latest_video_sha256"],
             "passed": candidate["region_validation"].get("passed") is True,
@@ -704,19 +690,11 @@ def finalize_canonical_reviewed_case(
             "finalized_at": media.utc_timestamp(),
             "guidance_identity_hash": guidance_snapshot["guidance_identity_hash"],
             "guidance_unreviewed_count": guidance_snapshot["guidance_unreviewed_count"],
-            "guidance_unreviewed_task_ids": guidance_snapshot[
-                "guidance_unreviewed_task_ids"
-            ],
-            "latest_reviewed_media_validation_sha256": candidate[
-                "media_validation_sha256"
-            ],
-            "latest_reviewed_region_validation_sha256": candidate[
-                "region_validation_sha256"
-            ],
+            "guidance_unreviewed_task_ids": guidance_snapshot["guidance_unreviewed_task_ids"],
+            "latest_reviewed_media_validation_sha256": candidate["media_validation_sha256"],
+            "latest_reviewed_region_validation_sha256": candidate["region_validation_sha256"],
             "latest_reviewed_revision_id": candidate["revision_id"],
-            "latest_reviewed_revision_manifest_sha256": candidate[
-                "revision_manifest_sha256"
-            ],
+            "latest_reviewed_revision_manifest_sha256": candidate["revision_manifest_sha256"],
             "latest_reviewed_video_sha256": candidate["latest_video_sha256"],
             "media_validation_identity": final_media_validation_identity(
                 candidate,
@@ -724,9 +702,7 @@ def finalize_canonical_reviewed_case(
             ),
             "publication_guard": publication_guard,
             "region_validation_identity": {
-                "latest_reviewed_region_validation_sha256": candidate[
-                    "region_validation_sha256"
-                ],
+                "latest_reviewed_region_validation_sha256": candidate["region_validation_sha256"],
                 "reviewed_region_set_sha256": candidate["reviewed_region_set_sha256"],
                 "schema_version": "region_validation_identity.v1",
             },
@@ -744,9 +720,7 @@ def finalize_canonical_reviewed_case(
             "unreviewed_guidance_snapshot": guidance_snapshot,
             "workspace_manifest_sha256": candidate["workspace_manifest_sha256"],
         }
-        finalization_manifest["finalization_manifest_sha256"] = stable_hash(
-            finalization_manifest
-        )
+        finalization_manifest["finalization_manifest_sha256"] = stable_hash(finalization_manifest)
         write_json(temp_root / "finalization_manifest.json", finalization_manifest)
         maybe_inject_finalization_failure("after_finalization_manifest_write")
         validate_finalization_revision(temp_root)
@@ -854,9 +828,7 @@ def resolve_canonical_latest_reviewed_candidate(
         str(latest_role.get("path") or ""),
         label="Latest reviewed video",
     )
-    manifest = case_manifests.load_case_manifest(
-        case_ids.case_manifest_path(package_root, case_id)
-    )
+    manifest = case_manifests.load_case_manifest(case_ids.case_manifest_path(package_root, case_id))
     source_path = contained_package_path(
         package_root,
         str(manifest.source_path or ""),
@@ -884,9 +856,7 @@ def resolve_canonical_latest_reviewed_candidate(
         working_state=working_state,
     )
     reviewed_region_set_sha256 = str(current_digest.get("effective_regions_hash") or "")
-    published_region_set_sha256 = str(
-        revision_manifest.get("reviewed_region_set_sha256") or ""
-    )
+    published_region_set_sha256 = str(revision_manifest.get("reviewed_region_set_sha256") or "")
     media_identity_current = reviewed_regions.reviewed_region_media_identity_matches(
         dict(current_digest.get("reviewed_region_identity") or {}),
         dict(revision_manifest.get("reviewed_region_identity") or {}),
@@ -1012,13 +982,15 @@ def validate_canonical_latest_validation_artifacts(candidate: dict[str, Any]) ->
     content_identities = dict(candidate.get("content_identities") or {})
     expected_media = dict(content_identities.get("latest_reviewed_media_validation") or {})
     expected_region = dict(content_identities.get("latest_reviewed_region_validation") or {})
-    if expected_media.get("sha256") and expected_media.get("sha256") != candidate[
-        "media_validation_sha256"
-    ]:
+    if (
+        expected_media.get("sha256")
+        and expected_media.get("sha256") != candidate["media_validation_sha256"]
+    ):
         blockers.append(f"{candidate['case_id']}: Latest reviewed media-validation hash mismatch")
-    if expected_region.get("sha256") and expected_region.get("sha256") != candidate[
-        "region_validation_sha256"
-    ]:
+    if (
+        expected_region.get("sha256")
+        and expected_region.get("sha256") != candidate["region_validation_sha256"]
+    ):
         blockers.append(f"{candidate['case_id']}: Latest reviewed region-validation hash mismatch")
     if candidate["media_validation"].get("passed") is not True:
         blockers.append(f"{candidate['case_id']}: Latest reviewed media validation has not passed")
@@ -1068,12 +1040,8 @@ def sweep_acknowledgement_binding(
         "case_id": case_id,
         "current_session_head_before_ack": last_event_hash(session_dir),
         "explicit_reviewer_action": "full_video_sweep_acknowledged",
-        "guidance_identity_hash": candidate["unreviewed_guidance"][
-            "guidance_identity_hash"
-        ],
-        "guidance_unreviewed_count": candidate["unreviewed_guidance"][
-            "guidance_unreviewed_count"
-        ],
+        "guidance_identity_hash": candidate["unreviewed_guidance"]["guidance_identity_hash"],
+        "guidance_unreviewed_count": candidate["unreviewed_guidance"]["guidance_unreviewed_count"],
         "guidance_unreviewed_task_ids": candidate["unreviewed_guidance"][
             "guidance_unreviewed_task_ids"
         ],
@@ -1135,9 +1103,7 @@ def finalization_request_binding_from_candidate(
         "review_session_id": candidate["pointer"].get("review_session_id"),
         "reviewed_region_set_sha256": candidate["reviewed_region_set_sha256"],
         "schema_version": "finalization_request_binding.v1",
-        "sweep_acknowledgement_sha256": sweep_acknowledgement[
-            "sweep_acknowledgement_sha256"
-        ],
+        "sweep_acknowledgement_sha256": sweep_acknowledgement["sweep_acknowledgement_sha256"],
     }
 
 
@@ -1166,12 +1132,8 @@ def require_canonical_sweep_acknowledgement(
     blockers = validate_canonical_sweep_acknowledgement(candidate, working_state)
     if blockers:
         raise ValueError("; ".join(blockers))
-    acknowledgement = dict(working_state.get("sweep_acknowledgements") or {})[
-        candidate["case_id"]
-    ]
-    acknowledgement["sweep_acknowledgement_sha256"] = sweep_acknowledgement_sha256(
-        acknowledgement
-    )
+    acknowledgement = dict(working_state.get("sweep_acknowledgements") or {})[candidate["case_id"]]
+    acknowledgement["sweep_acknowledgement_sha256"] = sweep_acknowledgement_sha256(acknowledgement)
     return acknowledgement
 
 
@@ -1195,9 +1157,11 @@ def required_task_resolution_identity(
 
     decisions_by_case = review_working_state.task_decisions_by_case_from_payload(working_state)
     resolutions_by_case = review_working_state.task_resolutions_by_case_from_payload(working_state)
-    tasks_payload = load_json(package_root / "reviewer_tasks.json") if (
-        package_root / "reviewer_tasks.json"
-    ).exists() else {"tasks": []}
+    tasks_payload = (
+        load_json(package_root / "reviewer_tasks.json")
+        if (package_root / "reviewer_tasks.json").exists()
+        else {"tasks": []}
+    )
     task_sources = [
         *list(tasks_payload.get("tasks") or []),
         *list(working_state.get("active_manual_tasks") or []),
@@ -1229,9 +1193,7 @@ def required_task_resolution_identity(
             "decision_status": decision.get("decision_status"),
             "issue_type": task.get("issue_type"),
             "normal_task_class": task.get("normal_task_class"),
-            "resolved_by": decision.get("resolved_by") or "explicit_decision"
-            if decision
-            else None,
+            "resolved_by": decision.get("resolved_by") or "explicit_decision" if decision else None,
             "task_id": task_id,
         }
     ordered = [rows[key] for key in sorted(rows)]
@@ -1304,9 +1266,7 @@ def finalization_input_payload(
         "active_decisions_hash": identity.get("active_decisions_hash"),
         "case_id": candidate["case_id"],
         "category_run_identity_hash": candidate["category_run_identity_hash"],
-        "correction_verification_set_hash": correction_identity[
-            "correction_verification_set_hash"
-        ],
+        "correction_verification_set_hash": correction_identity["correction_verification_set_hash"],
         "latest_reviewed_media_validation_sha256": candidate["media_validation_sha256"],
         "latest_reviewed_region_validation_sha256": candidate["region_validation_sha256"],
         "latest_reviewed_revision_id": candidate["revision_id"],
@@ -1319,9 +1279,7 @@ def finalization_input_payload(
         "selected_categories": candidate["selected_categories"],
         "session_id": candidate["pointer"].get("review_session_id"),
         "source_sha256": candidate["source_sha256"],
-        "sweep_acknowledgement_sha256": sweep_acknowledgement[
-            "sweep_acknowledgement_sha256"
-        ],
+        "sweep_acknowledgement_sha256": sweep_acknowledgement["sweep_acknowledgement_sha256"],
         "working_state_generation": candidate["working_state"].get("active_projection_hash"),
         "workspace_manifest_sha256": candidate["workspace_manifest_sha256"],
     }
@@ -1343,9 +1301,7 @@ def finalization_publication_guard(
         "reviewed_region_set_sha256": candidate["reviewed_region_set_sha256"],
         "schema_version": "finalization_publication_guard.v1",
         "session_id": candidate["pointer"].get("review_session_id"),
-        "sweep_acknowledgement_sha256": sweep_acknowledgement[
-            "sweep_acknowledgement_sha256"
-        ],
+        "sweep_acknowledgement_sha256": sweep_acknowledgement["sweep_acknowledgement_sha256"],
         "working_state_generation": candidate["working_state"].get("active_projection_hash"),
         "workspace_manifest_sha256": candidate["workspace_manifest_sha256"],
     }
@@ -1458,12 +1414,8 @@ def publish_final_current_pointer(
         "finalization_input_sha256": finalization_manifest["finalization_input_sha256"],
         "finalization_manifest": manifest_path.relative_to(package_root).as_posix(),
         "finalization_manifest_artifact_sha256": media.sha256_file(manifest_path),
-        "finalization_manifest_sha256": finalization_manifest[
-            "finalization_manifest_sha256"
-        ],
-        "latest_reviewed_video_sha256": finalization_manifest[
-            "latest_reviewed_video_sha256"
-        ],
+        "finalization_manifest_sha256": finalization_manifest["finalization_manifest_sha256"],
+        "latest_reviewed_video_sha256": finalization_manifest["latest_reviewed_video_sha256"],
         "published_at_utc": media.utc_timestamp(),
         "review_session_id": finalization_manifest["review_session_id"],
         "reviewed_region_set_sha256": finalization_manifest["reviewed_region_set_sha256"],
@@ -1471,9 +1423,7 @@ def publish_final_current_pointer(
         "session_head_hash": finalization_manifest["session_head_hash"],
         "source_sha256": finalization_manifest["source_sha256"],
         "status": "ready",
-        "sweep_acknowledgement_sha256": finalization_manifest[
-            "sweep_acknowledgement_sha256"
-        ],
+        "sweep_acknowledgement_sha256": finalization_manifest["sweep_acknowledgement_sha256"],
         "workspace_manifest_sha256": finalization_manifest["workspace_manifest_sha256"],
     }
     pointer_index = final_current_pointer_index_payload(package_root)
@@ -1543,9 +1493,7 @@ def validate_current_final_pointer(
         str(pointer.get("finalization_manifest") or ""),
         label="finalization manifest",
     )
-    if pointer.get("finalization_manifest_artifact_sha256") != media.sha256_file(
-        manifest_path
-    ):
+    if pointer.get("finalization_manifest_artifact_sha256") != media.sha256_file(manifest_path):
         raise ValueError("Finalization manifest artifact hash mismatch")
     finalization_manifest = load_json(manifest_path)
     validate_finalization_manifest_payload(finalization_manifest)
@@ -1566,9 +1514,8 @@ def validate_current_final_pointer(
     ):
         if str(pointer.get(key) or "") != str(finalization_manifest.get(key) or ""):
             raise ValueError(f"Final pointer {key} mismatch")
-    if (
-        pointer.get("approved_latest_reviewed_revision_id")
-        != finalization_manifest.get("latest_reviewed_revision_id")
+    if pointer.get("approved_latest_reviewed_revision_id") != finalization_manifest.get(
+        "latest_reviewed_revision_id"
     ):
         raise ValueError("Final pointer Latest reviewed revision mismatch")
     if pointer.get("latest_reviewed_video_sha256") != finalization_manifest.get(
@@ -1593,17 +1540,20 @@ def validate_finalization_revision(revision_root: Path) -> dict[str, Any]:
             raise ValueError(f"Finalization revision artifact missing: {path.name}")
     if media.sha256_file(final_video_path) != finalization_manifest["final_video_sha256"]:
         raise ValueError("Final video artifact hash mismatch")
-    if finalization_manifest["final_video_sha256"] != finalization_manifest[
-        "latest_reviewed_video_sha256"
-    ]:
+    if (
+        finalization_manifest["final_video_sha256"]
+        != finalization_manifest["latest_reviewed_video_sha256"]
+    ):
         raise ValueError("Final video is not byte-identical to Latest reviewed")
-    if media.sha256_file(final_media_path) != finalization_manifest[
-        "final_media_validation_sha256"
-    ]:
+    if (
+        media.sha256_file(final_media_path)
+        != finalization_manifest["final_media_validation_sha256"]
+    ):
         raise ValueError("Final media validation hash mismatch")
-    if media.sha256_file(final_region_path) != finalization_manifest[
-        "final_region_validation_sha256"
-    ]:
+    if (
+        media.sha256_file(final_region_path)
+        != finalization_manifest["final_region_validation_sha256"]
+    ):
         raise ValueError("Final region validation hash mismatch")
     return finalization_manifest
 
@@ -1675,17 +1625,20 @@ def current_final_role(
                 return {}
             if candidate["revision_id"] != finalization_manifest["latest_reviewed_revision_id"]:
                 return {}
-            if candidate["latest_video_sha256"] != finalization_manifest[
-                "latest_reviewed_video_sha256"
-            ]:
+            if (
+                candidate["latest_video_sha256"]
+                != finalization_manifest["latest_reviewed_video_sha256"]
+            ):
                 return {}
-            if candidate["reviewed_region_set_sha256"] != finalization_manifest[
-                "reviewed_region_set_sha256"
-            ]:
+            if (
+                candidate["reviewed_region_set_sha256"]
+                != finalization_manifest["reviewed_region_set_sha256"]
+            ):
                 return {}
-            if sweep["sweep_acknowledgement_sha256"] != finalization_manifest[
-                "sweep_acknowledgement_sha256"
-            ]:
+            if (
+                sweep["sweep_acknowledgement_sha256"]
+                != finalization_manifest["sweep_acknowledgement_sha256"]
+            ):
                 return {}
     return {
         "current_status": "current",
@@ -1707,9 +1660,7 @@ def current_final_role(
         )
         or finalization_manifest.get("finalization_input", {}).get("source_frame_start")
         or 0,
-        "sweep_acknowledgement_sha256": finalization_manifest[
-            "sweep_acknowledgement_sha256"
-        ],
+        "sweep_acknowledgement_sha256": finalization_manifest["sweep_acknowledgement_sha256"],
         "validation_status": "passed",
     }
 
@@ -1779,9 +1730,7 @@ def reopen_case_final_for_review(
             "case_id": case_id,
             "historical_final_media_sha256": finalization_manifest["final_video_sha256"],
             "historical_finalization_id": finalization_manifest["finalization_id"],
-            "historical_latest_revision_id": finalization_manifest[
-                "latest_reviewed_revision_id"
-            ],
+            "historical_latest_revision_id": finalization_manifest["latest_reviewed_revision_id"],
             "historical_sweep_event_hash": sweep.get("event_hash"),
             "historical_sweep_event_id": sweep.get("event_id"),
             "reason": reason,
@@ -1791,9 +1740,7 @@ def reopen_case_final_for_review(
         note=reason,
         application_hashes={
             "final_video_sha256": finalization_manifest["final_video_sha256"],
-            "finalization_input_sha256": finalization_manifest[
-                "finalization_input_sha256"
-            ],
+            "finalization_input_sha256": finalization_manifest["finalization_input_sha256"],
         },
     )
 
@@ -1841,9 +1788,7 @@ def canonical_finalization_result(
         "finalization_input_sha256": finalization_manifest["finalization_input_sha256"],
         "finalized": True,
         "latest_reviewed_revision_id": finalization_manifest["latest_reviewed_revision_id"],
-        "latest_reviewed_video_sha256": finalization_manifest[
-            "latest_reviewed_video_sha256"
-        ],
+        "latest_reviewed_video_sha256": finalization_manifest["latest_reviewed_video_sha256"],
         "media_validation_passed": True,
         "region_validation_passed": True,
         "rendered_region_validation_passed": True,

@@ -56,7 +56,8 @@ class ArtifactReference:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "artifact_id": self.artifact_id or artifact_id_for(
+            "artifact_id": self.artifact_id
+            or artifact_id_for(
                 role=self.role,
                 category=self.category,
             ),
@@ -123,9 +124,7 @@ def artifact_reference_from_dict(payload: dict[str, Any]) -> ArtifactReference:
         category=_optional_str(payload.get("category")),
         path=str(payload.get("path") or ""),
         role=str(payload.get("role") or ""),
-        schema_version=str(
-            payload.get("schema_version") or ARTIFACT_REFERENCE_SCHEMA_VERSION
-        ),
+        schema_version=str(payload.get("schema_version") or ARTIFACT_REFERENCE_SCHEMA_VERSION),
         sha256=str(payload.get("sha256") or ""),
         size_bytes=int(payload.get("size_bytes") if payload.get("size_bytes") is not None else -1),
     )

@@ -4,9 +4,9 @@ Video Redaction Pipeline is a local media privacy system for faces and license p
 
 ## Release Status
 
-The release is frozen at the product behavior level. Functional implementation, human review, Finals, delivery packages, evaluation disposition, production optimization, cleanup, and post-cleanup regression are complete.
+The processing and review behavior remains frozen during Portfolio Release Preparation v1. The public repository demonstrates the existing face/plate pipeline, synthetic developer workflow, and compact evaluation evidence. Private submission media, sessions, and delivery packages remain ignored local artifacts; their existence is not a clean-clone prerequisite.
 
-Current release checkpoints:
+Local submission checkpoints (historical product labels, not a public portfolio release tag):
 
 - production-readiness tag: `production-readiness-v1`
 - current submission release label: `submission-release-v1.0.3`
@@ -44,7 +44,9 @@ Evaluation is frozen and separated by claim type:
 - reviewed-final geometric coverage;
 - full-video human sweep evidence.
 
-Day reviewed-final plate scoring is unavailable because the frozen benchmark source is not comparable to the product Day Final source. Night reviewed-final strict geometric coverage is 284 / 360 = 0.788889, and the 76 strict misses were visually audited with no true visible privacy leaks found. Face reviewed-final numerical scoring is not supported by the frozen face evaluation contract.
+Tracked detector evidence reports ADAS face recall of 833 / 852 at the primary 0.30 threshold and OIM plate recall of 557 / 600. These source-bound detector metrics exclude temporal and reviewed regions.
+
+Day reviewed-final plate scoring is unavailable because the frozen benchmark source differs from the product Day Final source. The Night geometric result 284 / 360 = 0.788889 and its 76-frame visual audit belong to historical revision `latest_reviewed_133bd8a1e52cfa36`, not current submission revision `latest_reviewed_41fcfdd5b7e2349d`. No current-Final score is inferred from that result. Face reviewed-final numerical scoring is not supported by the frozen face evaluation contract.
 
 See [EVALUATION.md](EVALUATION.md).
 
@@ -57,3 +59,11 @@ See [PRODUCTION_READINESS.md](PRODUCTION_READINESS.md).
 ## Important Boundaries
 
 The release does not claim universal or mathematical zero leaks for complete product videos, does not publish detector precision without complete negative Ground Truth, and does not reinterpret Ground Truth after Final publication. Current Final approval means the exact Latest reviewed media was watched through in full, explicitly approved, and published as immutable Final media. Detector inference remains the primary heavy workload and was not semantically changed during production optimization.
+
+## Public developer entry points
+
+Start with the [README](../README.md), [model setup](MODEL_SETUP.md), and
+[synthetic demo guide](DEMO_GUIDE.md). The public suite uses synthetic fixtures;
+private release-lineage tests are explicit optional integration checks. Archived
+comparison models and historical overviews are research context, not supported
+setup alternatives.

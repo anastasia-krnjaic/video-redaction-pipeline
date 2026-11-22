@@ -483,8 +483,9 @@ def test_plate_evaluation_reports_capability_gap_without_scores(tmp_path: Path) 
     assert metrics["publishable_metrics"] is False
     assert metrics["detector"]["object_frame_recall"] is None
     assert metrics["privacy"]["privacy_coverage"] is None
-    assert "machine_readable_ground_truth_has_no_license_plate_objects" in metrics[
-        "capability"
-    ]["blockers"]
+    assert (
+        "machine_readable_ground_truth_has_no_license_plate_objects"
+        in metrics["capability"]["blockers"]
+    )
     assert written_metrics == metrics
     assert "not an evaluation scorecard" in report

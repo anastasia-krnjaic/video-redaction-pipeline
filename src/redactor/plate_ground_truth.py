@@ -203,11 +203,7 @@ def build_plate_ground_truth_from_export(
         expected = EXPECTED_BENCHMARKS[benchmark_id]
         records = []
         for record in sorted(
-            (
-                item
-                for item in export["mandatory_frames"]
-                if item["benchmark_id"] == benchmark_id
-            ),
+            (item for item in export["mandatory_frames"] if item["benchmark_id"] == benchmark_id),
             key=lambda item: item["dense_frame"],
         ):
             provenance = record["annotation_provenance"]
@@ -223,9 +219,7 @@ def build_plate_ground_truth_from_export(
                             "semantic_content_hash"
                         ],
                         "annotation_review_export_sha256": export_sha256,
-                        "human_adjusted_geometry": bool(
-                            provenance.get("human_adjusted_geometry")
-                        ),
+                        "human_adjusted_geometry": bool(provenance.get("human_adjusted_geometry")),
                         "human_reviewed": bool(provenance.get("human_reviewed")),
                         "migration_source_package_id": provenance.get(
                             "migration_source_package_id"
@@ -262,9 +256,7 @@ def build_plate_ground_truth_from_export(
                 "evaluation_video": expected["evaluation_video"],
                 "frame_mapping": {
                     "dense_frame_interval": expected["dense_frame_interval"],
-                    "parent_evaluation_frame_interval": expected[
-                        "frozen_parent_frame_interval"
-                    ],
+                    "parent_evaluation_frame_interval": expected["frozen_parent_frame_interval"],
                     "parent_to_dense_offset": expected["parent_to_dense_offset"],
                 },
                 "record_count": expected["expected_record_count"],
@@ -281,9 +273,7 @@ def build_plate_ground_truth_from_export(
                 "temporal_policy": {
                     "detector_ignore_dense_ranges": [],
                     "detector_scored_dense_ranges": [expected["dense_frame_interval"]],
-                    "final_redaction_required_dense_ranges": [
-                        expected["dense_frame_interval"]
-                    ],
+                    "final_redaction_required_dense_ranges": [expected["dense_frame_interval"]],
                 },
             }
         )
@@ -296,8 +286,7 @@ def build_plate_ground_truth_from_export(
             "independent_annotation_audit": {
                 "safe_to_publish_gt_decision": "YES",
                 "verdict": (
-                    "PASS -- annotations are safe to freeze for machine-readable "
-                    "plate Ground Truth"
+                    "PASS -- annotations are safe to freeze for machine-readable plate Ground Truth"
                 ),
             },
             "proposal_assistance_disclosure": (
@@ -404,8 +393,9 @@ def validate_completed_annotation_export(export: dict[str, Any]) -> list[str]:
         errors.append("annotation export is not final_review")
     if export.get("package_id") != EXPECTED_PACKAGE_ID:
         errors.append("annotation export package_id mismatch")
-    if export.get("package_file_sha256", {}).get("package_manifest.json") != (
-        EXPECTED_PACKAGE_FILE_SHA256["package_manifest.json"]
+    if (
+        export.get("package_file_sha256", {}).get("package_manifest.json")
+        != (EXPECTED_PACKAGE_FILE_SHA256["package_manifest.json"])
     ):
         errors.append("annotation export package manifest hash mismatch")
     if export.get("semantic_content_hash") != semantic_content_hash(export):

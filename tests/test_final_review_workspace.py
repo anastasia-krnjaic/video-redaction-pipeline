@@ -404,11 +404,7 @@ def write_test_category_run_manifest(
     }
     run_manifest["category_run_content_sha256"] = stable_hash(run_manifest)
     path = (
-        package_root
-        / "category_runs"
-        / manifest.case_id
-        / category
-        / "category_run_manifest.json"
+        package_root / "category_runs" / manifest.case_id / category / "category_run_manifest.json"
     )
     write_json(path, run_manifest)
     return {
@@ -656,9 +652,7 @@ def create_multi_case_session(
         reviewer=review_sessions.ReviewerIdentity("Analyst", "analyst@example.test"),
         source_revision="test",
         configuration_freeze_hash=stable_hash(freeze),
-        case_manifest_hashes={
-            manifest.case_id: manifest.manifest_hash() for manifest in manifests
-        },
+        case_manifest_hashes={manifest.case_id: manifest.manifest_hash() for manifest in manifests},
         source_hashes={
             manifest.case_id: manifest.source_video_hash or "" for manifest in manifests
         },
@@ -786,7 +780,8 @@ def write_duplicate_task_case_package(
             "tasks": [
                 dict(shared_task) | {"case_id": "day"},
                 dict(shared_task) | {"case_id": "night"},
-                dict(shared_task) | {
+                dict(shared_task)
+                | {
                     "case_id": "night",
                     "review_task_id": "night_only_task",
                 },
@@ -955,9 +950,9 @@ def test_day_audit_frames_map_to_parent_source_frames() -> None:
     signals = [
         signal
         for signal in review_workspace.load_raw_audit_signals(
-            Path("artifacts/final_pipeline_package_v1/audit/audit_tasks.json")
+            Path(__file__).parent / "fixtures" / "audit_tasks_synthetic.json"
         )
-        if signal["raw_signal_id"] == "day_plate_plate_review_0001"
+        if signal["raw_signal_id"] == "synthetic_day_plate_gap"
     ]
 
     assert signals[0]["source_frame_start"] == 1830
@@ -1668,9 +1663,9 @@ def rewrite_latest_reviewed_pointer_as_legacy_projection_v1(
     pointer["revision_manifest_sha256"] = revision_manifest["revision_manifest_sha256"]
     pointer.pop("active_projection_hash_schema_version", None)
     pointer.pop("working_state_projection_schema_version", None)
-    pointer["content_identities"]["latest_reviewed_revision_manifest"][
-        "sha256"
-    ] = revision_manifest_artifact_sha256
+    pointer["content_identities"]["latest_reviewed_revision_manifest"]["sha256"] = (
+        revision_manifest_artifact_sha256
+    )
     latest = dict(pointer.get("latest_reviewed") or {})
     latest["accepted_working_state_revision"] = legacy_hash
     latest["published_working_state_revision"] = legacy_hash
@@ -1883,8 +1878,7 @@ def test_finalization_accepts_not_sensitive_policy_without_extra_verify(
 
     assert result["finalized"] is True
     assert not any(
-        "policy has not been verified" in blocker
-        for blocker in result.get("blockers", [])
+        "policy has not been verified" in blocker for blocker in result.get("blockers", [])
     )
 
 
@@ -1983,8 +1977,7 @@ def test_legacy_object_policy_verify_tasks_do_not_remain_active(tmp_path: Path) 
 
     assert any(event["task_id"] == verification_task_id for event in events)
     assert all(
-        item["review_task_id"] != verification_task_id
-        for item in state["active_manual_tasks"]
+        item["review_task_id"] != verification_task_id for item in state["active_manual_tasks"]
     )
 
 
@@ -2411,7 +2404,9 @@ def test_noop_entity_policy_skips_materialization_job(tmp_path: Path) -> None:
         )
         assert server.materialization_jobs.jobs == {}
         assert (
-            audit.get("cases", {}).get(manifest.case_id, {}).get(
+            audit.get("cases", {})
+            .get(manifest.case_id, {})
+            .get(
                 "materialization_jobs_started",
                 0,
             )
@@ -2446,8 +2441,7 @@ def test_media_changing_policy_records_pending_explicit_build(tmp_path: Path) ->
         assert response["materialization_plan"]["publication_status"] == "pending_explicit_build"
         assert response["materialization_plan"]["changed_source_frame_count"] == 1
         assert (
-            response["materialization_plan"]["materialization_strategy"]
-            == "pending_explicit_build"
+            response["materialization_plan"]["materialization_strategy"] == "pending_explicit_build"
         )
         assert response["materialization_plan"]["planned_frames_to_render"] == 0
         assert response["materialization_plan"]["after_effective_region_count"] == 0
@@ -2802,10 +2796,7 @@ def test_latest_reviewed_publish_request_reuses_current_projection(tmp_path: Pat
         assert plan["materialization_required"] is False
         assert plan["materialization_strategy"] == "current_reusable"
         assert plan["publication_status"] == "current_reusable"
-        assert (
-            plan["published_effective_regions_hash"]
-            == materialization["effective_regions_hash"]
-        )
+        assert plan["published_effective_regions_hash"] == materialization["effective_regions_hash"]
         assert plan["after_effective_regions_hash"] == materialization["effective_regions_hash"]
         assert server.materialization_jobs.jobs == {}
     finally:
@@ -2891,8 +2882,7 @@ def test_active_materialization_jobs_are_listed_by_session_and_case(
             f"?session_id={session_dir.name}&case_id={night.case_id}&active_only=true"
         )
         all_jobs = get_json(
-            f"{base_url}/api/v1/materialization-jobs"
-            f"?session_id={session_dir.name}&active_only=true"
+            f"{base_url}/api/v1/materialization-jobs?session_id={session_dir.name}&active_only=true"
         )
 
         assert [job["job_id"] for job in day_jobs["jobs"]] == [day_job["job_id"]]
@@ -2985,7 +2975,10 @@ def test_checkpoint_creation_records_created_from_case_context(tmp_path: Path) -
 
     assert checkpoint["created_from_case_id"] == manifest.case_id
     assert event["after_state"]["created_from_case_id"] == manifest.case_id
-    assert review_working_state.load_checkpoints(session_dir)[0]["created_from_case_id"] == manifest.case_id
+    assert (
+        review_working_state.load_checkpoints(session_dir)[0]["created_from_case_id"]
+        == manifest.case_id
+    )
 
 
 def test_static_review_decision_skips_working_state_derivation_gate(
@@ -3113,10 +3106,13 @@ def test_legacy_only_task_actions_remain_unresolved_for_compatibility() -> None:
         )
         == "legacy_task: review task has no allowed decision actions"
     )
-    assert review_sessions.invalid_task_decision_reason(
-        task,
-        {"action": review_sessions.ACTION_ESCALATE},
-    ) == "unsupported decision action: uncertain_escalate"
+    assert (
+        review_sessions.invalid_task_decision_reason(
+            task,
+            {"action": review_sessions.ACTION_ESCALATE},
+        )
+        == "unsupported decision action: uncertain_escalate"
+    )
 
 
 def test_review_decision_api_enforces_authoritative_task_allowed_actions(
@@ -3309,16 +3305,15 @@ def test_corrupt_decision_snapshot_is_rebuilt_from_event_log(tmp_path: Path) -> 
         after_state = review_working_state.derive_working_state(package, session_dir)
 
         assert "working_state" not in response
-        assert after_state["task_decisions_by_case"][manifest.case_id]["task_2"][
-            "action"
-        ] == review_sessions.ACTION_NOT_SENSITIVE
         assert (
-            recovered[manifest.case_id]["task_1"]["action"]
-            == review_sessions.ACTION_LOOKS_CORRECT
+            after_state["task_decisions_by_case"][manifest.case_id]["task_2"]["action"]
+            == review_sessions.ACTION_NOT_SENSITIVE
         )
         assert (
-            recovered[manifest.case_id]["task_2"]["action"]
-            == review_sessions.ACTION_NOT_SENSITIVE
+            recovered[manifest.case_id]["task_1"]["action"] == review_sessions.ACTION_LOOKS_CORRECT
+        )
+        assert (
+            recovered[manifest.case_id]["task_2"]["action"] == review_sessions.ACTION_NOT_SENSITIVE
         )
         assert list(evidence_dir.glob("decisions_current.*.corrupt.json"))
         assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
@@ -3412,9 +3407,8 @@ def test_review_decision_group_api_is_atomic_and_records_children(tmp_path: Path
         ]
         for event in response["events"]:
             assert event["application_hashes"]["child_task_count"] == "2"
-            assert (
-                event["application_hashes"]["child_task_set_hash"]
-                == stable_hash(["group_child_1", "group_child_2"])
+            assert event["application_hashes"]["child_task_set_hash"] == stable_hash(
+                ["group_child_1", "group_child_2"]
             )
             assert event["application_hashes"]["review_group_id"] == "group:synthetic"
         state = review_working_state.derive_working_state(package, session_dir)
@@ -4963,8 +4957,7 @@ def test_deferred_canonical_workspace_persists_correction_without_latest_reviewe
             session_dir=session_dir,
         )
         assert any(
-            "latest_reviewed_publication_deferred" in item
-            for item in finalization["blockers"]
+            "latest_reviewed_publication_deferred" in item for item in finalization["blockers"]
         )
         assert (
             json.loads((package / "workspace_manifest.json").read_text())["lifecycle"][
@@ -5124,9 +5117,7 @@ def test_supported_canonical_unresolved_guidance_does_not_prevent_publication(
         case_id=manifest.case_id,
     )
 
-    assert decided_materialization["latest_reviewed"]["revision_id"].startswith(
-        "latest_reviewed_"
-    )
+    assert decided_materialization["latest_reviewed"]["revision_id"].startswith("latest_reviewed_")
     assert decided_materialization["media_validation"]["passed"] is True
     assert decided_guidance_snapshot["guidance_unreviewed_task_ids"] == []
 
@@ -5392,12 +5383,15 @@ def test_duplicate_task_id_correction_resolution_is_case_scoped(
             state=state,
         )
     )
-    assert reviewed_regions.publication_blockers(
-        package_root=package,
-        session_dir=session_dir,
-        case_id="night",
-        state=state,
-    ) == []
+    assert (
+        reviewed_regions.publication_blockers(
+            package_root=package,
+            session_dir=session_dir,
+            case_id="night",
+            state=state,
+        )
+        == []
+    )
 
 
 def test_duplicate_task_id_checkpoint_and_reset_are_case_scoped(
@@ -5626,9 +5620,9 @@ def test_supported_canonical_correction_semantic_hash_excludes_audit_metadata(
     base_payload = {
         "case_id": manifest.case_id,
         "category": CATEGORY_PLATE,
-        "configuration_freeze_hash": json.loads(
-            (package / "workspace_manifest.json").read_text()
-        )["configuration_freeze_hash"],
+        "configuration_freeze_hash": json.loads((package / "workspace_manifest.json").read_text())[
+            "configuration_freeze_hash"
+        ],
         "entity_id": "plate_entity_1",
         "interpolation_method": review_corrections.INTERPOLATION_NONE,
         "keyframes": (review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),),
@@ -5695,9 +5689,7 @@ def test_supported_canonical_correction_semantic_hash_excludes_audit_metadata(
         **(
             base_payload
             | {
-                "keyframes": (
-                    review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),
-                ),
+                "keyframes": (review_corrections.CorrectionKeyframe(0, (20, 20, 54, 34)),),
                 "source_frame_end": 2,
             }
         ),
@@ -5871,9 +5863,7 @@ def test_supported_canonical_region_hash_tracks_policy_merge_baseline_and_render
     assert policy_changed["effective_regions_hash"] != base["effective_regions_hash"]
     assert merged["effective_regions_hash"] != policy_changed["effective_regions_hash"]
     assert baseline_changed["effective_regions_hash"] != merged["effective_regions_hash"]
-    assert renderer_changed["effective_regions_hash"] != baseline_changed[
-        "effective_regions_hash"
-    ]
+    assert renderer_changed["effective_regions_hash"] != baseline_changed["effective_regions_hash"]
 
 
 def test_supported_canonical_category_run_tampering_fails_closed(
@@ -5892,9 +5882,7 @@ def test_supported_canonical_category_run_tampering_fails_closed(
     session_dir = create_session(package, manifest)
     workspace_path = package / "workspace_manifest.json"
     workspace = json.loads(workspace_path.read_text())
-    workspace["category_run_manifest_identities"][CATEGORY_PLATE]["configuration_hash"] = (
-        "changed"
-    )
+    workspace["category_run_manifest_identities"][CATEGORY_PLATE]["configuration_hash"] = "changed"
     workspace["category_run_manifest_identity_hash"] = stable_hash(
         workspace["category_run_manifest_identities"]
     )
@@ -5912,16 +5900,16 @@ def test_supported_canonical_category_run_tampering_fails_closed(
     [
         (
             "category_identity_source",
-            lambda package, workspace, _manifest: workspace[
-                "category_run_manifest_identities"
-            ][CATEGORY_PLATE].__setitem__("source_sha256", "changed-source"),
+            lambda package, workspace, _manifest: workspace["category_run_manifest_identities"][
+                CATEGORY_PLATE
+            ].__setitem__("source_sha256", "changed-source"),
             "category identity source hash mismatch",
         ),
         (
             "category_run_content",
-            lambda package, workspace, _manifest: workspace[
-                "category_run_manifest_identities"
-            ][CATEGORY_PLATE].__setitem__("category_run_content_sha256", "changed-content"),
+            lambda package, workspace, _manifest: workspace["category_run_manifest_identities"][
+                CATEGORY_PLATE
+            ].__setitem__("category_run_content_sha256", "changed-content"),
             "category run content hash mismatch",
         ),
         (
@@ -5934,9 +5922,9 @@ def test_supported_canonical_category_run_tampering_fails_closed(
         ),
         (
             "category_run_artifact",
-            lambda _package, workspace, _manifest: workspace[
-                "category_run_manifest_identities"
-            ][CATEGORY_PLATE].__setitem__("sha256", "changed-artifact"),
+            lambda _package, workspace, _manifest: workspace["category_run_manifest_identities"][
+                CATEGORY_PLATE
+            ].__setitem__("sha256", "changed-artifact"),
             "category run artifact hash mismatch",
         ),
         (
@@ -5944,9 +5932,9 @@ def test_supported_canonical_category_run_tampering_fails_closed(
             lambda package, _workspace, manifest: (
                 package / "regions" / f"{manifest.case_id}_current_regions.jsonl"
             ).write_text(
-                (
-                    package / "regions" / f"{manifest.case_id}_current_regions.jsonl"
-                ).read_text(encoding="utf-8")
+                (package / "regions" / f"{manifest.case_id}_current_regions.jsonl").read_text(
+                    encoding="utf-8"
+                )
                 * 2,
                 encoding="utf-8",
             ),
@@ -6046,8 +6034,7 @@ def test_supported_canonical_publication_failure_never_writes_current_pointer(
 def test_generated_browser_code_keeps_correction_preview_distinct() -> None:
     script = review_workspace.workspace_js()
     legacy_mapping = (
-        "roleKey = latestReviewedPublicationDeferred() ? "
-        "'correction_preview' : 'latest_reviewed'"
+        "roleKey = latestReviewedPublicationDeferred() ? 'correction_preview' : 'latest_reviewed'"
     )
 
     assert legacy_mapping not in script
@@ -6219,9 +6206,9 @@ def test_supported_canonical_public_workflow_publishes_authoritative_latest_only
             case_id=manifest.case_id,
         )
         latest = next(role for role in after_versions if role["role"] == "latest_reviewed")
-        finalization = json.loads((package / "workspace_manifest.json").read_text())[
-            "lifecycle"
-        ]["finalization"]
+        finalization = json.loads((package / "workspace_manifest.json").read_text())["lifecycle"][
+            "finalization"
+        ]
 
         assert [role["role"] for role in before_versions] == ["original", "automatic"]
         assert preview_response["preview"]["role"] == "correction_preview"
@@ -6343,19 +6330,24 @@ def test_supported_canonical_public_sweep_finalize_and_versions(
             review_guidance_policy.POLICY_VERSION
         )
         assert "guidance_unreviewed_count" in sweep_response["event"]["after_state"]
-        assert sweep_response["working_state"]["current_event_chain_head"] == sweep_response[
-            "event"
-        ]["event_hash"]
-        assert sweep_response["working_state"]["sweep_acknowledgements"][manifest.case_id][
-            "latest_reviewed_revision_id"
-        ] == materialization["revision_id"]
+        assert (
+            sweep_response["working_state"]["current_event_chain_head"]
+            == sweep_response["event"]["event_hash"]
+        )
+        assert (
+            sweep_response["working_state"]["sweep_acknowledgements"][manifest.case_id][
+                "latest_reviewed_revision_id"
+            ]
+            == materialization["revision_id"]
+        )
         assert missing_status == 409
         assert missing_body["ok"] is False
         assert finalization_status["ready"] is True
         assert finalization_status["performance"]["timing_ms"]["total"] >= 0
         assert "immutable_media" in finalization_status["performance"]["cache"]
-        assert finalization_status["finalization_request"]["latest_reviewed_revision_id"] == (
-            materialization["revision_id"]
+        assert (
+            finalization_status["finalization_request"]["latest_reviewed_revision_id"]
+            == (materialization["revision_id"])
         )
         assert finalize_response["ok"] is True
         assert finalize_response["result"]["final_video_sha256"] == materialization["video_sha256"]
@@ -6510,50 +6502,59 @@ def test_day_night_latest_final_sweep_and_reopen_are_case_scoped(
     )
 
     assert set(after_latest["materialized_latest_reviewed"]) == {"day", "night"}
-    assert reviewed_regions.load_current_pointer(package, case_id=day.case_id)[
-        "revision_id"
-    ] == day_materialization["revision_id"]
-    assert reviewed_regions.load_current_pointer(package, case_id=night.case_id)[
-        "revision_id"
-    ] == night_materialization["revision_id"]
-    assert set(after_sweeps["sweep_acknowledgements"]) == {"day", "night"}
-    assert day_sweep["after_state"]["latest_reviewed_revision_id"] == (
-        day_materialization["revision_id"]
+    assert (
+        reviewed_regions.load_current_pointer(package, case_id=day.case_id)["revision_id"]
+        == day_materialization["revision_id"]
     )
-    assert night_sweep["after_state"]["latest_reviewed_revision_id"] == (
-        night_materialization["revision_id"]
+    assert (
+        reviewed_regions.load_current_pointer(package, case_id=night.case_id)["revision_id"]
+        == night_materialization["revision_id"]
+    )
+    assert set(after_sweeps["sweep_acknowledgements"]) == {"day", "night"}
+    assert (
+        day_sweep["after_state"]["latest_reviewed_revision_id"]
+        == (day_materialization["revision_id"])
+    )
+    assert (
+        night_sweep["after_state"]["latest_reviewed_revision_id"]
+        == (night_materialization["revision_id"])
     )
     assert day_final["finalized"] is True
     assert night_final["finalized"] is True
-    assert review_finalization.current_final_role(
-        package,
-        session_dir,
-        case_id=night.case_id,
-    )["finalization_id"] == night_final["finalization_id"]
+    assert (
+        review_finalization.current_final_role(
+            package,
+            session_dir,
+            case_id=night.case_id,
+        )["finalization_id"]
+        == night_final["finalization_id"]
+    )
     assert reopen["finalization_id"] == day_final["finalization_id"]
-    assert review_finalization.load_current_final_pointer(
-        package,
-        case_id=day.case_id,
-    )["status"] == "historical"
+    assert (
+        review_finalization.load_current_final_pointer(
+            package,
+            case_id=day.case_id,
+        )["status"]
+        == "historical"
+    )
     assert not review_finalization.current_final_role(
         package,
         session_dir,
         case_id=day.case_id,
     )
-    assert review_finalization.current_final_role(
-        package,
-        session_dir,
-        case_id=night.case_id,
-    )["finalization_id"] == night_final["finalization_id"]
+    assert (
+        review_finalization.current_final_role(
+            package,
+            session_dir,
+            case_id=night.case_id,
+        )["finalization_id"]
+        == night_final["finalization_id"]
+    )
     assert set(after_reopen["materialized_latest_reviewed"]) == {"day", "night"}
     assert set(after_reopen["sweep_acknowledgements"]) == {"night"}
     assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
     assert (
-        package
-        / "final"
-        / "revisions"
-        / day_final["finalization_id"]
-        / "final_reviewed.mp4"
+        package / "final" / "revisions" / day_final["finalization_id"] / "final_reviewed.mp4"
     ).exists()
 
 
@@ -6604,16 +6605,22 @@ def test_supported_canonical_legacy_projection_pointer_survives_sweep_and_finali
         case_id=manifest.case_id,
     )["versions"]
 
-    assert legacy_hash == before_sweep["active_projection_hashes"][
-        review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
-    ]
+    assert (
+        legacy_hash
+        == before_sweep["active_projection_hashes"][
+            review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+        ]
+    )
     assert before_sweep["active_projection_hash"] == after_sweep["active_projection_hash"]
     assert before_sweep["active_projection_hash"] == after_final["active_projection_hash"]
-    assert before_sweep["active_projection_hashes"][
-        review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
-    ] != after_sweep["active_projection_hashes"][
-        review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
-    ]
+    assert (
+        before_sweep["active_projection_hashes"][
+            review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+        ]
+        != after_sweep["active_projection_hashes"][
+            review_working_state.LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION
+        ]
+    )
     assert manifest.case_id in before_sweep["materialized_latest_reviewed"]
     assert manifest.case_id in after_sweep["materialized_latest_reviewed"]
     assert manifest.case_id in after_final["materialized_latest_reviewed"]
@@ -6748,17 +6755,21 @@ def test_delivery_package_includes_verified_portable_redaction_records(
     assert redaction_manifest["source_sha256"] == manifest.source_video_hash
     assert redaction_manifest["latest_reviewed_revision"] == materialization["revision_id"]
     assert redaction_manifest["finalization_id"] == finalized["finalization_id"]
-    assert redaction_manifest["reviewed_region_set_sha256"] == (
-        revision_manifest["reviewed_region_set_sha256"]
+    assert (
+        redaction_manifest["reviewed_region_set_sha256"]
+        == (revision_manifest["reviewed_region_set_sha256"])
     )
-    assert redaction_manifest["reviewed_region_identity"] == (
-        revision_manifest["reviewed_region_identity"]
+    assert (
+        redaction_manifest["reviewed_region_identity"]
+        == (revision_manifest["reviewed_region_identity"])
     )
-    assert redaction_manifest["renderer_configuration_sha256"] == (
-        revision_manifest["renderer_configuration_sha256"]
+    assert (
+        redaction_manifest["renderer_configuration_sha256"]
+        == (revision_manifest["renderer_configuration_sha256"])
     )
-    assert redaction_manifest["references"]["latest_reviewed_revision_manifest"] == (
-        latest_pointer["revision_manifest"]
+    assert (
+        redaction_manifest["references"]["latest_reviewed_revision_manifest"]
+        == (latest_pointer["revision_manifest"])
     )
     assert not re.search(r'"/Users/', json.dumps(redaction_manifest, sort_keys=True))
     records_text = records_bytes.decode("utf-8")
@@ -7016,9 +7027,7 @@ def test_supported_canonical_public_guidance_does_not_block_publication(
             case_id=manifest.case_id,
         )
         latest = next(role for role in after_versions if role["role"] == "latest_reviewed")
-        lifecycle = json.loads((package / "workspace_manifest.json").read_text())[
-            "lifecycle"
-        ]
+        lifecycle = json.loads((package / "workspace_manifest.json").read_text())["lifecycle"]
 
         assert blocked_job["status"] == "completed"
         assert "latest_reviewed" in {role["role"] for role in blocked_versions}
@@ -7029,8 +7038,7 @@ def test_supported_canonical_public_guidance_does_not_block_publication(
         assert retry_response["materialization_required"] is False
         assert retry_response["materialization_job"] is None
         assert (
-            retry_response["materialization_plan"]["materialization_strategy"]
-            == "current_reusable"
+            retry_response["materialization_plan"]["materialization_strategy"] == "current_reusable"
         )
         assert pointer["status"] == "ready"
         assert latest["revision_id"] == pointer["revision_id"]
@@ -7093,9 +7101,10 @@ def test_supported_canonical_materializes_revision_versions_and_reset(
     assert "latest_reviewed_current" not in workspace_manifest
     assert current_pointer["status"] == "ready"
     assert current_pointer["revision_id"] == materialization["revision_id"]
-    assert current_pointer["reviewed_region_set_sha256"] == materialization[
-        "reviewed_region_set_sha256"
-    ]
+    assert (
+        current_pointer["reviewed_region_set_sha256"]
+        == materialization["reviewed_region_set_sha256"]
+    )
     assert not any(role.role == "latest_reviewed" for role in case_manifest.video_roles)
     assert (package / materialization["revision_manifest"]).exists()
     assert materialization["media_validation"]["expected_frame_count"] == manifest.frame_count
@@ -7465,8 +7474,7 @@ def test_supported_canonical_new_event_invalidates_current_latest_until_republis
     assert manifest.case_id not in stale_state["materialized_latest_reviewed"]
     assert "latest_reviewed" not in {role["role"] for role in stale_versions}
     assert any(
-        "Latest reviewed has not been published" in item
-        for item in stale_blockers["blockers"]
+        "Latest reviewed has not been published" in item for item in stale_blockers["blockers"]
     )
     assert pointer_after_change["revision_id"] == original_revision["revision_id"]
     assert original_path.exists()
@@ -7519,10 +7527,7 @@ def test_supported_canonical_materialization_implementation_identity_invalidates
 
     assert "latest_reviewed" not in {role["role"] for role in stale_versions}
     assert republished["revision_id"] != original["revision_id"]
-    assert (
-        republished["latest_reviewed"]["path"]
-        != original["latest_reviewed"]["path"]
-    )
+    assert republished["latest_reviewed"]["path"] != original["latest_reviewed"]["path"]
 
 
 def test_supported_canonical_session_binding_survives_publication_and_reset(
@@ -8472,9 +8477,10 @@ def test_workspace_server_removes_saved_correction_case_scoped_and_idempotent(
         assert remove_response["event"]["event_type"] == "manual_correction_retracted"
         assert remove_response["materialization_required"] is True
         assert remove_response["publication_status"] == "pending_explicit_build"
-        assert correction.correction_id not in remove_response["working_state"][
-            "active_correction_ids"
-        ]
+        assert (
+            correction.correction_id
+            not in remove_response["working_state"]["active_correction_ids"]
+        )
         assert not [
             record for record in compiled_after if record.object_id == correction.correction_id
         ]
@@ -8488,12 +8494,10 @@ def test_workspace_server_removes_saved_correction_case_scoped_and_idempotent(
                 session_dir / "corrections.jsonl"
             )
         ] == [correction.correction_id]
-        assert sum(
-            1 for event in events if event["event_type"] == "manual_correction_saved"
-        ) == 1
-        assert sum(
-            1 for event in events if event["event_type"] == "manual_correction_retracted"
-        ) == 1
+        assert sum(1 for event in events if event["event_type"] == "manual_correction_saved") == 1
+        assert (
+            sum(1 for event in events if event["event_type"] == "manual_correction_retracted") == 1
+        )
         assert day_materialization["revision_id"]
         assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
     finally:
@@ -8719,9 +8723,7 @@ def test_real_materializer_retraction_wins_before_current_pointer_publication(
             },
         )
         assert pre_publish_reached.wait(timeout=10)
-        stale_revision_root = (
-            session_dir / "latest_reviewed" / day.case_id / stale_revision_id
-        )
+        stale_revision_root = session_dir / "latest_reviewed" / day.case_id / stale_revision_id
         assert stale_revision_root.exists()
         remove = post_json(
             f"{base_url}/api/v1/corrections/remove",
@@ -8770,16 +8772,12 @@ def test_real_materializer_retraction_wins_before_current_pointer_publication(
         ]
         assert [
             item.correction_id
-            for item in review_corrections.load_corrections_jsonl(
-                session_dir / "corrections.jsonl"
-            )
+            for item in review_corrections.load_corrections_jsonl(session_dir / "corrections.jsonl")
         ] == [correction.correction_id]
-        assert sum(
-            1 for event in events if event["event_type"] == "manual_correction_saved"
-        ) == 1
-        assert sum(
-            1 for event in events if event["event_type"] == "manual_correction_retracted"
-        ) == 1
+        assert sum(1 for event in events if event["event_type"] == "manual_correction_saved") == 1
+        assert (
+            sum(1 for event in events if event["event_type"] == "manual_correction_retracted") == 1
+        )
         assert review_sessions.validate_event_hash_chain(session_dir)["passed"] is True
     finally:
         release_publish.set()
@@ -8971,9 +8969,10 @@ def test_batched_manual_correction_saves_wait_for_explicit_build(
         assert len(server.materialization_jobs.jobs) == 1
         assert job["status"] == "completed"
         assert job["materialization"]["manual_correction_count"] == 5
-        assert latest["published_working_state_revision"] == state_before_build[
-            "active_projection_hash"
-        ]
+        assert (
+            latest["published_working_state_revision"]
+            == state_before_build["active_projection_hash"]
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -9729,8 +9728,7 @@ def test_manual_correction_preview_and_latest_render_inclusive_frames(
         configuration_freeze_hash=stable_hash({"schema_version": "freeze.test", "value": 1}),
         interpolation_method=interpolation_method,
         keyframes=tuple(
-            review_corrections.CorrectionKeyframe(frame, box)
-            for frame, box in keyframe_boxes
+            review_corrections.CorrectionKeyframe(frame, box) for frame, box in keyframe_boxes
         ),
         operation=review_corrections.OP_ADD,
         reason="exact geometry",
@@ -9772,9 +9770,7 @@ def test_manual_correction_preview_and_latest_render_inclusive_frames(
         ],
     )
     latest_path = package / materialization["latest_reviewed"]["path"]
-    verification = materialization["correction_render_verifications"][
-        correction.correction_id
-    ]
+    verification = materialization["correction_render_verifications"][correction.correction_id]
 
     def frame_diff(
         path_a: Path,
@@ -9788,10 +9784,7 @@ def test_manual_correction_preview_and_latest_render_inclusive_frames(
         x1, y1, x2, y2 = bbox
         return float(
             np.mean(
-                np.abs(
-                    left[y1:y2, x1:x2].astype(np.int16)
-                    - right[y1:y2, x1:x2].astype(np.int16)
-                )
+                np.abs(left[y1:y2, x1:x2].astype(np.int16) - right[y1:y2, x1:x2].astype(np.int16))
             )
         )
 
@@ -9800,27 +9793,32 @@ def test_manual_correction_preview_and_latest_render_inclusive_frames(
         for record in correction_rows
     } == expected_boxes
     assert {
-        int(record.source_record["source_frame"]): record.source_frame
-        for record in correction_rows
+        int(record.source_record["source_frame"]): record.source_frame for record in correction_rows
     } == {frame: frame for frame in expected_boxes}
     assert len(correction_rows) == len(expected_boxes)
     if source_frame_start > 0:
-        assert frame_diff(
-            latest_path,
-            source_frame_start - 1,
-            package / manifest.source_path,
-            source_frame_start - 1,
-            expected_boxes[source_frame_start],
-        ) < 5.0
+        assert (
+            frame_diff(
+                latest_path,
+                source_frame_start - 1,
+                package / manifest.source_path,
+                source_frame_start - 1,
+                expected_boxes[source_frame_start],
+            )
+            < 5.0
+        )
     for frame, bbox in expected_boxes.items():
         assert frame_diff(latest_path, frame, package / manifest.source_path, frame, bbox) > 0.75
-        assert frame_diff(
-            latest_path,
-            frame,
-            package / preview["corrected_preview"],
-            frame - source_frame_start,
-            bbox,
-        ) < 8.0
+        assert (
+            frame_diff(
+                latest_path,
+                frame,
+                package / preview["corrected_preview"],
+                frame - source_frame_start,
+                bbox,
+            )
+            < 8.0
+        )
     assert verification["passed"] is True
     assert verification["sampled_source_frames"] == sorted(
         {source_frame_start, (source_frame_start + source_frame_end) // 2, source_frame_end}
@@ -10209,9 +10207,10 @@ def test_editing_during_explicit_build_does_not_spawn_jobs_and_stale_build_canno
         assert call_count == 2
         assert sum(1 for job in jobs if job["status"] == "completed") == 1
         assert sum(1 for job in jobs if job["status"] == "superseded") == 1
-        assert server.materialization_jobs.metrics[manifest.case_id][
-            "materialization_jobs_started"
-        ] == 2
+        assert (
+            server.materialization_jobs.metrics[manifest.case_id]["materialization_jobs_started"]
+            == 2
+        )
         assert server.materialization_jobs.metrics[manifest.case_id]["jobs_coalesced"] == 0
         assert not [
             event

@@ -865,86 +865,74 @@ def query_presentation_class(task: dict[str, Any]) -> str:
     category = str(task.get("category") or "")
     if _is_correction_verification_task(task, semantic_text):
         return "VERIFY_SAVED_CORRECTION"
-    if (
-        _contains_any(semantic_text, "optional_spot_check", "spot_check", "spot check")
-        or _reason_contains_any(reason_codes, "spot_check", "spot check", "audit_sample")
-    ):
+    if _contains_any(
+        semantic_text, "optional_spot_check", "spot_check", "spot check"
+    ) or _reason_contains_any(reason_codes, "spot_check", "spot check", "audit_sample"):
         return "OPTIONAL_SPOT_CHECK"
-    if (
-        _contains_any(
-            semantic_text,
-            "false_positive",
-            "false_redaction",
-            "possible_false_redaction",
-        )
-        or _reason_contains_any(reason_codes, "false_positive", "false_redaction", "possible_false")
-    ):
+    if _contains_any(
+        semantic_text,
+        "false_positive",
+        "false_redaction",
+        "possible_false_redaction",
+    ) or _reason_contains_any(reason_codes, "false_positive", "false_redaction", "possible_false"):
         return "POSSIBLE_FALSE_POSITIVE"
     if _contains_any(semantic_text, "plate_coverage_gap"):
         return "PLATE_COVERAGE_GAP"
     if _contains_any(semantic_text, "face_coverage_gap"):
         return "FACE_COVERAGE_GAP"
-    if (
-        _contains_any(semantic_text, "competition", "duplicate", "identity")
-        or _reason_contains_any(reason_codes, "competition", "duplicate", "identity")
+    if _contains_any(semantic_text, "competition", "duplicate", "identity") or _reason_contains_any(
+        reason_codes, "competition", "duplicate", "identity"
     ):
         return "IDENTITY_UNCERTAIN"
-    if (
-        _contains_any(
-            semantic_text,
-            "drift",
-            "interpolation",
-            "long_detection_gap",
-            "one-sided",
-            "one_sided",
-            "scale change",
-            "scale-change",
-        )
-        or _reason_contains_any(
-            reason_codes,
-            "anchor_center_motion",
-            "anchor_scale_change",
-            "drift",
-            "gap_exceeds",
-            "interpolation",
-            "long_detection_gap",
-            "one_sided_recovery",
-            "scale",
-            "scene_cut_inside_gap",
-        )
+    if _contains_any(
+        semantic_text,
+        "drift",
+        "interpolation",
+        "long_detection_gap",
+        "one-sided",
+        "one_sided",
+        "scale change",
+        "scale-change",
+    ) or _reason_contains_any(
+        reason_codes,
+        "anchor_center_motion",
+        "anchor_scale_change",
+        "drift",
+        "gap_exceeds",
+        "interpolation",
+        "long_detection_gap",
+        "one_sided_recovery",
+        "scale",
+        "scene_cut_inside_gap",
     ):
         return "INTERPOLATION_OR_SCALE_RISK"
-    if (
-        _contains_any(
-            semantic_text,
-            "plate_track_review_required",
-            "requires_review",
-            "track_review",
-        )
-        or _reason_contains_any(
-            reason_codes,
-            "insufficient_detector_observations",
-            "insufficient_observations",
-            "insufficient_observed",
-            "insufficient_strong",
-            "internal_gap_penalty",
-            "low_confidence",
-            "low_mean_confidence",
-            "low_observation_density",
-            "observed_hits",
-            "quality_status",
-            "weak_only",
-        )
+    if _contains_any(
+        semantic_text,
+        "plate_track_review_required",
+        "requires_review",
+        "track_review",
+    ) or _reason_contains_any(
+        reason_codes,
+        "insufficient_detector_observations",
+        "insufficient_observations",
+        "insufficient_observed",
+        "insufficient_strong",
+        "internal_gap_penalty",
+        "low_confidence",
+        "low_mean_confidence",
+        "low_observation_density",
+        "observed_hits",
+        "quality_status",
+        "weak_only",
     ):
         return "TRACKING_UNCERTAIN"
-    if (
-        _contains_any(semantic_text, "coverage gap", "coverage_gap", "privacy gap", "privacy_gap")
-        or _reason_contains_any(
-            reason_codes,
-            "missing_box",
-            "render_validation_failure",
-            "unresolved_privacy",
-        )
+    if _contains_any(
+        semantic_text, "coverage gap", "coverage_gap", "privacy gap", "privacy_gap"
+    ) or _reason_contains_any(
+        reason_codes,
+        "missing_box",
+        "render_validation_failure",
+        "unresolved_privacy",
     ):
         return "PLATE_COVERAGE_GAP" if category == "license_plate" else "FACE_COVERAGE_GAP"
     return "OTHER_REVIEW"
@@ -992,8 +980,7 @@ def _is_correction_verification_task(task: dict[str, Any], semantic_text: str) -
         )
     )
     return bool(
-        has_correction_reference
-        and _contains_any(semantic_text, "corrected", "correction")
+        has_correction_reference and _contains_any(semantic_text, "corrected", "correction")
     )
 
 

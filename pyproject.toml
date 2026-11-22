@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "video-redaction-pipeline"
 version = "0.1.0"
-description = "Minimal local video inspection and development artifact pipeline."
+description = "Local video privacy redaction with face and plate detection, temporal tracking, frame-accurate rendering, evaluation, and human review."
 readme = "README.md"
 requires-python = ">=3.11,<3.13"
 dependencies = [
@@ -15,6 +15,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+inference = [
+  "openvino==2026.2.1",
+]
 dev = [
   "playwright>=1.45,<2",
   "pytest>=8,<9",
@@ -28,8 +31,11 @@ redactor = "redactor.cli:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
+markers = [
+  "local_assets: validates private local release assets; opt in with REDACTOR_RUN_LOCAL_ASSET_TESTS=1",
+]
 
 [tool.ruff]
 line-length = 100

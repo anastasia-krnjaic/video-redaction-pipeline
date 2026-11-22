@@ -177,9 +177,10 @@ def test_pixelation_privacy_signal_handles_neighboring_geometry_edges(
     rendered = rendering.render_frame(frame, 0, {0: [region(0, box)]}, settings)
 
     assert expected is not None
-    assert privacy_rendering.localized_change_metrics(frame, rendered, expected)[
-        "region_changed"
-    ] is True
+    assert (
+        privacy_rendering.localized_change_metrics(frame, rendered, expected)["region_changed"]
+        is True
+    )
 
 
 def test_pixelation_privacy_signal_handles_consecutive_and_overlapping_regions() -> None:
@@ -199,15 +200,24 @@ def test_pixelation_privacy_signal_handles_consecutive_and_overlapping_regions()
     rendered0 = rendering.render_frame(frame0, 0, regions, settings)
     rendered1 = rendering.render_frame(frame1, 1, regions, settings)
 
-    assert privacy_rendering.localized_change_metrics(frame0, rendered0, (8, 8, 30, 30))[
-        "region_changed"
-    ] is True
-    assert privacy_rendering.localized_change_metrics(frame0, rendered0, (20, 20, 42, 42))[
-        "region_changed"
-    ] is True
-    assert privacy_rendering.localized_change_metrics(frame1, rendered1, (10, 9, 32, 31))[
-        "region_changed"
-    ] is True
+    assert (
+        privacy_rendering.localized_change_metrics(frame0, rendered0, (8, 8, 30, 30))[
+            "region_changed"
+        ]
+        is True
+    )
+    assert (
+        privacy_rendering.localized_change_metrics(frame0, rendered0, (20, 20, 42, 42))[
+            "region_changed"
+        ]
+        is True
+    )
+    assert (
+        privacy_rendering.localized_change_metrics(frame1, rendered1, (10, 9, 32, 31))[
+            "region_changed"
+        ]
+        is True
+    )
 
 
 def test_overlapping_pixelation_renders_broad_regions_before_specific_regions() -> None:
@@ -233,12 +243,12 @@ def test_overlapping_pixelation_renders_broad_regions_before_specific_regions() 
         settings,
     )
 
-    assert privacy_rendering.localized_change_metrics(frame, rendered, small)[
-        "region_changed"
-    ] is True
-    assert privacy_rendering.localized_change_metrics(frame, rendered, broad)[
-        "region_changed"
-    ] is True
+    assert (
+        privacy_rendering.localized_change_metrics(frame, rendered, small)["region_changed"] is True
+    )
+    assert (
+        privacy_rendering.localized_change_metrics(frame, rendered, broad)["region_changed"] is True
+    )
 
 
 def test_box_clipping_and_privacy_margin() -> None:

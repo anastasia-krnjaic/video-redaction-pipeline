@@ -49,9 +49,7 @@ POLICY_RANK = {
 
 def most_protective_policy(policies: Any) -> str:
     values = [
-        str(policy)
-        for policy in list(policies or [])
-        if str(policy) in privacy_entities.POLICIES
+        str(policy) for policy in list(policies or []) if str(policy) in privacy_entities.POLICIES
     ]
     if not values:
         return privacy_entities.POLICY_REVIEW_REQUIRED
@@ -530,9 +528,7 @@ def normalize_tracklet(
             )
     if not observations:
         bbox = parse_bbox(
-            item.get("bbox_xyxy")
-            or item.get("bbox")
-            or item.get("representative_bbox")
+            item.get("bbox_xyxy") or item.get("bbox") or item.get("representative_bbox")
         )
         frame_value = (
             item.get("source_frame")
@@ -549,9 +545,7 @@ def normalize_tracklet(
         start = min(frames) if start is None else min(start, min(frames))
         end = max(frames) if end is None else max(end, max(frames))
     crops = [
-        crop
-        for crop in list(item.get("representative_crops") or [])
-        if isinstance(crop, dict)
+        crop for crop in list(item.get("representative_crops") or []) if isinstance(crop, dict)
     ]
     if not crops:
         crops = existing_representative_crops(entity)
@@ -595,9 +589,7 @@ def normalize_observations(item: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(row, dict):
             continue
         frame_value = (
-            row.get("source_frame")
-            if row.get("source_frame") is not None
-            else row.get("frame")
+            row.get("source_frame") if row.get("source_frame") is not None else row.get("frame")
         )
         frame = optional_int(frame_value)
         bbox = parse_bbox(row.get("bbox_xyxy") or row.get("bbox"))
@@ -784,9 +776,7 @@ def lazy_crop_plan(
         )
         if clamped is None:
             continue
-        raw_source_id = str(
-            observation.get("raw_source_id") or tracklet.get("raw_source_id") or ""
-        )
+        raw_source_id = str(observation.get("raw_source_id") or tracklet.get("raw_source_id") or "")
         source_entity_id = str(
             observation.get("source_entity_id")
             or observation.get("parent_entity_id")
@@ -811,16 +801,10 @@ def lazy_crop_plan(
             }
         )
         relative_path = (
-            Path("entities")
-            / case_id
-            / "derived_thumbnails"
-            / f"{cache_key[:24]}.jpg"
+            Path("entities") / case_id / "derived_thumbnails" / f"{cache_key[:24]}.jpg"
         ).as_posix()
         metadata_path = (
-            Path("entities")
-            / case_id
-            / "derived_thumbnails"
-            / f"{cache_key[:24]}.json"
+            Path("entities") / case_id / "derived_thumbnails" / f"{cache_key[:24]}.json"
         ).as_posix()
         metadata = {
             "bbox_xyxy": list(clamped),

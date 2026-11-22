@@ -24,9 +24,7 @@ def unreviewed_guidance_snapshot(
     from redactor import review_working_state
 
     decisions_by_case = review_working_state.task_decisions_by_case_from_payload(working_state)
-    resolutions_by_case = review_working_state.task_resolutions_by_case_from_payload(
-        working_state
-    )
+    resolutions_by_case = review_working_state.task_resolutions_by_case_from_payload(working_state)
     task_ids: list[str] = []
     for task in load_review_tasks(package_root):
         if not is_guidance_task(task, case_id=case_id):
@@ -72,8 +70,7 @@ def is_guidance_task(task: dict[str, Any], *, case_id: str) -> bool:
     if normal_class == "correction_verification":
         return False
     return not (
-        task_id.startswith("correction_verify_")
-        or task_id.startswith("object_policy_verify_")
+        task_id.startswith("correction_verify_") or task_id.startswith("object_policy_verify_")
     )
 
 

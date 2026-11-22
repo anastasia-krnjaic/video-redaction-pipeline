@@ -81,9 +81,7 @@ def run_shared_face_preview(
             fps=fps,
             width=width,
             height=height,
-            start_frame=min(privacy_input.required_frames)
-            if privacy_input.required_frames
-            else 0,
+            start_frame=min(privacy_input.required_frames) if privacy_input.required_frames else 0,
             frame_count=comparison_frames,
             overwrite=overwrite,
         )

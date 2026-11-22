@@ -152,8 +152,7 @@ def build_workspace_package(
         package_root / "reviewer_tasks.json",
         {
             "actions": [
-                {"action": action, "label": DECISION_LABELS[action]}
-                for action in REQUIRED_ACTIONS
+                {"action": action, "label": DECISION_LABELS[action]} for action in REQUIRED_ACTIONS
             ],
             "raw_signal_count": len(raw_signals),
             "schema_version": "case_reviewer_tasks.v1",
@@ -4785,9 +4784,7 @@ def materialization_acceptance_fields(
     job = dict(materialization_plan.get("job") or {})
     materialization_required = bool(plan.get("materialization_required"))
     plan_status = str(
-        plan.get("publication_status")
-        or plan.get("latest_reviewed_publication_status")
-        or ""
+        plan.get("publication_status") or plan.get("latest_reviewed_publication_status") or ""
     )
     publication_status = (
         str(job.get("publication_status") or job.get("status") or plan_status or "queued")
@@ -4979,7 +4976,9 @@ def owner_endpoint(owner: dict[str, Any]) -> str:
 
 def workspace_writer_os_lock_path(package_root: Path) -> Path:
     lock_key = stable_hash({"workspace_path": package_root.resolve().as_posix()})
-    return Path(tempfile.gettempdir()) / "video_redaction_review_workspace_locks" / f"{lock_key}.lock"
+    return (
+        Path(tempfile.gettempdir()) / "video_redaction_review_workspace_locks" / f"{lock_key}.lock"
+    )
 
 
 class FinalReviewWorkspaceServer(ThreadingHTTPServer):
@@ -5066,9 +5065,7 @@ class MaterializationJobManager:
         session_head_hash = review_sessions.last_event_hash(session_dir)
         workspace_manifest_path = self.package_root / "workspace_manifest.json"
         workspace_manifest_hash = (
-            media.sha256_file(workspace_manifest_path)
-            if workspace_manifest_path.exists()
-            else None
+            media.sha256_file(workspace_manifest_path) if workspace_manifest_path.exists() else None
         )
         case_manifest_path = workspace_case_manifest_path(self.package_root, case_id)
         case_manifest_hash = (
@@ -5146,9 +5143,7 @@ class MaterializationJobManager:
                 "case_manifest_sha256": case_manifest_hash,
                 "case_id": case_id,
                 "generation": int(state.get("generation") or 0),
-                "merge_rejection_state_hash": reviewed_identity.get(
-                    "merge_rejection_state_hash"
-                ),
+                "merge_rejection_state_hash": reviewed_identity.get("merge_rejection_state_hash"),
                 "object_policy_hash": reviewed_identity.get("object_policy_hash"),
                 "renderer_configuration_sha256": reviewed_identity.get(
                     "renderer_configuration_sha256"
@@ -5617,10 +5612,12 @@ class MaterializationJobManager:
                     accepted_revision=accepted_revision,
                     actor=None,
                     event_reason=str(job.get("reason") or "Latest reviewed media updated."),
-                    publication_currentness_assertion=lambda: self._assert_job_current_for_publication(
-                        key,
-                        job_id,
-                        job,
+                    publication_currentness_assertion=lambda: (
+                        self._assert_job_current_for_publication(
+                            key,
+                            job_id,
+                            job,
+                        )
                     ),
                 )
             else:
@@ -6431,9 +6428,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     session_dir=session_dir,
                     working_state=working_state,
                 )
-                timing_ms["blocker_projection"] = int(
-                    (time.perf_counter() - step_started) * 1000
-                )
+                timing_ms["blocker_projection"] = int((time.perf_counter() - step_started) * 1000)
                 step_started = time.perf_counter()
                 final_role = review_finalization.current_final_role(
                     self.server.package_root,
@@ -6451,9 +6446,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     self.server.package_root,
                     case_id=case_id,
                 )
-                timing_ms["final_pointer_load"] = int(
-                    (time.perf_counter() - step_started) * 1000
-                )
+                timing_ms["final_pointer_load"] = int((time.perf_counter() - step_started) * 1000)
                 if final_pointer and final_pointer.get("current") is not True:
                     historical_final = {
                         "final_video": final_pointer.get("final_video"),
@@ -6464,9 +6457,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                             "approved_latest_reviewed_revision_id"
                         ),
                         "reopened_at_utc": final_pointer.get("reopened_at_utc"),
-                        "reopened_by_event_hash": final_pointer.get(
-                            "reopened_by_event_hash"
-                        ),
+                        "reopened_by_event_hash": final_pointer.get("reopened_by_event_hash"),
                         "status": final_pointer.get("status"),
                     }
                 request_binding = None
@@ -6737,7 +6728,10 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 )
                 if task is None:
                     self.send_json(
-                        {"error": f"decision references an unknown review task: {task_id}", "ok": False},
+                        {
+                            "error": f"decision references an unknown review task: {task_id}",
+                            "ok": False,
+                        },
                         status=HTTPStatus.NOT_FOUND,
                     )
                     return
@@ -6777,7 +6771,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                         "task_before_state": task,
                         "task_id": str(task["review_task_id"]),
                     }
-                for task in tasks
+                    for task in tasks
                 ],
             )
             self.send_json(
@@ -6794,9 +6788,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 str(payload["case_id"]),
             )
             sweep_binding = None
-            if review_working_state.latest_reviewed_publication_supported(
-                self.server.package_root
-            ):
+            if review_working_state.latest_reviewed_publication_supported(self.server.package_root):
                 try:
                     sweep_binding = review_finalization.sweep_acknowledgement_binding(
                         package_root=self.server.package_root,
@@ -7071,11 +7063,11 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                         ),
                     ),
                     "event": event,
-                        "events": [
-                            item
-                            for item in [event, resolved_task_event, verification_event]
-                            if item is not None
-                        ],
+                    "events": [
+                        item
+                        for item in [event, resolved_task_event, verification_event]
+                        if item is not None
+                    ],
                     "materialization_job": materialization_plan["job"],
                     "materialization_plan": materialization_plan["plan"],
                     "materialization_required": materialization_plan["plan"][
@@ -7383,9 +7375,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             )
             return
         if path == "/api/materialization-jobs/retry":
-            if review_working_state.latest_reviewed_publication_deferred(
-                self.server.package_root
-            ):
+            if review_working_state.latest_reviewed_publication_deferred(self.server.package_root):
                 self.send_json(
                     {
                         "error": (
@@ -7550,9 +7540,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                 str(payload["case_id"]),
             )
             expected_payload = dict(
-                payload.get("finalization_request")
-                or payload.get("request_binding")
-                or payload
+                payload.get("finalization_request") or payload.get("request_binding") or payload
             )
             required_expected = {
                 "expected_latest_reviewed_revision_id": (
@@ -7568,9 +7556,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     or expected_payload.get("sweep_acknowledgement_sha256")
                 ),
             }
-            missing_expected = [
-                key for key, value in required_expected.items() if not value
-            ]
+            missing_expected = [key for key, value in required_expected.items() if not value]
             if missing_expected:
                 self.send_json(
                     {
@@ -7660,9 +7646,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
     def create_workspace_session(self, payload: dict[str, Any]) -> review_sessions.ReviewSession:
         freeze_hash = stable_hash(
             json.loads(
-                (self.server.package_root / "configuration_freeze.json").read_text(
-                    encoding="utf-8"
-                )
+                (self.server.package_root / "configuration_freeze.json").read_text(encoding="utf-8")
             )
         )
         case_hashes: dict[str, str] = {}
@@ -8032,9 +8016,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             if disabled_reason is not None:
                 return {
                     "action_availability": entity.get("policy_action_availability"),
-                    "error": (
-                        f"object policy action disabled for {entity_id}: {disabled_reason}"
-                    ),
+                    "error": (f"object policy action disabled for {entity_id}: {disabled_reason}"),
                     "ok": False,
                 }
             before_entities.append(entity)
@@ -8209,9 +8191,9 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             state,
             lazy_crops=False,
         )
-        response_canonical = dict(
-            presentation_state.get("object_policy_overrides", {})
-        ).get(canonical["entity_id"], canonical)
+        response_canonical = dict(presentation_state.get("object_policy_overrides", {})).get(
+            canonical["entity_id"], canonical
+        )
         return {
             "canonical_merged_entity_uuid": canonical["entity_id"],
             "event": event,
@@ -8291,9 +8273,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
                     self.server.package_root,
                     enriched_case_entities,
                     case_id=case_id,
-                    rejected_candidate_ids=entity_refinement.rejected_candidate_ids(
-                        session_events
-                    ),
+                    rejected_candidate_ids=entity_refinement.rejected_candidate_ids(session_events),
                 )
                 if str(item.get("candidate_id") or "") == candidate_id
             ),
@@ -8366,9 +8346,9 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             state,
             lazy_crops=False,
         )
-        response_canonical = dict(
-            presentation_state.get("object_policy_overrides", {})
-        ).get(canonical["entity_id"], canonical)
+        response_canonical = dict(presentation_state.get("object_policy_overrides", {})).get(
+            canonical["entity_id"], canonical
+        )
         return {
             "candidate": candidate,
             "event": event,
@@ -8482,9 +8462,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
             },
             note=str(payload.get("reason") or "Reviewer split mixed entity into tracklets."),
             application_hashes={
-                "split_source_hash": stable_hash(
-                    {"entity_id": entity_id, "tracklets": tracklets}
-                )
+                "split_source_hash": stable_hash({"entity_id": entity_id, "tracklets": tracklets})
             },
         )
         state = review_working_state.derive_working_state(
@@ -8548,9 +8526,7 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         if not selected:
             return {"error": "tracklet not found in entity", "ok": False}
         remaining_tracklets = [
-            item
-            for item in tracklets
-            if str(item.get("tracklet_id") or "") != tracklet_id
+            item for item in tracklets if str(item.get("tracklet_id") or "") != tracklet_id
         ]
         before_digest = review_working_state.effective_privacy_region_digest(
             self.server.package_root,
@@ -8739,7 +8715,9 @@ class FinalReviewWorkspaceHandler(SimpleHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path.startswith("/api/"):
             return False
-        workspace_routes = {f"/{case_id}" for case_id in workspace_case_ids(self.server.package_root)}
+        workspace_routes = {
+            f"/{case_id}" for case_id in workspace_case_ids(self.server.package_root)
+        }
         if parsed.path in workspace_routes | {"/final", "/audit"}:
             return (self.server.package_root / "app" / "index.html").exists()
         if not parsed.path.startswith("/app/"):
@@ -9161,7 +9139,9 @@ def split_entities_for_tracklets(
     children: list[dict[str, Any]] = []
     for index, tracklet in enumerate(tracklets, start=1):
         tracklet_id = str(tracklet.get("tracklet_id") or f"tracklet_{index}")
-        child_id = f"entity_split_{stable_hash({'parent': parent_id, 'tracklet': tracklet_id})[:24]}"
+        child_id = (
+            f"entity_split_{stable_hash({'parent': parent_id, 'tracklet': tracklet_id})[:24]}"
+        )
         crops = list(tracklet.get("representative_crops") or [])
         first = entity_refinement.optional_int(tracklet.get("source_frame_start"))
         last = entity_refinement.optional_int(tracklet.get("source_frame_end"))
@@ -9169,8 +9149,7 @@ def split_entities_for_tracklets(
         representative_bbox = None
         if crops:
             representative_frame = (
-                entity_refinement.optional_int(crops[0].get("source_frame"))
-                or representative_frame
+                entity_refinement.optional_int(crops[0].get("source_frame")) or representative_frame
             )
             representative_bbox = crops[0].get("bbox_xyxy")
         child = {
@@ -9237,9 +9216,7 @@ def split_entities_for_tracklets(
             },
             "split_parent_entity_id": parent_id,
         }
-        children.append(
-            entity_refinement.enrich_entity(child, package_root=None)
-        )
+        children.append(entity_refinement.enrich_entity(child, package_root=None))
     return children
 
 
@@ -9687,7 +9664,9 @@ def workspace_case_ids(package_root: Path) -> tuple[str, ...]:
             return case_ids.validate_case_ids(tuple(str(case_id) for case_id in cases))
     cases_dir = package_root / "cases"
     if cases_dir.exists():
-        return case_ids.validate_case_ids(tuple(path.stem for path in sorted(cases_dir.glob("*.json"))))
+        return case_ids.validate_case_ids(
+            tuple(path.stem for path in sorted(cases_dir.glob("*.json")))
+        )
     return ()
 
 
@@ -9795,9 +9774,7 @@ def workspace_identity_hashes(package_root: Path) -> dict[str, str]:
     for case_id in workspace_case_ids(package_root):
         case_path = workspace_case_manifest_path(package_root, case_id)
         if case_path.exists():
-            case_manifest_hash = reviewed_regions.case_manifest_review_input_sha256_file(
-                case_path
-            )
+            case_manifest_hash = reviewed_regions.case_manifest_review_input_sha256_file(case_path)
             if case_manifest_hash:
                 hashes[f"case:{case_id}:content_sha256"] = case_manifest_hash
     return dict(sorted(hashes.items()))

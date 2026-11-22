@@ -59,9 +59,7 @@ SUPPORTED_ACTIVE_PROJECTION_HASH_SCHEMA_VERSIONS = {
 CHECKPOINT_SCHEMA_VERSION = "review_checkpoint.v1"
 PREVIEW_TOKEN_SCHEMA_VERSION = "correction_preview_token.v2"
 LATEST_REVIEWED_PUBLICATION_DEFERRED_ERROR_CODE = "latest_reviewed_publication_deferred"
-LATEST_REVIEWED_PUBLICATION_DEFERRED_REASON = (
-    "mixed_reviewed_region_compilation_not_implemented"
-)
+LATEST_REVIEWED_PUBLICATION_DEFERRED_REASON = "mixed_reviewed_region_compilation_not_implemented"
 WORKING_STATE_CACHE_DISABLE_ENV = "REDACTOR_DISABLE_WORKING_STATE_CACHE"
 WORKING_STATE_CACHE_MAX_ENTRIES = 64
 DELIVERY_REDACTION_RECORDS_SCHEMA_VERSION = "case_delivery_redaction_records.v1"
@@ -263,10 +261,9 @@ def latest_reviewed_publication_deferred(package_root: Path) -> bool:
 def latest_reviewed_publication_supported(package_root: Path) -> bool:
     manifest = workspace_manifest_payload(package_root)
     publication = latest_reviewed_publication_state(package_root)
-    return (
-        manifest.get("workspace_kind") == "unified_case_review_workspace"
-        and publication.get("status") in {"supported", "ready"}
-    )
+    return manifest.get("workspace_kind") == "unified_case_review_workspace" and publication.get(
+        "status"
+    ) in {"supported", "ready"}
 
 
 def latest_reviewed_publication_deferred_plan(
@@ -491,8 +488,7 @@ def package_baseline(package_root: Path) -> dict[str, Any]:
         manifest_case_id = case_ids.validate_case_id(manifest.case_id)
         if manifest_case_id != case_path.stem:
             raise ValueError(
-                f"case manifest ID {manifest_case_id!r} does not match file stem "
-                f"{case_path.stem!r}"
+                f"case manifest ID {manifest_case_id!r} does not match file stem {case_path.stem!r}"
             )
         base_region_path = safe_case_region_path(package_root, manifest_case_id)
         cases[manifest_case_id] = {
@@ -831,8 +827,7 @@ def derive_active_review_projection(
             }
             hash_resolutions_by_case = {
                 item_case: {
-                    task_id: dict(resolution)
-                    for task_id, resolution in case_resolutions.items()
+                    task_id: dict(resolution) for task_id, resolution in case_resolutions.items()
                 }
                 for item_case, case_resolutions in resolutions_by_case.items()
             }
@@ -899,9 +894,7 @@ def derive_active_review_projection(
             (
                 task
                 for task in manual_tasks.values()
-                if not object_policy_verification_task_id(
-                    str(task.get("review_task_id") or "")
-                )
+                if not object_policy_verification_task_id(str(task.get("review_task_id") or ""))
             ),
             key=lambda task: (
                 str(task.get("case_id") or ""),
@@ -951,11 +944,7 @@ def apply_entity_action_task_resolutions(
         policy = inherited_policy(entity)
         if policy not in SUPPRESSING_POLICIES:
             continue
-        action = (
-            "not_sensitive"
-            if policy == POLICY_NOT_SENSITIVE
-            else "looks_correct"
-        )
+        action = "not_sensitive" if policy == POLICY_NOT_SENSITIVE else "looks_correct"
         if action not in set(task.get("allowed_actions") or []):
             continue
         resolution = {
@@ -1112,9 +1101,7 @@ def active_projection_hash_candidates_for_pointer(
     schema_version = active_projection_pointer_schema(payload)
     current_hash = active_projection_hash_for_pointer(projection_hashes, payload)
     if schema_version == LEGACY_ACTIVE_PROJECTION_HASH_SCHEMA_VERSION:
-        compatibility_hash = projection_hashes.get(
-            LEGACY_ACTIVE_PROJECTION_COMPATIBILITY_HASH_KEY
-        )
+        compatibility_hash = projection_hashes.get(LEGACY_ACTIVE_PROJECTION_COMPATIBILITY_HASH_KEY)
         if compatibility_hash and compatibility_hash != current_hash:
             return (current_hash, str(compatibility_hash))
     return (current_hash,)
@@ -1434,8 +1421,7 @@ def correction_verification_decision_gate(
         (
             dict(item)
             for item in list(state.get("active_manual_tasks") or [])
-            if dict(item).get("review_task_id") == task_id
-            and dict(item).get("case_id") == case_id
+            if dict(item).get("review_task_id") == task_id and dict(item).get("case_id") == case_id
         ),
         None,
     )
@@ -2364,9 +2350,7 @@ def render_correction_preview(
         "frame_end": correction.source_frame_end,
         "frame_start": correction.source_frame_start,
         "latest_reviewed": None,
-        "latest_reviewed_publication_status": "deferred"
-        if publication_deferred
-        else "supported",
+        "latest_reviewed_publication_status": "deferred" if publication_deferred else "supported",
         "ok": True,
         "original_preview": original_preview.relative_to(package_root).as_posix(),
         "preview_sha256": preview_hash,
@@ -2594,11 +2578,7 @@ def create_checkpoint(
     package_root = package_root.resolve()
     session_dir = session_dir.resolve()
     ensure_session_layout(session_dir)
-    created_from_case_id = (
-        case_ids.validate_case_id(case_context_id)
-        if case_context_id
-        else None
-    )
+    created_from_case_id = case_ids.validate_case_id(case_context_id) if case_context_id else None
     state = derive_working_state(package_root, session_dir)
     checkpoint_id = f"checkpoint_{uuid.uuid4().hex}"
     checkpoint = {
@@ -2782,8 +2762,7 @@ def reset_to_automatic_baseline(
         [selected_case]
         if selected_case
         else sorted(
-            case_ids.validate_case_id(path.stem)
-            for path in (package_root / "cases").glob("*.json")
+            case_ids.validate_case_id(path.stem) for path in (package_root / "cases").glob("*.json")
         )
     )
     for item_case in reset_case_ids:
@@ -3331,10 +3310,7 @@ def delivery_redaction_records_contract(
         )
         records_path = case_ids.contained_path(
             package_root,
-            *(
-                revision_manifest_path.parent
-                / str(revision_manifest.get("reviewed_regions") or "")
-            )
+            *(revision_manifest_path.parent / str(revision_manifest.get("reviewed_regions") or ""))
             .relative_to(package_root)
             .parts,
         )
@@ -3372,18 +3348,14 @@ def delivery_redaction_records_contract(
         "manifest_filename": DELIVERY_REDACTION_RECORDS_MANIFEST_FILENAME,
         "record_count": binding["record_count"],
         "render_configuration": dict(revision_manifest.get("render_configuration") or {}),
-        "renderer_configuration_sha256": revision_manifest.get(
-            "renderer_configuration_sha256"
-        ),
+        "renderer_configuration_sha256": revision_manifest.get("renderer_configuration_sha256"),
         "references": {
             "final_current_pointer": "final/current.json" if final_pointer is not None else None,
             "finalization_manifest": (final_pointer or {}).get("finalization_manifest"),
             "latest_reviewed_current_pointer": "latest_reviewed/current.json",
             "latest_reviewed_revision_manifest": latest_pointer.get("revision_manifest"),
         },
-        "reviewed_region_identity": dict(
-            revision_manifest.get("reviewed_region_identity") or {}
-        ),
+        "reviewed_region_identity": dict(revision_manifest.get("reviewed_region_identity") or {}),
         "review_session_id": session_dir.name,
         "reviewed_region_records_sha256": binding["reviewed_region_records_sha256"],
         "reviewed_region_set_sha256": binding["reviewed_region_set_sha256"],
@@ -3508,8 +3480,7 @@ def delivery_package_zip(
         )
         archive.writestr(
             f"{case_folder}/validation.json",
-            json.dumps(contract["manifest"]["validation_state"], indent=2, sort_keys=True)
-            + "\n",
+            json.dumps(contract["manifest"]["validation_state"], indent=2, sort_keys=True) + "\n",
         )
         redaction_records = dict(contract["manifest"].get("redaction_records") or {})
         if redaction_records.get("available") is True:

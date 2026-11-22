@@ -17,6 +17,8 @@ from redactor.privacy_records import (
     PrivacyRegionRecord,
 )
 
+pytestmark = pytest.mark.usefixtures("synthetic_frontend_assets")
+
 
 def fake_media_info() -> MediaInfo:
     return MediaInfo(
@@ -298,10 +300,7 @@ def test_case_pipeline_writes_one_manifest_and_combined_render_plan(
     category_run_identities = workspace_manifest["category_run_manifest_identities"]
     assert not (workspace_root / "mixed_review_manifest.json").exists()
     assert set(category_run_identities) == {CATEGORY_FACE, CATEGORY_PLATE}
-    assert (
-        manifest["review"]["category_run_manifest_identities"]
-        == category_run_identities
-    )
+    assert manifest["review"]["category_run_manifest_identities"] == category_run_identities
     assert (
         manifest["review"]["category_run_manifest_identity_hash"]
         == workspace_manifest["category_run_manifest_identity_hash"]

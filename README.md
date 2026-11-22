@@ -1,363 +1,198 @@
 # Video Redaction Pipeline
 
-Video Redaction Pipeline is a local, reviewable workflow for turning source video into privacy-redacted media while preserving the evidence and human decisions behind the result.
+A local video privacy-redaction pipeline for **faces and license plates**, combining pretrained detection, temporal tracking, bounded gap recovery, source-frame-accurate rendering, evaluation, and a **React human-review workspace**.
 
-The current automated detection and tracking scope is exactly two sensitive-object
-categories: faces and license plates.
+Built by **Anastasia Sokolenko** as an applied computer-vision engineering project around pretrained OpenVINO ADAS and Open Image Models YOLOv9 detectors.
 
-- `face`;
-- `license_plate`.
+![Synthetic face and plate-like targets with privacy redaction](docs/assets/video_redaction_demo.gif)
 
-The review UI can also store manually drawn `other_sensitive` correction
-geometry, but that is a human review/correction category only, not an automated
-detector or tracker category.
+This eight-second comparison uses fully programmatically generated video and injected synthetic observations with the real face and plate trackers, bounded tracker interpolation, and shared privacy renderer. It illustrates short-gap continuity; pretrained detector inference and the separate face privacy-gap-recovery stage are not run. No real person, plate text, third-party branding, or copied footage is shown. Detector performance is evaluated separately on the frozen benchmarks below; the [demo guide](docs/DEMO_GUIDE.md) explains how to generate the video and interactive review workspace.
 
-Its central design principle is:
+Existing research footage, screenshots, model weights, review sessions, and delivery packages are intentionally excluded from Git. In particular, a finalized delivery package can contain Original media and should not be treated as a safe public download.
 
-> A detector proposal is evidence, not a final privacy decision.
+## What I Built
 
-Real video contains motion blur, low light, occlusion, scale changes, scene cuts, and targets that briefly leave the frame. Reliable redaction therefore requires more than running a detector on independent images. This project combines source-bound inference, temporal tracking, bounded gap recovery, explicit reviewer policy, manual geometry correction, validated rendering, and an auditable finalization process.
+I built the practical processing and review pipeline around pretrained detectors. I did **not** train the OpenVINO ADAS or Open Image Models YOLOv9 models.
 
-## What the system does
+My implementation work covers:
 
-For each video case, the pipeline can:
+- evaluating and selecting models for the recorded face and plate benchmarks;
+- integrating detector preprocessing, inference, tiling, and source-bound outputs;
+- linking observations into tracks and keeping weak, strong, and interpolated evidence distinct;
+- recovering defensible short privacy gaps while surfacing uncertain intervals;
+- mapping source frames through processing, review clips, corrections, and rendered output;
+- implementing shared privacy rendering and decoded-output validation;
+- building ground-truth annotation, evaluation, and evidence-validation tooling;
+- developing the Python review backend and React/TypeScript frontend;
+- supporting entity policies, human-confirmed merges, manual corrections, and reviewed revisions;
+- preserving provenance through finalization and testing the workflow with synthetic fixtures and browser automation.
 
-1. inspect and hash the source video;
-2. detect faces and license plates;
-3. associate detections into temporal tracks;
-4. recover only defensible short gaps and surface uncertain intervals for review;
-5. render an **Automatic** redacted video;
-6. let a reviewer confirm, reject, reclassify, or correct the result;
-7. build a source-bound **Latest reviewed** revision from the accumulated review state;
-8. require a full-video visual approval of that exact revision;
-9. publish an immutable **Final** video and delivery manifest.
+The project demonstrates applied computer-vision and software engineering: connecting imperfect model outputs to a reviewable result whose decisions can be inspected.
 
-The repository is intended for local operation. Source videos, model weights, review sessions, generated media, and delivery packages normally live under ignored artifact directories rather than in Git.
-
-## System at a glance
+## Pipeline
 
 ```mermaid
 flowchart LR
-    A[Source video] --> B[Inspect, hash, and map frames]
-    B --> C1[Face detection]
-    B --> C2[Plate detection]
-    C1 --> D1[Face tracking and deterministic gap recovery]
-    C2 --> D2[Plate tracking and bounded continuity]
-    D1 --> E[Automatic privacy regions]
-    D2 --> E
-    E --> F[Automatic video]
-    F --> G[Guidance, Entities, and Manual corrections]
-    G --> H[Pending reviewed state]
-    H -->|Build reviewed video| I[Latest reviewed]
-    I --> J[Full-video visual approval]
-    J --> K[Immutable Final and delivery package]
+    A[Source video and frame identity] --> B[Face and plate detection]
+    B --> C[Category tracking and temporal evidence]
+    C --> D[Bounded gap recovery]
+    D --> E[Shared privacy regions]
+    E --> F[Automatic preview]
+    F --> G[React review workspace]
+    G --> H[Policies, merges and manual corrections]
+    H --> I[Latest reviewed]
+    I --> J[Full-video approval]
+    J --> K[Immutable Final]
 ```
 
-Face and plate detection remain category-specific because the two object types have different geometry and temporal behavior. After detection and tracking, both categories are represented through shared privacy-region, review, rendering, and provenance contracts.
+Python owns inference, temporal logic, privacy regions, sessions, rendering, validation, and finalization. React owns presentation, navigation, playback controls, and draft interaction state through the versioned backend API. Faces and plates have separate detector/tracker policies and share downstream rendering and review contracts.
 
-## End-to-end workflow
+**Temporal evidence with explicit limits.** The active face detector is OpenVINO `face-detection-adas-0001`: proposals are retained at `0.20`, while primary evidence starts at `0.30`. Plates use OIM YOLOv9-S-608 at `0.30` with uniform small-object tiles. Weak observations and interpolation cannot manufacture the real detector observations required for confirmation.
 
-### 1. Establish source identity
+**Conservative gap handling.** Face recovery uses deterministic source-bound bridging; plate tracking uses accumulated evidence and bounded interpolation. Scene cuts, competing targets, implausible motion, and unsafe gaps remain auditable. Unsupported one-sided prediction is not silently promoted into automatic protection.
 
-The pipeline records the source frame count, resolution, frame rate, duration, and cryptographic identity. Review decisions and corrections are stored in source-frame coordinates so they cannot silently drift to another derivative video.
+**Source-frame accuracy.** Regions, correction endpoints, and review intervals use explicit frame identities. Rendering validates media and checks that expected privacy regions change the intended decoded frames. Partial processing is distinguished from complete-source processing.
 
-### 2. Detect sensitive objects
+**Human review as part of the pipeline.** Reviewers inspect Guidance and Entities, choose policies, confirm merges, and add single-frame, fixed-interval, or interpolated corrections. Saved changes accumulate until an explicit **Build reviewed video** produces current Latest reviewed media. Finalization requires full-video approval of that exact revision. Human approval is preserved as human evidence.
 
-The supported face path uses the selected OpenVINO ADAS face detector. The selected plate path uses the repository's YOLOv9-S-608 license-plate model.
+**Traceable output.** Automatic observations remain separate from reviewed decisions. Append-only events, hashes, manifests, and immutable revisions link source input, effective regions, approval, and Final media. See the [system overview](docs/SYSTEM_OVERVIEW.md) for the implementation boundaries.
 
-Raw detections remain separate from later tracking, recovery, policy, and manual correction records. A recovered or manually drawn region is never relabeled as a direct detector hit.
+## Why Video Redaction Is Hard
 
-### 3. Track evidence over time
+A detector can miss an object for several frames because of motion blur, low light, occlusion, or scale changes. Independent frame predictions can make privacy masks flicker. Broadly filling every gap can hide unrelated content or bridge between different objects. A correct rectangle applied to the wrong source frame is also a privacy failure.
 
-Frame-level observations are linked into temporal targets. Tracks make it possible to maintain continuity, identify gaps, reduce flicker, and review one object over an interval instead of rediscovering it frame by frame.
+The central principle is **a detector proposal is evidence, not a final privacy decision**. Tracking and bounded recovery improve continuity, while human review handles unsupported intervals and corrections. The evidence records preserve which layer supplied each region instead of treating all redacted pixels as successful detections.
 
-### 4. Recover bounded gaps
+## Results
 
-Detector misses are expected. The face pipeline uses deterministic, source-bound recovery from trusted temporal anchors. Long or ambiguous recovered intervals remain review guidance instead of being silently accepted as automatic truth.
+These are **raw detector recall** results on small, frozen, source-bound benchmarks. Tracking, recovered regions, and manual corrections receive no detector credit.
 
-The plate path accumulates evidence over time and uses bounded continuity rules. Sparse or ambiguous plate proposals remain reviewable rather than becoming confident tracks merely because interpolation is possible.
+| Detector / target | Detected target-frames | Recall |
+| --- | ---: | ---: |
+| ADAS face, Day | 299 / 300 | 99.67% |
+| ADAS face, standing Night | 359 / 360 | 99.72% |
+| ADAS face, seated Night | 175 / 192 | 91.15% |
+| **ADAS face, total at primary threshold 0.30** | **833 / 852** | **97.77%** |
+| OIM plate, Day | 236 / 240 | 98.33% |
+| OIM plate, Night | 321 / 360 | 89.17% |
+| **OIM plate, total** | **557 / 600** | **92.8333%** |
 
-### 5. Render Automatic media
+The [face evidence](data/evaluations/face_detector_adas_v1.0/README.md) includes adjudication, input identities, thresholds, and validation. The [compact plate evidence](data/evaluations/plate_detector_oim_yolov9_s_608_v1/README.md) records the validated detector results and input hashes without distributing the videos. Frozen plate GT contains 600 reviewed spatial records. Complete spatial negative/ignore annotations are unavailable, so formal plate precision is not published.
 
-Accepted machine privacy regions are rendered into the **Automatic** video. Automatic is a review input, not a final claim.
+These measurements support the evaluated clips, not a universal detector ranking. Private source assets are required to rerun their original inference. Current face reviewed-final numerical scoring is unsupported by its frozen contract; the product Day Final differs from the plate benchmark source. An older Night reviewed-final geometric result is labeled historical and is not assigned to current Final media. [Evaluation](docs/EVALUATION.md) explains these distinctions. No full-video zero-leak claim is made.
 
-The Automatic result remains immutable relative to its detector, tracking, recovery, and configuration inputs. Human review creates a separate reviewed state rather than rewriting the original machine evidence.
+## Quick Start
 
-## Review Workspace
+### A. Asset-free developer smoke
 
-The Final Review Workspace is a local browser application served by the Python backend.
-
-It exposes four media roles when available:
-
-- **Original** — the source video;
-- **Automatic** — machine-generated redaction;
-- **Latest reviewed** — the newest validated render of the current review state;
-- **Final** — an immutable approved publication.
-
-### Guidance
-
-Guidance highlights intervals that deserve attention, such as possible tracking drift, uncertain identity continuity, plate coverage risk, or optional spot checks.
-
-Guidance is advisory. A reviewer may inspect and adjudicate it, but unreviewed Guidance alone does not fabricate a Correct decision and does not block finalization. The mandatory full-video review remains the final protection against silent misses outside targeted Guidance.
-
-### Needs correction
-
-**Needs correction** is fail-closed. It means the current reviewed geometry or policy is not acceptable. A case cannot publish a current Latest reviewed revision or Final while a real Needs correction blocker remains unresolved.
-
-### Entities
-
-Entities are source-backed, privacy-conservative groupings of people and plates assembled from temporal evidence. They help a reviewer apply case policy consistently, but they are advisory review objects rather than open-ended identity recognition.
-
-Entity-level actions apply to the whole selected entity, not only the thumbnail currently visible in the interface.
-
-Typical actions are:
-
-- **Redact** — include the entity in reviewed privacy regions;
-- **Keep visible** — deliberately preserve the entity;
-- **Not a person / Not a plate** — reject the entity as a false proposal;
-- **Needs review** — leave the entity unresolved.
-
-Entity actions are powerful and should be used carefully. The workspace surfaces entity purity/conflict information and requires human confirmation for candidate merges, but the reviewer remains responsible for checking the entity's full interval. If one entity accidentally contains both false-positive and true-positive evidence, marking the entire entity as Not a person or Not a plate can remove valid redaction regions. The reviewer should inspect the entity's full interval and verify the rebuilt Latest reviewed video before approval.
-
-### Manual correction
-
-Manual correction adds explicit source-frame privacy geometry without changing detector thresholds or rewriting automatic evidence.
-
-Supported modes are:
-
-- **Single frame** — exactly one rectangle on one source frame;
-- **Fixed interval** — one fixed rectangle applied across an interval;
-- **Interpolate** — explicit start and end rectangles with linear interpolation between them.
-
-The correction lifecycle is intentionally batched:
-
-1. draw a correction;
-2. preview the affected frame or short interval;
-3. save the correction record, or remove an individual saved correction when it should no longer apply;
-4. continue adding or editing other corrections;
-5. select **Build reviewed video** once when the review changes are ready to materialize.
-
-Manual Preview is local and short: it renders only the draft frame or interval needed to verify the correction before Save.
-
-Saving or removing a correction stores authoritative review state and marks reviewed media as pending when pixels change. It does **not** normally trigger a full reviewed-video render after every rectangle. Multiple Manual corrections and media-affecting Entity actions can be accumulated before the reviewer explicitly selects **Build reviewed video**. The explicit build applies all pending corrections and media-affecting entity changes in one reviewed-video job.
-
-If the reviewed state is identical to Automatic, the build can reuse the validated Automatic media instead of running a full encode.
-
-### Building Latest reviewed
-
-**Build reviewed video** compiles the current case policy, entity actions, and saved corrections into a reviewed-region set, renders or safely reuses media, validates the result, and publishes a new immutable Latest reviewed revision.
-
-While changes are pending:
-
-- the previous Latest may remain historical but is not current for the new state;
-- full-video approval is unavailable;
-- Final creation remains blocked.
-
-A new edit made during a build does not silently become part of an older job. Outdated jobs are superseded, and only media bound to the latest compatible review state can become current.
-
-### Full-video approval and Final
-
-After Latest reviewed is current, the reviewer watches the complete video and records a full-video approval bound to that exact revision, media hash, reviewed-region identity, case, and session.
-
-Final creation requires:
-
-- a current validated Latest reviewed revision;
-- no active Needs correction or invalid correction state;
-- a current full-video approval bound to that revision;
-- valid source, session, lineage, media, and reviewed-region identities.
-
-Final is immutable. Later review changes create new revisions; they do not rewrite an existing Final.
-
-## Review sessions and safety
-
-Review sessions are append-only and hash-chained. Durable decisions live on the server, not in browser storage.
-
-The workspace provides:
-
-- case-scoped decisions and corrections;
-- explicit case/session routing for review actions;
-- atomic JSON and pointer updates;
-- strict event-chain validation;
-- a single-writer lock so the same workspace cannot be edited by two writable servers at once;
-- concurrent-safe, case-safe persistence of reviewer decisions;
-- frame-accurate seeking in source-frame coordinates;
-- individual correction retraction;
-- on-demand entity previews with background caching;
-- entity purity/conflict handling and human-confirmed candidate merges;
-- stale-publication protection for reviewed-video materialization;
-- historical preservation of superseded Latest, sweep, and Final artifacts;
-- explicit **New review session** and case reset actions.
-
-**Reset this case to Automatic baseline** is destructive for the selected case's active review state. It should be used deliberately.
-
-## What the output package contains
-
-A finalized case delivery package contains:
-
-- `Original.mp4`;
-- `Automatic.mp4`;
-- `Latest_reviewed.mp4`;
-- `Final.mp4`;
-- a portable manifest;
-- a review-audit record;
-- `reviewed_regions.jsonl` with the packaged per-redaction records;
-- `redaction_manifest.json` with source, revision, count, and hash bindings;
-- validation state.
-
-The manifest binds the package to its source hash, case, session, reviewed-region identity, media hashes, and current Final state. Package media and audit metadata can therefore be checked without relying on local absolute paths.
-
-## Auditability and provenance
-
-The system records enough information to reconstruct why a region exists and which output contains it.
-
-| Layer | Examples of recorded information |
-| --- | --- |
-| Source | metadata, frame mapping, cryptographic identity |
-| Model evidence | active model identities and workflow configuration |
-| Temporal evidence | tracks, intervals, observations, gaps, and review signals |
-| Region provenance | detection, tracking, deterministic recovery, entity policy, or manual correction |
-| Human review | Guidance decisions, entity actions, corrections, reset history, and full-video approval |
-| Rendering | reviewed-region set, media identity, validation results, and revision pointers |
-| Finalization | exact Latest revision, approval binding, integrity gates, and immutable Final identity |
-
-Portable delivery packages include the authoritative `reviewed_regions.jsonl` for the packaged Latest/Final revision, plus a `redaction_manifest.json` with source, case, revision, record-count, semantic-hash, and file-hash bindings. Detector confidence is preserved where available; tracked, recovered, entity-policy, and manual regions do not fabricate confidence values.
-
-The audit trail is intended to answer not only "what was redacted?" but also "why was it redacted, what changed during review, and which exact media revision contains that decision?"
-
-## Evaluation and claims
-
-The project keeps different claim layers separate:
-
-1. **Detector evaluation** — whether the selected model directly proposed the target on scored frames;
-2. **Automatic coverage** — whether machine tracking and recovery produced privacy regions;
-3. **Reviewed-final geometric evaluation** — whether authoritative reviewed regions match a compatible frozen benchmark;
-4. **Human full-video review** — whether the exact current reviewed video was watched and approved.
-
-These layers are not interchangeable. Manual corrections and recovered regions do not improve raw detector recall, and a full-video approval is evidence of human review rather than a numerical metric.
-
-Important limits:
-
-- numerical evaluation is source-bound and cannot be transferred to a different clip or incompatible source lineage;
-- the current Day product Final is not numerically comparable to the frozen Day plate benchmark source;
-- face reviewed-final numerical scoring is not supported by the frozen face evaluation contract;
-- the complete product videos do not carry a mathematical or global zero-leak certification;
-- visual review remains authoritative when geometric metrics and visible privacy disagree.
-
-See [docs/EVALUATION.md](docs/EVALUATION.md) for the exact frozen evaluation evidence and limitations.
-
-## Production-readiness work
-
-The repository includes production-oriented safeguards for local operation:
-
-- deterministic face gap recovery;
-- source- and revision-bound review state;
-- immutable revision pointers;
-- event projection and media metadata caching;
-- no-op and reusable materialization paths;
-- explicit batched reviewed-video builds;
-- supersession of outdated media jobs;
-- heavy-job admission control;
-- resumable stage manifests;
-- streaming validation to reduce memory use;
-- structured timing and integrity telemetry.
-
-Detection and full-video rendering remain the expensive stages. Manual Preview and Save are designed to stay responsive, while full reviewed-video encoding is an explicit background operation.
-
-## Quick start
-
-### Requirements
-
-- Python 3.11 or 3.12;
-- FFmpeg and FFprobe;
-- Node.js and npm;
-- local model weights.
-
-### Install
+Use Python 3.12, FFmpeg/FFprobe, Node.js, and npm. The tested environment and exact model prerequisites are in [Model setup](docs/MODEL_SETUP.md). From a fresh clone:
 
 ```bash
-python -m venv .venv
+python3.12 -m venv .venv
 source .venv/bin/activate
 python -m pip install -e ".[dev]"
+export PYTHONDONTWRITEBYTECODE=1
 redactor doctor
-```
-
-Build the frontend:
-
-```bash
+python -m pytest -q -p no:cacheprovider \
+  tests/test_plate_tracking.py::test_synthetic_video_smoke_without_model
 npm --prefix frontend ci
+npm --prefix frontend test
 npm --prefix frontend run build
 ```
 
-### Run an automatic face-and-plate case
+No private video, model weight, or OpenVINO installation is needed for this smoke. To generate the public-safe workflow demonstration after building the frontend:
 
 ```bash
-redactor redact-video path/to/input.mp4 \
+python scripts/generate_synthetic_demo.py \
+  --output artifacts/synthetic_demo --gif artifacts/synthetic_demo.gif
+redactor serve-final-review-workspace \
+  artifacts/synthetic_demo/case/review_workspace --open
+```
+
+The [demo guide](docs/DEMO_GUIDE.md) explains the synthetic observations, temporal gaps, review interaction, and generated files. It also documents intentional README-animation regeneration with `--gif docs/assets/video_redaction_demo.gif --overwrite-gif`. The server binds locally; use one writable server per workspace.
+
+### B. Local real-video inference
+
+Supply your own permitted `input.mp4`. Install the inference runtime, obtain the two active pretrained models separately, and verify **all three file hashes** using [Model setup](docs/MODEL_SETUP.md). Weights are not downloaded by the project install.
+
+```bash
+python -m pip install -e ".[dev,inference]"
+redactor redact-video input.mp4 \
   --categories face,license_plate \
   --adas-xml models/face-detection-adas-0001/face-detection-adas-0001.xml \
   --adas-bin models/face-detection-adas-0001/face-detection-adas-0001.bin \
   --plate-model models/open-image-models/yolo-v9-s-608-license-plates-end2end.onnx \
-  --output-dir path/to/output_case \
-  --overwrite
+  --output-dir artifacts/my_case
+redactor serve-final-review-workspace artifacts/my_case/review_workspace --open
 ```
 
-The output directory contains source-bound automatic artifacts and media. When a review workspace has been generated, serve it with:
-
-```bash
-redactor serve-final-review-workspace path/to/review_workspace --open
-```
-
-Only one writable server should be run for a given workspace.
+Use a new output directory. Inspect Automatic, save corrections, build Latest reviewed, and watch the complete current result before approving Final. Detailed review instructions are in [Final Review Workspace](docs/FINAL_REVIEW_WORKSPACE.md).
 
 ## Testing
 
+The default public suite uses tracked synthetic fixtures and temporary outputs. It needs the Python development dependencies and FFmpeg/FFprobe, not models, private footage, or ignored release packages:
+
 ```bash
+PYTHONDONTWRITEBYTECODE=1 python -m pytest -rs -p no:cacheprovider
+python -m ruff check .
+python -m ruff format --check .
+npm --prefix frontend run typecheck
+npm --prefix frontend run lint
+npm --prefix frontend test
 npm --prefix frontend run build
-npm --prefix frontend test -- --run
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m ruff check .
-PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -rs -p no:cacheprovider
-REDACTOR_RUN_FIREFOX_E2E=1 PYTHONDONTWRITEBYTECODE=1 .venv/bin/python -m pytest -rs -p no:cacheprovider tests/test_final_review_workspace_firefox.py
 git diff --check
 ```
 
-Exact test counts and release hashes belong in [docs/RELEASE_EVIDENCE.md](docs/RELEASE_EVIDENCE.md), not in this root README, because they change between releases.
+Backend workspace tests use small test-only frontend assets and never run an implicit npm install. The synthetic demo's media/API integration test runs after an explicit frontend build; without that build it reports a prerequisite skip, while its temporal unit tests still run.
 
-## Repository structure
+Private release-lineage integration is explicitly optional and separate:
 
-- `src/redactor/` — Python CLI, inference orchestration, tracking, review state, rendering, validation, evaluation, and finalization;
-- `frontend/` — React/Vite Review Workspace and frontend tests;
-- `tests/` — Python unit, integration, lifecycle, and Firefox tests;
-- `data/ground_truth/` — frozen Ground Truth and annotation contracts;
-- `data/evaluations/` — frozen evaluation policies and adjudication inputs;
-- `docs/` — architecture, Review Workspace, evaluation, performance, demo, and release documentation;
-- `artifacts/` — ignored local media, workspaces, sessions, diagnostics, evidence, and delivery packages.
+```bash
+REDACTOR_RUN_LOCAL_ASSET_TESTS=1 PYTHONDONTWRITEBYTECODE=1 \
+  python -m pytest -rs -p no:cacheprovider -m local_assets
+```
 
-## Current limitations
+The real Firefox smoke uses generated synthetic workspaces. Build the frontend first; provision Firefox with `python -m playwright install firefox` if it is not already installed, then run:
 
-- Only `face` and `license_plate` are supported for automated detection and tracking.
-- OCR, screen, document, badge, general text, SSN, and other text-sensitive detection are not implemented and are outside the current automated scope.
-- `other_sensitive` can be added only as manual review/correction geometry.
-- The system is a local single-user tool, not a hardened remote multi-tenant service.
-- Authentication, authorization, encrypted transport, retention policy, and centralized access logging require a separate deployment layer.
-- Detection and full-video encoding are computationally expensive.
-- Manual Save records corrections quickly, but a current Latest reviewed video still requires an explicit full build.
-- Entity-level rejection applies to the entire selected entity and can remove valid privacy regions if the entity is misclassified.
-- Guidance reduces review effort but cannot guarantee that every sensitive object generated evidence.
-- Selective redaction is based on reviewed temporal targets, not general identity recognition.
-- Benchmark claims apply only to compatible source lineages and frozen scoring contracts.
-- Human full-video review remains mandatory before Final publication.
+```bash
+REDACTOR_RUN_FIREFOX_E2E=1 PYTHONDONTWRITEBYTECODE=1 \
+  python -m pytest -rs -p no:cacheprovider tests/test_final_review_workspace_firefox.py
+```
 
-## Further documentation
+Browser tests are opt-in. Missing optional assets are not evidence that an integration test passed. Validation counts and environment details belong in [release evidence](docs/RELEASE_EVIDENCE.md).
 
-- [Final Review Workspace](docs/FINAL_REVIEW_WORKSPACE.md)
-- [Privacy Pipeline Architecture](docs/PRIVACY_PIPELINE_ARCHITECTURE.md)
-- [Unified Case Pipeline Architecture](docs/UNIFIED_CASE_PIPELINE_ARCHITECTURE.md)
-- [Evaluation](docs/EVALUATION.md)
-- [Production System Design One-Page](docs/PRODUCTION_SYSTEM_DESIGN_ONE_PAGE.md)
-- [Production Readiness](docs/PRODUCTION_READINESS.md)
-- [Demo Guide](docs/DEMO_GUIDE.md)
-- [Release Notes](docs/RELEASE_NOTES.md)
-- [Release Evidence](docs/RELEASE_EVIDENCE.md)
+## Project Structure
 
-## Deployment note
+- `src/redactor/` — Python processing, evaluation, review, and finalization.
+- `frontend/` — React/TypeScript application and frontend tests.
+- `tests/fixtures/` — portable synthetic/sanitized test inputs.
+- `data/ground_truth/` and `data/evaluations/` — versioned truth and compact evidence.
+- `scripts/` — synthetic demo and engineering utilities.
+- `docs/` — current architecture, setup, evaluation, and reviewer documentation.
+- `docs/assets/` — generated synthetic visuals used by the README.
+- `models/`, `data/raw/`, and `artifacts/` — ignored local inputs and generated output.
 
-This repository demonstrates a correctness-first local privacy workflow. A production deployment for many users or concurrent video streams requires separate infrastructure for authentication, queueing, distributed storage, worker isolation, observability, cost control, backup and recovery, and privacy-governance review.
+`docs/archive/`, `experiments/archive/`, `tests/archive/`, and `docs/system_overview_versions/` preserve historical research. They are not alternative supported detector setups.
+
+## Limitations
+
+Automated scope is faces and license plates. Other sensitive regions can be drawn manually; OCR and general identity recognition are not implemented. Low-light and difficult poses still cause misses. Entity-level rejection can remove valid protection if a mixed entity is misclassified. Guidance cannot expose every silent miss, so full-video review remains necessary. Processing and encoding can be expensive.
+
+This is a local review application. Multi-user hosting and enterprise deployment are outside this portfolio scope. Model files and research media remain separate local inputs. A delivery package may include unredacted Original media, so neither finalization nor a redacted preview establishes permission to publish that package.
+
+## Documentation
+
+- **README** — start here.
+- [System overview](docs/SYSTEM_OVERVIEW.md) — current architecture.
+- [Evaluation](docs/EVALUATION.md) — ground truth, metrics, and claim boundaries.
+- [Model setup](docs/MODEL_SETUP.md) — local inference dependencies and hashes.
+- [Final Review Workspace](docs/FINAL_REVIEW_WORKSPACE.md) — reviewer workflow.
+- [Demo guide](docs/DEMO_GUIDE.md) — safe generated demonstration.
+- [Performance and production hardening](docs/PERFORMANCE_AND_PRODUCTION_HARDENING.md) — deeper engineering details.
+- [Documentation inventory](docs/DOCUMENTATION_INVENTORY.md) — navigation and historical material.
+
+## Licensing
+
+This repository is published as a portfolio project. No open-source license is granted for the project source code. Third-party software and model components remain subject to their respective licenses.
+
+See [third-party notices](THIRD_PARTY_NOTICES.md) for dependency attribution, pretrained models, and excluded media. The repository intentionally has no project-wide `LICENSE` file.

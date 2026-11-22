@@ -140,15 +140,11 @@ class ReviewCorrection:
                 )
             return
         if len(self.keyframes) != 2:
-            raise ValueError(
-                "linear interpolation requires exactly one start and one end keyframe"
-            )
+            raise ValueError("linear interpolation requires exactly one start and one end keyframe")
         if self.source_frame_start == self.source_frame_end:
             raise ValueError("linear interpolation requires a multi-frame interval")
         if source_frames != {self.source_frame_start, self.source_frame_end}:
-            raise ValueError(
-                "linear interpolation keyframes must match the interval endpoints"
-            )
+            raise ValueError("linear interpolation keyframes must match the interval endpoints")
         if self.source_frame_start not in source_frames:
             raise ValueError(
                 "linear interpolation requires a start keyframe at source frame "

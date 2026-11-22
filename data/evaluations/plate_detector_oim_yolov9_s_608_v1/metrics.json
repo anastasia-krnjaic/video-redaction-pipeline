@@ -1,0 +1,79 @@
+{
+  "aggregate": {
+    "detector_scored_frames": 600,
+    "hit_frame_count": 557,
+    "micro_recall": 0.928333,
+    "miss_frame_count": 43
+  },
+  "cases": [
+    {
+      "benchmark_id": "day_plate",
+      "canonical_frame_namespace": "evaluation_video_parent_frame",
+      "dense_frame_interval": [
+        0,
+        239
+      ],
+      "detector_scored_frames": 240,
+      "evaluation_video_sha256": "63d41905e2b6c65a3cdc72aa73ee31668fe1c1b4fdfefa2c5688cd38c90d1097",
+      "formal_precision": {
+        "reason": "insufficient_spatial_negative_ignore_map",
+        "value": null
+      },
+      "hit_frame_count": 236,
+      "maximum_consecutive_miss_run": 2,
+      "miss_frame_count": 4,
+      "parent_evaluation_frame_interval": [
+        240,
+        479
+      ],
+      "target_frame_recall": 0.983333,
+      "target_id": "plate_day_01"
+    },
+    {
+      "benchmark_id": "night_selective",
+      "canonical_frame_namespace": "evaluation_video_parent_frame",
+      "dense_frame_interval": [
+        0,
+        359
+      ],
+      "detector_scored_frames": 360,
+      "evaluation_video_sha256": "0b55aa3a497941711ac8634a049c557637e20928e8d3bd8b63e5b030b6b272e0",
+      "formal_precision": {
+        "reason": "insufficient_spatial_negative_ignore_map",
+        "value": null
+      },
+      "hit_frame_count": 321,
+      "maximum_consecutive_miss_run": 7,
+      "miss_frame_count": 39,
+      "parent_evaluation_frame_interval": [
+        420,
+        779
+      ],
+      "target_frame_recall": 0.891667,
+      "target_id": "plate_night_01"
+    }
+  ],
+  "configuration_hash": "7d914438255905e2a249e5bbd30fd6e70eace1e91b57e205bd572d004ffb5a55",
+  "detector_id": "oim_yolov9_s_608",
+  "evaluation_id": "plate_detector_oim_yolov9_s_608_v1",
+  "evaluation_policy_id": "plate_evaluation_policy_v1.0",
+  "evaluation_policy_sha256": "34515ecb8d32bffea5bb69093ef0c653ee12228abb3864182943eb4e394645ac",
+  "ground_truth_content_sha256": "5cf36ff48fa93743caf460ff6ee0470799e165dba2b9b42b9ad58168e5233314",
+  "ground_truth_id": "plate_ground_truth_v1.0",
+  "inference_mode": "uniform_small_object_tiles",
+  "limitations": [
+    "Two source-bound dense intervals with one annotated plate target each; not full-video or general-domain recall.",
+    "Ground Truth is proposal-assisted and human-reviewed; not an independent held-out dataset.",
+    "Formal precision unavailable: insufficient_spatial_negative_ignore_map.",
+    "Detector observations only; no tracking, interpolation, manual correction, or rendered privacy coverage credit.",
+    "This is a compact extraction from existing validated reports; inference and scoring were not rerun for this record."
+  ],
+  "matching_policy_version": "plate_detector_matching_v1.0",
+  "mode": "detector",
+  "model_file": "yolo-v9-s-608-license-plates-end2end.onnx",
+  "model_revision": "f22000e02b30642f317cdba7755c0631638b109e",
+  "model_sha256": "2b878b38d9aa07b6ddc3ea75c4ffcb39869bc5c218e0a14002f60ab2f7b0be9a",
+  "primary_threshold": 0.3,
+  "schema_version": "compact_plate_detector_evidence.v1",
+  "source_repository": "https://github.com/ankandrew/open-image-models"
+}

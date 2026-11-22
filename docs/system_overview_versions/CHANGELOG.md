@@ -1,5 +1,14 @@
 # System Overview Changelog
 
+## v037 — 2026-11-21
+
+Preserved the prior canonical overview before public portfolio documentation
+reconciliation. Corrected historical-versus-current Night metric attribution,
+distinguished local submission artifacts from public source evidence, and added
+setup/demo navigation. No detector, tracking, recovery, rendering, review,
+finalization, Ground Truth, or frame-mapping behavior changed. The snapshot
+records implementation and configuration provenance at `99587d0`.
+
 ## v036 — 2026-08-10
 
 Implemented authoritative canonical finalization:

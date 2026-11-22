@@ -629,22 +629,28 @@ def test_entity_refinement_classifies_cannot_link_and_disables_reveal() -> None:
             enriched,
             privacy_entities.POLICY_KEEP_VISIBLE,
         )
-        assert entity_refinement.validate_policy_action(
-            enriched,
-            privacy_entities.POLICY_REDACT,
-        ) is None
+        assert (
+            entity_refinement.validate_policy_action(
+                enriched,
+                privacy_entities.POLICY_REDACT,
+            )
+            is None
+        )
     assert [item[0] for item in outcomes] == [entity_refinement.PURITY_LIKELY_MIXED] * 3
     assert outcomes[0][1][0]["raw_child_ids"] == outcomes[-1][1][0]["raw_child_ids"]
 
 
 def test_conservative_policy_inheritance_prefers_redact() -> None:
-    assert entity_refinement.most_protective_policy(
-        [
-            privacy_entities.POLICY_KEEP_VISIBLE,
-            privacy_entities.POLICY_REVIEW_REQUIRED,
-            privacy_entities.POLICY_REDACT,
-        ]
-    ) == privacy_entities.POLICY_REDACT
+    assert (
+        entity_refinement.most_protective_policy(
+            [
+                privacy_entities.POLICY_KEEP_VISIBLE,
+                privacy_entities.POLICY_REVIEW_REQUIRED,
+                privacy_entities.POLICY_REDACT,
+            ]
+        )
+        == privacy_entities.POLICY_REDACT
+    )
 
 
 def test_thumbnail_ranking_binds_bbox_crops_to_source_frames() -> None:
@@ -764,9 +770,7 @@ def test_source_backed_singleton_without_observations_is_unverified() -> None:
 
     assert enriched["purity_classification"] == entity_refinement.PURITY_UNVERIFIED
     assert enriched["entity_refinement"]["child_tracklet_count"] == 1
-    assert enriched["entity_refinement"]["reasons"] == [
-        "raw_tracklet_missing_durable_geometry"
-    ]
+    assert enriched["entity_refinement"]["reasons"] == ["raw_tracklet_missing_durable_geometry"]
     assert entity_refinement.validate_policy_action(
         enriched,
         privacy_entities.POLICY_KEEP_VISIBLE,
@@ -775,10 +779,13 @@ def test_source_backed_singleton_without_observations_is_unverified() -> None:
         enriched,
         privacy_entities.POLICY_NOT_SENSITIVE,
     )
-    assert entity_refinement.validate_policy_action(
-        enriched,
-        privacy_entities.POLICY_REDACT,
-    ) is None
+    assert (
+        entity_refinement.validate_policy_action(
+            enriched,
+            privacy_entities.POLICY_REDACT,
+        )
+        is None
+    )
 
 
 def test_source_backed_singleton_with_malformed_geometry_is_unverified() -> None:
@@ -799,9 +806,7 @@ def test_source_backed_singleton_with_malformed_geometry_is_unverified() -> None
     enriched = entity_refinement.enrich_entity(entity)
 
     assert enriched["purity_classification"] == entity_refinement.PURITY_UNVERIFIED
-    assert enriched["entity_refinement"]["reasons"] == [
-        "raw_tracklet_missing_durable_geometry"
-    ]
+    assert enriched["entity_refinement"]["reasons"] == ["raw_tracklet_missing_durable_geometry"]
 
 
 def test_singleton_raw_id_with_unresolved_geometry_is_unverified() -> None:
@@ -812,9 +817,7 @@ def test_singleton_raw_id_with_unresolved_geometry_is_unverified() -> None:
         tracklets=[
             {
                 "detector_backed": True,
-                "observations": [
-                    {"bbox_xyxy": ["bad", 10, 30, 30], "source_frame": 5}
-                ],
+                "observations": [{"bbox_xyxy": ["bad", 10, 30, 30], "source_frame": 5}],
                 "source_frame_end": 5,
                 "source_frame_start": 5,
                 "tracklet_id": "raw_geometry_lookup_fails",
@@ -955,10 +958,10 @@ def test_recursive_historical_merge_lineage_resolves_raw_children(tmp_path: Path
 
     assert enriched is not None
     assert enriched["purity_classification"] == entity_refinement.PURITY_LIKELY_MIXED
-    assert {
-        item["tracklet_id"]
-        for item in enriched["entity_refinement"]["raw_tracklets"]
-    } == {"raw_face_child_a_track", "raw_face_child_b_track"}
+    assert {item["tracklet_id"] for item in enriched["entity_refinement"]["raw_tracklets"]} == {
+        "raw_face_child_a_track",
+        "raw_face_child_b_track",
+    }
 
 
 def test_historical_replayed_singleton_with_valid_geometry_stays_pure(
@@ -1402,9 +1405,10 @@ def test_historical_merge_preview_resolves_raw_descendant_identity(tmp_path: Pat
         session_events=review_sessions.load_events(session_dir),
     )
 
-    assert {
-        crop["raw_tracklet_id"] for crop in prepared["representative_crops"]
-    } == {"raw_preview_track_a", "raw_preview_track_b"}
+    assert {crop["raw_tracklet_id"] for crop in prepared["representative_crops"]} == {
+        "raw_preview_track_a",
+        "raw_preview_track_b",
+    }
 
 
 def test_split_child_preview_preserves_raw_tracklet_identity(tmp_path: Path) -> None:
@@ -1668,9 +1672,7 @@ def test_refinement_endpoints_are_append_only_and_case_isolated(tmp_path: Path) 
         )
         night_after = {
             entity_id: entity
-            for entity_id, entity in dict(
-                raw_state_after_split["object_policy_overrides"]
-            ).items()
+            for entity_id, entity in dict(raw_state_after_split["object_policy_overrides"]).items()
             if dict(entity).get("case_id") == "night"
         }
         assert night_after == night_before
@@ -1679,11 +1681,7 @@ def test_refinement_endpoints_are_append_only_and_case_isolated(tmp_path: Path) 
             for event in review_sessions.load_events(session_dir)
             if event["event_type"] == "entity_mixed_split" and event.get("case_id") == "night"
         ]
-        assert [
-                entity
-                for entity in day_overrides.values()
-                if dict(entity).get("case_id") == "day"
-            ]
+        assert [entity for entity in day_overrides.values() if dict(entity).get("case_id") == "day"]
 
         summary_before_candidate = entity_refinement.enrich_entity_index(
             package,
@@ -1781,8 +1779,7 @@ def test_missing_geometry_singleton_policy_routes_fail_closed(tmp_path: Path) ->
         assert not [
             event
             for event in review_sessions.load_events(session_dir)
-            if event["event_type"]
-            in {"bulk_entity_policy_changed", "entity_policy_changed"}
+            if event["event_type"] in {"bulk_entity_policy_changed", "entity_policy_changed"}
         ]
 
         status, redact = post_json(
@@ -1821,10 +1818,9 @@ def test_split_tracklet_out_removes_child_and_repeated_split_fails_closed(
         parent = dict(split["working_state"]["object_policy_overrides"][payload["entity_id"]])
         assert parent["current_status"] == "active"
         assert parent["automatic_source_track_ids"] == ["face_track_a"]
-        assert {
-            item["tracklet_id"]
-            for item in parent["entity_refinement"]["raw_tracklets"]
-        } == {"face_track_a"}
+        assert {item["tracklet_id"] for item in parent["entity_refinement"]["raw_tracklets"]} == {
+            "face_track_a"
+        }
         assert split["split_entities"][0]["member_detector_tracker_ids"] == ["face_track_b"]
         status, repeated = post_json(
             f"{base_url}/api/v1/entity-refinement/split-tracklet",
@@ -1867,9 +1863,7 @@ def test_accept_candidate_does_not_auto_merge_before_human_event(tmp_path: Path)
             if item["classification"] == entity_refinement.CANDIDATE_POSSIBLE
         )
         pre_events = review_sessions.load_events(session_dir)
-        assert not [
-            event for event in pre_events if event["event_type"].startswith("entity_")
-        ]
+        assert not [event for event in pre_events if event["event_type"].startswith("entity_")]
         state_after_suggestions = review_workspace.review_working_state.derive_working_state(
             package,
             session_dir,
@@ -1893,9 +1887,7 @@ def test_accept_candidate_does_not_auto_merge_before_human_event(tmp_path: Path)
         assert accepted["resulting_policy"] == privacy_entities.POLICY_REDACT
         events = review_sessions.load_events(session_dir)
         assert [
-            event["event_type"]
-            for event in events
-            if event["event_type"].startswith("entity_")
+            event["event_type"] for event in events if event["event_type"].startswith("entity_")
         ] == ["entity_merge_candidate_accepted"]
         state = accepted["working_state"]
         assert accepted["merged_entity"]["entity_id"] in state["object_policy_overrides"]

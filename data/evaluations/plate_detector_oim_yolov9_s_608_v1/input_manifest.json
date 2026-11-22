@@ -1,0 +1,87 @@
+{
+  "derivation": "scripts/verify_plate_evidence.py compact_case selects scope and scalar counts from each exact source report; the aggregate sums hits and denominators and rounds the ratio to six decimals.",
+  "evaluation_command_note": "Equivalent CLI template, not a recovered shell transcript; requires exact excluded inputs and frozen evaluator revision for historical reproduction.",
+  "evaluation_command_template": [
+    "redactor",
+    "evaluate-plates",
+    "--mode",
+    "detector",
+    "--ground-truth",
+    "data/ground_truth/plate_ground_truth_v1.0.json",
+    "--benchmark-id",
+    "<day_plate|night_selective>",
+    "--source-video",
+    "<hash-matching-evaluation-video>",
+    "--detections",
+    "<hash-matching-detections.jsonl>",
+    "--detection-summary",
+    "<hash-matching-summary.json>",
+    "--detector-config",
+    "data/evaluations/license_plate_detector_oim_yolov9_s_608_v1/selected_configuration.json",
+    "--output-dir",
+    "<new-local-report-directory>"
+  ],
+  "evaluation_id": "plate_detector_oim_yolov9_s_608_v1",
+  "excluded_material": [
+    "media and frame images",
+    "per-frame geometry and proposal lists",
+    "license-plate text",
+    "absolute local paths",
+    "review sessions and browser state"
+  ],
+  "local_source_integrity": {
+    "passed": true,
+    "path_within_run": "report_integrity.json",
+    "sha256": "be5f51d363bfc5d5f4781dc0495ffbf71e76b57d81d9bcf7cc8baccd4e6a6ccb"
+  },
+  "local_source_reports": [
+    {
+      "benchmark_id": "day_plate",
+      "input_artifact_hashes": {
+        "detection_summary": "2c3fdbd28146b409b6823360ce385aa442deb1cd0ffa04b69f56e9213a77895d",
+        "detections": "ae7893ea7db0da60cafbfe37f5d2371e428b216d3492ea9a6434c403f2017909",
+        "detector_config": "28f3971b887f3dfd354a0cbcc843c1fa47587736f4e69668b4ac2a8bbe118ae7"
+      },
+      "path_within_run": "detector_day/metrics.json",
+      "sha256": "276f08bf788d8935cbd35becc097b1b660c3e8a2651705343f07e17e125d60eb",
+      "source_report_publishable_metrics": true,
+      "source_report_schema": "plate_evaluation_report.v1.0",
+      "source_validation_blockers": [],
+      "source_validation_status": "ready"
+    },
+    {
+      "benchmark_id": "night_selective",
+      "input_artifact_hashes": {
+        "detection_summary": "d04400be45b03e282b7efd3e211448321797e9dbc4ccee9a03b4746020b3c300",
+        "detections": "b0345aa47807a9ff20eb2b1e75305565712b7b7c2bc19b4ce9360b4774a25411",
+        "detector_config": "28f3971b887f3dfd354a0cbcc843c1fa47587736f4e69668b4ac2a8bbe118ae7"
+      },
+      "path_within_run": "detector_night/metrics.json",
+      "sha256": "dec59b32240d1f387b0903019440488f4bddf153799ad7cd8349fd6656e0fbcf",
+      "source_report_publishable_metrics": true,
+      "source_report_schema": "plate_evaluation_report.v1.0",
+      "source_validation_blockers": [],
+      "source_validation_status": "ready"
+    }
+  ],
+  "local_source_run": "artifacts/plate_evaluation_v1/run_20260812T004154Z",
+  "metrics_sha256": "b024955d7ecdd301b0583899730bf1d4674d593f25d5aa530fa236d2ca5f24ef",
+  "reproducibility_limit": "A clean checkout can verify tracked hashes, GT denominators, interval identities and arithmetic. Independent detector/scoring reproduction also requires the excluded source videos and detector input artifacts identified by hashes.",
+  "schema_version": "compact_plate_detector_input_manifest.v1",
+  "source_run_git_commit": "1cf539af07350879cd6e9be6b2c4421387aa1ac9",
+  "source_run_tag": "frozen-plate-evaluator-v1",
+  "tracked_inputs": {
+    "detector_configuration": {
+      "path": "data/evaluations/license_plate_detector_oim_yolov9_s_608_v1/selected_configuration.json",
+      "sha256": "28f3971b887f3dfd354a0cbcc843c1fa47587736f4e69668b4ac2a8bbe118ae7"
+    },
+    "evaluation_policy": {
+      "path": "data/evaluations/plate_evaluation_policy_v1.0.json",
+      "sha256": "5e13849b9fad700cf67ad1a1c512e31820048a9a1996a88127f2f83c270f8be4"
+    },
+    "ground_truth": {
+      "path": "data/ground_truth/plate_ground_truth_v1.0.json",
+      "sha256": "d89aa1d7e965574b631ece8f0f14f81571807210909bbf761f8e5bf814420f0d"
+    }
+  }
+}

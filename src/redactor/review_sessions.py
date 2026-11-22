@@ -102,8 +102,7 @@ def invalid_task_action_reason(task: dict[str, Any] | None, action: str) -> str 
     if action not in allowed_actions:
         allowed_text = ", ".join(allowed_actions)
         return (
-            f"{task_id}: decision action {action} is not allowed; "
-            f"allowed actions: {allowed_text}"
+            f"{task_id}: decision action {action} is not allowed; allowed actions: {allowed_text}"
         )
     return None
 
@@ -761,10 +760,7 @@ def rebuild_decisions_snapshot_from_events(
                 f"{media.utc_timestamp().replace(':', '').replace('-', '')}."
                 f"{uuid.uuid4().hex}.corrupt.json"
             )
-            evidence_path = (
-                evidence_dir
-                / evidence_name
-            )
+            evidence_path = evidence_dir / evidence_name
             shutil.copy2(path, evidence_path)
         decisions_by_case: dict[str, dict[str, dict[str, Any]]] = {}
         for event in load_events(session_dir):

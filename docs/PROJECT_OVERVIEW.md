@@ -25,7 +25,7 @@ The release supports two privacy-object categories:
 
 Faces and plates use category-specific detector/tracker paths, then converge into shared privacy-region, rendering, review, validation, and Finalization contracts.
 
-The Final Review Workspace is the review product. It presents Day and Night cases, Original/Automatic/Latest reviewed/Final media roles, advisory Guidance, blocking Needs correction, Optional QA, Entities, Manual redaction, Final Results, and Audit Trail.
+The Final Review Workspace is the review product. It presents source-bound cases (including synthetic examples and local Day/Night research cases), Original/Automatic/Latest reviewed/Final media roles, advisory Guidance, blocking Needs correction, Optional QA, Entities, Manual redaction, Final Results, and Audit Trail.
 
 ## Safety Model
 
@@ -35,12 +35,12 @@ Guidance remains visible and auditable but does not require one approval click p
 
 ## Release Evidence
 
-The frozen release includes:
+Public source evidence includes frozen face/plate Ground Truth and scoped detector results. The ignored local submission evidence additionally includes:
 
 - current approved Day and Night Final media;
 - Day and Night full final package zips;
 - detector and automatic coverage metrics;
-- Night reviewed-final strict geometric coverage plus visual audit disposition;
+- historical Night reviewed-final geometric coverage and visual audit for `latest_reviewed_133bd8a1e52cfa36`; this is not the score of current Final `latest_reviewed_41fcfdd5b7e2349d`;
 - documented Day reviewed-final source incompatibility;
 - documented face reviewed-final numerical limitation;
 - production-readiness and cleanup evidence.
@@ -50,3 +50,10 @@ See [RELEASE_EVIDENCE.md](RELEASE_EVIDENCE.md).
 ## Limits
 
 The project does not claim universal or mathematical zero leaks for complete product videos. The frozen metrics apply only to their source-bound Ground Truth and policy contracts. Current Final approval means the exact Latest reviewed media was watched through in full, explicitly approved, and published as immutable Final media. Remote multi-user deployment requires additional operational and security hardening beyond the local release workflow.
+
+## Public portfolio setup
+
+The [README](../README.md) provides the asset-free quick start. Use
+[MODEL_SETUP.md](MODEL_SETUP.md) for optional real-video inference and
+[DEMO_GUIDE.md](DEMO_GUIDE.md) for generated, non-identifying media. Models,
+private research footage, sessions, and delivery packages are not distributed.

@@ -70,9 +70,7 @@ def sequential_video_summary(path: Path) -> dict[str, Any]:
             if not ok:
                 break
             timestamp = capture.get(cv.CAP_PROP_POS_MSEC)
-            timestamp_seconds = (
-                round(timestamp / 1000.0, 6) if np.isfinite(timestamp) else None
-            )
+            timestamp_seconds = round(timestamp / 1000.0, 6) if np.isfinite(timestamp) else None
             if frame_count == 0:
                 first_timestamp = timestamp_seconds
                 height, width = frame.shape[:2]

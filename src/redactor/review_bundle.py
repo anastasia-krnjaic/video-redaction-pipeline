@@ -1735,7 +1735,9 @@ def task_action_guidance(category: str, has_corrected_final: bool) -> str:
     if category == "automatic_continuity_check":
         return "Correct confirms that continuity was preserved despite the detector miss."
     if category == "optional_spot_check":
-        return "Correct records a clean audit sample. Needs correction flags the sample for follow-up."
+        return (
+            "Correct records a clean audit sample. Needs correction flags the sample for follow-up."
+        )
     return "Technical audit items do not require a normal review action."
 
 
@@ -3009,11 +3011,13 @@ def validate_rendered_region_application(
                 legacy_render_applied = legacy_expanded_render_applied and target_region_changed
                 target_region_privacy_signal = legacy_render_applied or target_region_changed
                 source_backed_expected_match_required = source_capture is not None
-                render_applied = False if source_backed_expected_match_required else legacy_render_applied
+                render_applied = (
+                    False if source_backed_expected_match_required else legacy_render_applied
+                )
                 expected_render_match: dict[str, Any] | None = None
                 if source_backed_expected_match_required or (
                     target_region_privacy_signal and not render_applied
-                    ):
+                ):
                     if expected_rendered_frame is None:
                         expected_render_source_frame = read_source_frame_for_expected_render(
                             source_frame_index
@@ -3088,7 +3092,9 @@ def validate_rendered_region_application(
                     "target_bbox_changed_pixel_fraction": target_metrics[
                         "changed_pixel_fraction_inside_bbox"
                     ],
-                    "target_bbox_mean_absdiff": target_metrics["localized_mean_absdiff_inside_bbox"],
+                    "target_bbox_mean_absdiff": target_metrics[
+                        "localized_mean_absdiff_inside_bbox"
+                    ],
                 }
                 region_results.append(result)
                 frame_region_successes.append(render_applied)
@@ -3261,8 +3267,7 @@ def expected_render_matches_clip(metrics: dict[str, Any]) -> bool:
     return (
         mean_absdiff <= REVIEW_CLIP_EXPECTED_RENDER_MAX_MEAN_ABSDIFF
         and float(expected_vs_source_mean) >= rendering.MIN_REDACTION_MEAN_ABSDIFF
-        and float(expected_vs_source_fraction)
-        >= rendering.MIN_REDACTION_CHANGED_PIXEL_FRACTION
+        and float(expected_vs_source_fraction) >= rendering.MIN_REDACTION_CHANGED_PIXEL_FRACTION
         and changed_pixel_fraction
         <= float(expected_vs_source_fraction)
         * REVIEW_CLIP_EXPECTED_RENDER_MAX_CHANGED_PIXEL_FRACTION_RATIO

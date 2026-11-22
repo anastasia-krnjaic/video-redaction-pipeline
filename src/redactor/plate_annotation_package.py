@@ -39,9 +39,7 @@ ALLOWED_CERTIFIED_CONFIG_VERSIONS = {
 
 DEFAULT_OUTPUT_ROOT = Path("artifacts/plate_ground_truth_annotation_v1")
 DEFAULT_ASSISTED_OUTPUT_ROOT = Path("artifacts/plate_ground_truth_annotation_v2_assisted")
-DEFAULT_ASSISTED_SOURCE_PACKAGE = (
-    DEFAULT_OUTPUT_ROOT / "run_20260811T001554Z"
-)
+DEFAULT_ASSISTED_SOURCE_PACKAGE = DEFAULT_OUTPUT_ROOT / "run_20260811T001554Z"
 DEFAULT_DAY_VIDEO = Path("artifacts/eval_day_plate.mp4")
 DEFAULT_NIGHT_VIDEO = Path("artifacts/eval_night_selective.mp4")
 DEFAULT_DRAFT_PATH = Path(
@@ -281,7 +279,9 @@ def build_assisted_plate_annotation_package(
         assert_annotation_root_is_ignored(output_root, repo_root)
     source_validation = validate_plate_annotation_package(source_package_root)
     if not source_validation["passed"]:
-        raise ValueError(f"source package validation failed: {'; '.join(source_validation['errors'])}")
+        raise ValueError(
+            f"source package validation failed: {'; '.join(source_validation['errors'])}"
+        )
 
     source_manifest = read_json(source_package_root / "package_manifest.json")
     target_configs = targets or target_configs_from_manifest(source_package_root, source_manifest)
@@ -540,7 +540,8 @@ def apply_assisted_migration(
     no_proposal_frames = [
         frame_id
         for frame_id, record in state["frames"].items()
-        if record.get("annotation_status") != STATUS_REVIEWED_BOX and not record.get("proposal_available")
+        if record.get("annotation_status") != STATUS_REVIEWED_BOX
+        and not record.get("proposal_available")
     ]
     migration_audit = {
         "bbox_mismatch_count": bbox_mismatch_count,
@@ -572,8 +573,13 @@ def apply_assisted_migration(
     write_json(package_root / "migration_audit.json", migration_audit)
     write_json(package_root / "proposal_generation_audit.json", proposal_audit)
     refresh_package_identity_hashes(package_root)
-    shutil.copyfile(source_package_root / "change_log.jsonl", package_root / "migration_source_change_log.jsonl")
-    write_text(package_root / "instructions.md", instructions_markdown(target_configs_from_manifest(package_root, manifest)))
+    shutil.copyfile(
+        source_package_root / "change_log.jsonl", package_root / "migration_source_change_log.jsonl"
+    )
+    write_text(
+        package_root / "instructions.md",
+        instructions_markdown(target_configs_from_manifest(package_root, manifest)),
+    )
     write_text(
         package_root / "report.md",
         report_markdown(manifest, progress, read_json(package_root / "draft_import_audit.json")),
@@ -633,9 +639,13 @@ def assisted_proposals_for_frames(
             if candidates
             else None
         )
-        nearest_human = nearest_anchor(human_anchors.get(frame["benchmark_id"], []), int(frame["parent_frame"]))
+        nearest_human = nearest_anchor(
+            human_anchors.get(frame["benchmark_id"], []), int(frame["parent_frame"])
+        )
         temporal_distance = (
-            abs(int(frame["parent_frame"]) - nearest_human[0]) if nearest_human is not None else None
+            abs(int(frame["parent_frame"]) - nearest_human[0])
+            if nearest_human is not None
+            else None
         )
         frame_audit = {
             "benchmark_id": frame["benchmark_id"],
@@ -645,7 +655,9 @@ def assisted_proposals_for_frames(
             "no_proposal_reason": None,
             "parent_frame": frame["parent_frame"],
             "proposal_available": primary is not None,
-            "proposal_qa_result": primary.get("proposal_qa_result") if primary else {"status": "no_candidate"},
+            "proposal_qa_result": primary.get("proposal_qa_result")
+            if primary
+            else {"status": "no_candidate"},
             "rejection_reason": None,
             "selected_proposal_bbox": primary.get("bbox_xyxy") if primary else None,
             "selected_proposal_provenance": primary.get("source") if primary else None,
@@ -660,7 +672,9 @@ def assisted_proposals_for_frames(
         }
         if primary is None:
             frame_audit["no_proposal_reason"] = (
-                "candidate_rejected_by_qa" if discarded else "no_target_associated_evidence_on_frame"
+                "candidate_rejected_by_qa"
+                if discarded
+                else "no_target_associated_evidence_on_frame"
             )
             frame_audit["rejection_reason"] = frame_audit["no_proposal_reason"]
         else:
@@ -676,7 +690,9 @@ def assisted_proposals_for_frames(
         PROPOSAL_PRIVACY_ENVELOPE,
     )
     proposal_audit = {
-        "evidence_sources": [public_evidence_source_audit(source) for source in evidence["sources"]],
+        "evidence_sources": [
+            public_evidence_source_audit(source) for source in evidence["sources"]
+        ],
         "frames": frame_audits,
         "human_anchor_counts": {
             benchmark: len(anchors) for benchmark, anchors in sorted(human_anchors.items())
@@ -688,7 +704,9 @@ def assisted_proposals_for_frames(
             "qa_only_not_metrics": True,
             "unbounded_extrapolation_allowed": False,
         },
-        "proposal_source_counts": {source: source_counts.get(source, 0) for source in proposal_sources},
+        "proposal_source_counts": {
+            source: source_counts.get(source, 0) for source in proposal_sources
+        },
         "rejected_candidate_count": rejected_candidate_count,
         "schema_version": "plate_annotation_assisted_proposal_audit.v2",
         "target_association": evidence["target_association"],
@@ -732,7 +750,9 @@ def load_assisted_track_evidence(
             sources.append(source)
             continue
         manifest_path = tracking_manifest_for_tracks_path(resolved_path)
-        source["manifest_path"] = display_repo_path(manifest_path, repo_root) if manifest_path else None
+        source["manifest_path"] = (
+            display_repo_path(manifest_path, repo_root) if manifest_path else None
+        )
         source["manifest_sha256"] = media.sha256_file(manifest_path) if manifest_path else None
         evidence_manifest = read_json(manifest_path) if manifest_path else {}
         source["manifest"] = evidence_manifest
@@ -743,9 +763,10 @@ def load_assisted_track_evidence(
             sources.append(source)
             continue
         target = manifest["targets"][benchmark_id]
-        if (
-            evidence_manifest.get("input_width") != target.get("evaluation_video", {}).get("width")
-            or evidence_manifest.get("input_height") != target.get("evaluation_video", {}).get("height")
+        if evidence_manifest.get("input_width") != target.get("evaluation_video", {}).get(
+            "width"
+        ) or evidence_manifest.get("input_height") != target.get("evaluation_video", {}).get(
+            "height"
         ):
             source["reason"] = "source_dimensions_do_not_match_package_target"
             sources.append(source)
@@ -764,19 +785,27 @@ def load_assisted_track_evidence(
         source["target_benchmark"] = benchmark_id
         source["tracks_by_benchmark"] = {benchmark_id: tracks_by_uid}
         source["usable"] = True
-        source["max_safe_interpolation_gap_frames"] = max_safe_interpolation_gap_frames(evidence_manifest)
+        source["max_safe_interpolation_gap_frames"] = max_safe_interpolation_gap_frames(
+            evidence_manifest
+        )
         source["max_one_frame_center_jump_norm"] = float(
-            (evidence_manifest.get("tracking_configuration") or {}).get("max_accepted_center_jump_norm", 4.0)
+            (evidence_manifest.get("tracking_configuration") or {}).get(
+                "max_accepted_center_jump_norm", 4.0
+            )
         )
         source["qa_bounds"] = {
             "max_area_fraction": float(
-                (evidence_manifest.get("tracking_configuration") or {}).get("max_area_fraction", 0.08)
+                (evidence_manifest.get("tracking_configuration") or {}).get(
+                    "max_area_fraction", 0.08
+                )
             ),
             "max_aspect_ratio": float(
                 (evidence_manifest.get("tracking_configuration") or {}).get("max_aspect_ratio", 8.0)
             ),
             "min_area_fraction": float(
-                (evidence_manifest.get("tracking_configuration") or {}).get("min_area_fraction", 4e-05)
+                (evidence_manifest.get("tracking_configuration") or {}).get(
+                    "min_area_fraction", 4e-05
+                )
             ),
             "min_aspect_ratio": float(
                 (evidence_manifest.get("tracking_configuration") or {}).get("min_aspect_ratio", 0.7)
@@ -802,7 +831,10 @@ def display_repo_path(path: Path, repo_root: Path) -> str:
 
 
 def tracking_manifest_for_tracks_path(tracks_path: Path) -> Path | None:
-    for candidate in (tracks_path.with_name("tracking_manifest.json"), tracks_path.with_name("summary.json")):
+    for candidate in (
+        tracks_path.with_name("tracking_manifest.json"),
+        tracks_path.with_name("summary.json"),
+    ):
         if candidate.exists():
             return candidate
     return None
@@ -826,10 +858,14 @@ def iter_track_evidence_records(tracks_path: Path) -> Iterable[tuple[int, dict[s
                     if not isinstance(observation, dict) or "frame_index" not in observation:
                         continue
                     frame_index = int(observation["frame_index"])
-                    yield frame_index, observation | {
-                        "status": payload.get("status"),
-                        "track_uid": track_uid,
-                    }
+                    yield (
+                        frame_index,
+                        observation
+                        | {
+                            "status": payload.get("status"),
+                            "track_uid": track_uid,
+                        },
+                    )
                 continue
             if "frame_index" in payload and "bbox_xyxy" in payload:
                 yield int(payload["frame_index"]), payload
@@ -944,7 +980,9 @@ def associate_source_target_tracks(
     }
 
 
-def bbox_iou(a: list[int] | tuple[int, int, int, int], b: list[int] | tuple[int, int, int, int]) -> float:
+def bbox_iou(
+    a: list[int] | tuple[int, int, int, int], b: list[int] | tuple[int, int, int, int]
+) -> float:
     ax1, ay1, ax2, ay2 = [int(value) for value in a]
     bx1, by1, bx2, by2 = [int(value) for value in b]
     ix1 = max(ax1, bx1)
@@ -1098,8 +1136,12 @@ def bounded_interpolation_anchors(
         for frame_index, record in by_frame.items()
         if str(record.get("provenance") or "") == TRACK_PROVENANCE_DETECTOR
     )
-    left_frames = [frame_index for frame_index in trusted_detector_frames if frame_index < parent_frame]
-    right_frames = [frame_index for frame_index in trusted_detector_frames if frame_index > parent_frame]
+    left_frames = [
+        frame_index for frame_index in trusted_detector_frames if frame_index < parent_frame
+    ]
+    right_frames = [
+        frame_index for frame_index in trusted_detector_frames if frame_index > parent_frame
+    ]
     if not left_frames or not right_frames:
         return None, None
     left_frame = left_frames[-1]
@@ -1220,7 +1262,9 @@ def track_scale_quality_check(
         "area_ratio_to_track_median": round(area_ratio, 6),
         "height_ratio_to_track_median": round(height_ratio, 6),
         "needs_adjustment": needs_adjustment,
-        "scale_check_reason": "track_scale_outlier" if needs_adjustment else "within_track_scale_history",
+        "scale_check_reason": "track_scale_outlier"
+        if needs_adjustment
+        else "within_track_scale_history",
         "track_median_area": round(median_area, 6),
         "track_median_height": round(median_height, 6),
         "track_median_width": round(median_width, 6),
@@ -1249,10 +1293,18 @@ def nearest_neighbor_motion_check(
     nearest_frame = sorted(neighbor_frames, key=lambda frame: (abs(frame - parent_frame), frame))[0]
     frame_gap = abs(nearest_frame - parent_frame)
     if frame_gap != 1:
-        return {"nearest_frame_gap": frame_gap, "status": "passed", "reason": "nearest_neighbor_not_adjacent"}
+        return {
+            "nearest_frame_gap": frame_gap,
+            "status": "passed",
+            "reason": "nearest_neighbor_not_adjacent",
+        }
     neighbor_bbox = by_frame[nearest_frame].get("bbox_xyxy")
     if not isinstance(neighbor_bbox, list) or len(neighbor_bbox) != 4:
-        return {"nearest_frame_gap": frame_gap, "status": "passed", "reason": "nearest_neighbor_missing_bbox"}
+        return {
+            "nearest_frame_gap": frame_gap,
+            "status": "passed",
+            "reason": "nearest_neighbor_missing_bbox",
+        }
     distance = math.sqrt(squared_distance(center_xy(bbox), center_xy(neighbor_bbox)))
     normalizer = max(
         1,
@@ -1566,9 +1618,9 @@ def validate_plate_annotation_package(
             if expected_sha and media.sha256_file(path) != expected_sha:
                 errors.append(f"{frame_id} {asset_key} asset hash mismatch")
             if asset_key == "full_frame":
-                if asset.get("width") != frame.get("frame_width") or asset.get("height") != frame.get(
-                    "frame_height"
-                ):
+                if asset.get("width") != frame.get("frame_width") or asset.get(
+                    "height"
+                ) != frame.get("frame_height"):
                     errors.append(f"{frame_id} full_frame dimensions mismatch")
         crop = frame.get("crop") if isinstance(frame.get("crop"), dict) else {}
         roi = required.get("broad_search_roi_xyxy") or []
@@ -1607,7 +1659,9 @@ def validate_plate_annotation_package(
                 f"{benchmark_id} expected {required['expected_mandatory_count']} mandatory frames, got {count}"
             )
     if len(seen_frame_ids) != expected_total:
-        errors.append(f"expected {expected_total} total mandatory frames, got {len(seen_frame_ids)}")
+        errors.append(
+            f"expected {expected_total} total mandatory frames, got {len(seen_frame_ids)}"
+        )
     missing_frames = set(expected_frames) - seen_frame_ids
     if missing_frames:
         errors.append(f"missing mandatory frame records for {len(missing_frames)} frames")
@@ -1888,7 +1942,9 @@ def save_frame_annotation(
         raise ValueError(f"unsupported annotation_status: {status}")
     blocked_target_flags = {"detector_ignore", "invisible"}
     if status in blocked_target_flags or payload.get("visibility") in blocked_target_flags:
-        raise ValueError("target frames cannot be marked invisible or detector_ignore in this phase")
+        raise ValueError(
+            "target frames cannot be marked invisible or detector_ignore in this phase"
+        )
 
     now_utc = now_utc or media.utc_timestamp()
     review_note = str(payload.get("review_note", "")).strip()
@@ -1983,7 +2039,9 @@ def save_frame_annotation(
         "secondary_instances": secondary_instances,
     }
     state_errors: list[str] = []
-    _validate_state_record(updated, width=width, height=height, errors=state_errors, context=frame_id)
+    _validate_state_record(
+        updated, width=width, height=height, errors=state_errors, context=frame_id
+    )
     if state_errors:
         raise ValueError("; ".join(state_errors))
     state["frames"][frame_id] = updated
@@ -2434,7 +2492,12 @@ def original_box_to_crop(
     )
     ox, oy = int(crop_origin_xy[0]), int(crop_origin_xy[1])
     return validate_bbox_xyxy(
-        [original_bbox[0] - ox, original_bbox[1] - oy, original_bbox[2] - ox, original_bbox[3] - oy],
+        [
+            original_bbox[0] - ox,
+            original_bbox[1] - oy,
+            original_bbox[2] - ox,
+            original_bbox[3] - oy,
+        ],
         width=crop_width,
         height=crop_height,
     )
@@ -2634,7 +2697,9 @@ def _build_into_temp_root(
     for child in ("assets", "frames/day_plate", "frames/night_selective"):
         (package_root / child).mkdir(parents=True, exist_ok=True)
     git_commit = git_commit_for(repo_root)
-    media_records = {target.benchmark_id: probe_and_validate_target(target, repo_root) for target in targets}
+    media_records = {
+        target.benchmark_id: probe_and_validate_target(target, repo_root) for target in targets
+    }
     draft_import = import_drafts(
         targets=targets,
         media_records=media_records,
@@ -3051,7 +3116,9 @@ def import_drafts(
     if not draft_path.exists():
         return empty | {"disabled_reason": "draft_file_missing"}
     payload = read_json(draft_path)
-    mapping_payload = read_json(draft_mapping_audit_path) if draft_mapping_audit_path.exists() else {}
+    mapping_payload = (
+        read_json(draft_mapping_audit_path) if draft_mapping_audit_path.exists() else {}
+    )
     targets_by_hash: dict[str, list[PlateTargetConfig]] = {}
     for target in targets:
         targets_by_hash.setdefault(media_records[target.benchmark_id]["sha256"], []).append(target)
@@ -3287,7 +3354,9 @@ def _validate_state_record(
             if not note:
                 raise ValueError("temporal_gt_conflict requires review_note")
             if not unresolved_temporal:
-                raise ValueError("temporal_gt_conflict status requires an unresolved conflict record")
+                raise ValueError(
+                    "temporal_gt_conflict status requires an unresolved conflict record"
+                )
             for conflict in unresolved_temporal:
                 if not str(conflict.get("note") or "").strip():
                     raise ValueError("temporal_gt_conflict conflict record requires note")
@@ -3339,9 +3408,11 @@ def _validate_gate_without_recursing(
     for frame in frame_records:
         if not (package_root / frame["crop"]["path"]).exists():
             errors.append(f"missing crop asset: {frame['frame_id']}")
-        if frame["dense_frame"] != frame["parent_frame"] - manifest["targets"][frame["benchmark_id"]][
-            "frozen_parent_frame_interval"
-        ][0]:
+        if (
+            frame["dense_frame"]
+            != frame["parent_frame"]
+            - manifest["targets"][frame["benchmark_id"]]["frozen_parent_frame_interval"][0]
+        ):
             errors.append(f"mapping is not exact: {frame['frame_id']}")
         state_record = state_frames.get(frame["frame_id"])
         if isinstance(state_record, dict):
@@ -3430,11 +3501,11 @@ def report_markdown(
     )
     return f"""# Plate Annotation Package Report
 
-Package ID: `{manifest['package_id']}`
+Package ID: `{manifest["package_id"]}`
 
-Annotation mode: `{manifest.get('annotation_mode', ANNOTATION_MODE_MANUAL)}`
+Annotation mode: `{manifest.get("annotation_mode", ANNOTATION_MODE_MANUAL)}`
 
-Status: `{progress['reviewer_completion_state']['state']}`
+Status: `{progress["reviewer_completion_state"]["state"]}`
 
 ## Targets
 
@@ -3442,20 +3513,20 @@ Status: `{progress['reviewer_completion_state']['state']}`
 
 ## Progress
 
-- Reviewed boxes: {progress['total']['reviewed_box']} / {progress['total']['mandatory']}
-- Needs recheck: {progress['total']['needs_recheck']}
-- Temporal conflicts: {progress['total']['unresolved_temporal_gt_conflict']}
-- Ambiguous secondary records: {progress['total']['unresolved_ambiguous_secondary']}
-- Proposal frames: {progress['total'].get('proposal_available_total', 0)}
-- Accepted unchanged: {progress['total'].get('proposal_accepted_unchanged', 0)}
-- Human-adjusted proposals: {progress['total'].get('proposal_human_adjusted', 0)}
-- Frames without proposal: {progress['total'].get('no_proposal_remaining', 0)}
+- Reviewed boxes: {progress["total"]["reviewed_box"]} / {progress["total"]["mandatory"]}
+- Needs recheck: {progress["total"]["needs_recheck"]}
+- Temporal conflicts: {progress["total"]["unresolved_temporal_gt_conflict"]}
+- Ambiguous secondary records: {progress["total"]["unresolved_ambiguous_secondary"]}
+- Proposal frames: {progress["total"].get("proposal_available_total", 0)}
+- Accepted unchanged: {progress["total"].get("proposal_accepted_unchanged", 0)}
+- Human-adjusted proposals: {progress["total"].get("proposal_human_adjusted", 0)}
+- Frames without proposal: {progress["total"].get("no_proposal_remaining", 0)}
 
 ## Drafts
 
-- Imported: {draft_import['imported']}
-- Target-frame proposals: {draft_import['imported_target_frame_count']}
-- Exclusions: {json.dumps(draft_import['excluded_by_reason'], sort_keys=True)}
+- Imported: {draft_import["imported"]}
+- Target-frame proposals: {draft_import["imported_target_frame_count"]}
+- Exclusions: {json.dumps(draft_import["excluded_by_reason"], sort_keys=True)}
 
 This package is not yet Ground Truth.
 """

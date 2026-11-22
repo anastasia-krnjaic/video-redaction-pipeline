@@ -328,10 +328,7 @@ def test_geometry_transform_helpers() -> None:
 
 def test_draft_selection_falls_back_to_nearest_source_aligned_candidate() -> None:
     candidate = {"bbox_xyxy": [70, 20, 82, 30], "object_id": "proposal"}
-    assert (
-        package.choose_main_draft_candidate([candidate], roi_xyxy=(10, 10, 60, 42))
-        == candidate
-    )
+    assert package.choose_main_draft_candidate([candidate], roi_xyxy=(10, 10, 60, 42)) == candidate
 
 
 def test_save_reload_progress_and_state_validation(
@@ -959,9 +956,7 @@ def test_assisted_package_migrates_reviewed_records_and_generates_proposals(
     assert progress["total"]["unreviewed"] == 3
     assert progress["total"]["proposal_available_total"] == 2
     assert progress["total"]["no_proposal_remaining"] == 1
-    assert progress["total"]["proposal_source_breakdown"] == {
-        package.PROPOSAL_DIRECT_DETECTOR: 2
-    }
+    assert progress["total"]["proposal_source_breakdown"] == {package.PROPOSAL_DIRECT_DETECTOR: 2}
 
     source_frames = {frame["frame_id"]: frame for frame in source_review["frames"]}
     assisted_frames = {frame["frame_id"]: frame for frame in review["frames"]}
@@ -1156,9 +1151,12 @@ def test_assisted_no_unbounded_extrapolation_or_static_human_carry_forward(
         assert record["proposal_bbox"] is None
         assert record["proposal_source"] is None
         assert record["human_bbox"] is None
-    assert package.PROPOSAL_HUMAN_SEEDED not in package.read_json(
-        assisted_root / "progress.json"
-    )["total"]["proposal_source_breakdown"]
+    assert (
+        package.PROPOSAL_HUMAN_SEEDED
+        not in package.read_json(assisted_root / "progress.json")["total"][
+            "proposal_source_breakdown"
+        ]
+    )
     with pytest.raises(ValueError, match="no proposal is available"):
         package.accept_draft_annotation(
             assisted_root,

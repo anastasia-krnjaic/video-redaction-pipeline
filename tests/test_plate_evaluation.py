@@ -451,12 +451,7 @@ def reviewed_binding_fixture(
     package_root = tmp_path / f"package_{case_id}"
     revision_id = f"latest_reviewed_{case_id}"
     revision_root = (
-        package_root
-        / "sessions"
-        / "session_a"
-        / "latest_reviewed"
-        / case_id
-        / revision_id
+        package_root / "sessions" / "session_a" / "latest_reviewed" / case_id / revision_id
     )
     revision_root.mkdir(parents=True)
     regions_path = revision_root / "reviewed_regions.jsonl"
@@ -566,8 +561,9 @@ def test_reviewed_regions_artifact_binding_accepts_exact_set(tmp_path: Path) -> 
     binding = validate_reviewed_fixture_binding(fixture)
 
     assert binding["reviewed_region_records_sha256"] == fixture["records_sha"]
-    assert binding["reviewed_region_set_sha256"] == (
-        fixture["revision_manifest"]["reviewed_region_set_sha256"]
+    assert (
+        binding["reviewed_region_set_sha256"]
+        == (fixture["revision_manifest"]["reviewed_region_set_sha256"])
     )
 
 
@@ -620,9 +616,9 @@ def test_reviewed_regions_artifact_binding_rejects_semantic_hash_tamper(
     tmp_path: Path,
 ) -> None:
     fixture = reviewed_binding_fixture(tmp_path)
-    fixture["revision_manifest"]["reviewed_region_identity"][
-        "reviewed_region_records_sha256"
-    ] = "bad"
+    fixture["revision_manifest"]["reviewed_region_identity"]["reviewed_region_records_sha256"] = (
+        "bad"
+    )
 
     with pytest.raises(
         reviewed_regions.ReviewedRegionCompilationError,
@@ -922,16 +918,14 @@ def test_policy_hash_determinism_formatting_and_tamper() -> None:
         lambda item: item["automatic_provenance"]["eligible_provenances"].append(
             "human_seeded_propagation_draft"
         ),
-        lambda item: item["automatic_provenance"]["ineligible_statuses"].remove(
-            "needs_review"
-        ),
+        lambda item: item["automatic_provenance"]["ineligible_statuses"].remove("needs_review"),
         lambda item: item["canonical_frame_namespace"]["benchmarks"]["day_plate"].__setitem__(
             "parent_equals_dense_plus",
             241,
         ),
-        lambda item: item["canonical_frame_namespace"]["benchmarks"][
-            "night_selective"
-        ].__setitem__("canonical_parent_frame_interval", [421, 780]),
+        lambda item: item["canonical_frame_namespace"]["benchmarks"]["night_selective"].__setitem__(
+            "canonical_parent_frame_interval", [421, 780]
+        ),
         lambda item: item["detector_assignment"].__setitem__(
             "pair_order",
             list(reversed(item["detector_assignment"]["pair_order"])),

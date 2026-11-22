@@ -557,9 +557,9 @@ class PlateCategoryAdapter:
                     status=STATUS_SUCCEEDED,
                     artifacts=(gap_decisions_artifact, frame_span_artifact),
                     summary={
-                        "review_interval_count": tracking_summary.get(
-                            "tracking_summary", {}
-                        ).get("review_interval_count"),
+                        "review_interval_count": tracking_summary.get("tracking_summary", {}).get(
+                            "review_interval_count"
+                        ),
                         "full_source_processed": tracking_summary.get("full_source_processed"),
                     },
                 ),
@@ -648,8 +648,7 @@ class PlateCategoryAdapter:
                 summary={
                     "automatic_plate_preview_ready": True,
                     "reason": (
-                        "case-level finalization is deferred for this "
-                        "automatic-preview checkpoint"
+                        "case-level finalization is deferred for this automatic-preview checkpoint"
                     ),
                 },
                 reason="case_level_finalization_deferred",
@@ -675,9 +674,7 @@ class PlateCategoryAdapter:
                 category=CATEGORY_PLATE,
             ),
         )
-        blockers = tuple(
-            sorted({blocker for stage in stages for blocker in stage.blockers})
-        )
+        blockers = tuple(sorted({blocker for stage in stages for blocker in stage.blockers}))
         return CategoryRunResult(
             artifacts=artifacts,
             blockers=blockers,
@@ -844,9 +841,7 @@ def run_case_pipeline(
             StageStatus(
                 stage=STAGE_AUTOMATIC_PREVIEW,
                 status=STATUS_SUCCEEDED,
-                artifacts=render_plan_artifacts(render_plan) + tuple(
-                    combined_preview["artifacts"]
-                ),
+                artifacts=render_plan_artifacts(render_plan) + tuple(combined_preview["artifacts"]),
                 reason="combined_automatic_preview_rendered",
                 summary={
                     **combined_preview["summary"],
@@ -871,11 +866,7 @@ def run_case_pipeline(
 
     case_blockers = tuple(
         sorted(
-            {
-                blocker
-                for result in category_results
-                for blocker in result.blockers
-            }
+            {blocker for result in category_results for blocker in result.blockers}
             | set(render_plan_blockers)
             | set(category_failure_blockers)
         )
@@ -987,9 +978,7 @@ def run_case_pipeline(
         case_manifest=manifest,
     )
     if category_failures:
-        details = "; ".join(
-            f"{item['category']}: {item['error']}" for item in category_failures
-        )
+        details = "; ".join(f"{item['category']}: {item['error']}" for item in category_failures)
         raise RuntimeError(f"case automatic preview failed: {details}")
     return {
         "case_id": context.case_id,
@@ -1272,11 +1261,7 @@ def write_render_plan(
 ) -> dict[str, Any]:
     records, blockers = validate_effective_render_plan(
         context,
-        [
-            record
-            for result in category_results
-            for record in result.privacy_regions
-        ],
+        [record for result in category_results for record in result.privacy_regions],
     )
     records = sorted(
         records,
@@ -1353,11 +1338,14 @@ def validate_effective_render_plan(
                 f"render-eligible region is not approved for redaction: "
                 f"{record.category}:{record.source_frame}:{record.approval_state}"
             )
-        if rendering.clipped_box(
-            record.bbox_xyxy,
-            context.source_info.video_stream.width,
-            context.source_info.video_stream.height,
-        ) is None:
+        if (
+            rendering.clipped_box(
+                record.bbox_xyxy,
+                context.source_info.video_stream.width,
+                context.source_info.video_stream.height,
+            )
+            is None
+        ):
             raise ValueError(
                 f"render region has invalid geometry: {record.category}:{record.source_frame}"
             )
@@ -1549,11 +1537,7 @@ def write_unified_case_manifest(
     blockers = sorted(set(case_blockers))
     artifacts = [
         source_identity_artifact,
-        *[
-            artifact
-            for result in category_results
-            for artifact in result.artifacts
-        ],
+        *[artifact for result in category_results for artifact in result.artifacts],
         *render_plan_artifacts(render_plan),
     ]
     if combined_preview is not None:
@@ -1582,9 +1566,7 @@ def write_unified_case_manifest(
         "combined_preview": None
         if combined_preview is None
         else {
-            "artifact_ids": [
-                artifact.artifact_id for artifact in combined_preview["artifacts"]
-            ],
+            "artifact_ids": [artifact.artifact_id for artifact in combined_preview["artifacts"]],
             "preview_non_final": True,
             "rendered_frame_count": combined_preview["summary"]["rendered_frame_count"],
             "rendered_region_count": combined_preview["summary"]["rendered_region_count"],
@@ -1649,9 +1631,7 @@ def review_manifest_payload(
             "category_run_manifest_identity_hash": stable_hash(category_run_identities),
             "category_review_artifacts_created": True,
             "entity_count": summary.get("entity_count", 0),
-            "latest_reviewed_publication": workspace_manifest.get(
-                "latest_reviewed_publication"
-            ),
+            "latest_reviewed_publication": workspace_manifest.get("latest_reviewed_publication"),
             "mixed_review_status": STATUS_READY,
             "reason": "review workspace is ready",
             "selected_categories": list(context.selected_categories),
@@ -1721,7 +1701,8 @@ def bind_category_run_manifest(
     manifest_path = manifest_dir / "category_run_manifest.json"
     payload = {
         "artifact_hashes": {
-            artifact.artifact_id or case_manifests.artifact_id_for(
+            artifact.artifact_id
+            or case_manifests.artifact_id_for(
                 role=artifact.role,
                 category=artifact.category,
             ): artifact.sha256

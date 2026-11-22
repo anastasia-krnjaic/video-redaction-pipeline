@@ -829,17 +829,19 @@ def test_final_review_workspace_firefox_entity_refinement_v1(tmp_path: Path) -> 
                 browser_errors: list[str] = []
                 page.on(
                     "console",
-                    lambda msg: browser_errors.append(msg.text)
-                    if msg.type in {"error", "pageerror"}
-                    else None,
+                    lambda msg: (
+                        browser_errors.append(msg.text)
+                        if msg.type in {"error", "pageerror"}
+                        else None
+                    ),
                 )
                 page.on(
                     "response",
-                    lambda response: browser_errors.append(
-                        f"server error {response.status}: {response.url}"
-                    )
-                    if response.status >= 500
-                    else None,
+                    lambda response: (
+                        browser_errors.append(f"server error {response.status}: {response.url}")
+                        if response.status >= 500
+                        else None
+                    ),
                 )
                 page.goto(
                     f"{base_url}/app/day?session_id={session_id}",
@@ -858,7 +860,8 @@ def test_final_review_workspace_firefox_entity_refinement_v1(tmp_path: Path) -> 
                 page.wait_for_function(
                     """
                     () => Boolean(document.querySelector(
-                      '.entity-card[data-entity-id="entity_merged_bd6717c585d53525a416bb90"] img[src*="derived_thumbnails"]'
+                      '.entity-card[data-entity-id="entity_merged_bd6717c585d53525a416bb90"]'
+                      + ' img[src*="derived_thumbnails"]'
                     ))
                     """,
                     timeout=10_000,
@@ -907,7 +910,9 @@ def test_final_review_workspace_firefox_entity_refinement_v1(tmp_path: Path) -> 
                 before_reject_count = entity_dialog.locator(".entity-card").count()
                 page.wait_for_function(
                     """
-                    () => document.querySelectorAll('.entity-card .thumbnail-button.image-loaded').length >= 2
+                    () => document.querySelectorAll(
+                      '.entity-card .thumbnail-button.image-loaded'
+                    ).length >= 2
                     """,
                     timeout=10_000,
                 )
@@ -940,9 +945,11 @@ def test_final_review_workspace_firefox_entity_refinement_v1(tmp_path: Path) -> 
                 assert first_possible.get_by_role(
                     "button", name="Accept merge candidate"
                 ).is_enabled()
-                assert possible_cards.nth(1).get_by_role(
-                    "button", name="Accept merge candidate"
-                ).is_enabled()
+                assert (
+                    possible_cards.nth(1)
+                    .get_by_role("button", name="Accept merge candidate")
+                    .is_enabled()
+                )
                 record_step(report, "night_candidate_comparison_evidence_and_retry")
                 conflict_card = entity_dialog.locator(
                     ".candidate-group-card",
@@ -954,9 +961,7 @@ def test_final_review_workspace_firefox_entity_refinement_v1(tmp_path: Path) -> 
                 assert conflict_card.get_by_role(
                     "button", name="Accept merge candidate"
                 ).is_disabled()
-                assert conflict_card.get_by_role(
-                    "button", name="Reject candidate"
-                ).is_enabled()
+                assert conflict_card.get_by_role("button", name="Reject candidate").is_enabled()
                 conflict_card.get_by_role(
                     "button", name=re.compile("Inspect conflict frames")
                 ).click()
@@ -995,9 +1000,7 @@ def test_final_review_workspace_firefox_entity_refinement_v1(tmp_path: Path) -> 
                 with page.expect_response(
                     lambda response: "/api/v1/entity-refinement/accept-merge" in response.url
                 ) as accept_response:
-                    possible_card.get_by_role(
-                        "button", name="Accept merge candidate"
-                    ).click()
+                    possible_card.get_by_role("button", name="Accept merge candidate").click()
                 accept_payload = accept_response.value.json()
                 assert accept_payload["event"]["event_type"] == "entity_merge_candidate_accepted"
                 page.wait_for_function(
@@ -1069,9 +1072,11 @@ def test_final_review_workspace_firefox_entity_timeline_smoke(tmp_path: Path) ->
                 browser_errors: list[str] = []
                 page.on(
                     "console",
-                    lambda msg: browser_errors.append(msg.text)
-                    if msg.type in {"error", "pageerror"}
-                    else None,
+                    lambda msg: (
+                        browser_errors.append(msg.text)
+                        if msg.type in {"error", "pageerror"}
+                        else None
+                    ),
                 )
                 page.on(
                     "requestfailed",
@@ -1079,11 +1084,11 @@ def test_final_review_workspace_firefox_entity_timeline_smoke(tmp_path: Path) ->
                 )
                 page.on(
                     "response",
-                    lambda response: browser_errors.append(
-                        f"server error {response.status}: {response.url}"
-                    )
-                    if response.status >= 500
-                    else None,
+                    lambda response: (
+                        browser_errors.append(f"server error {response.status}: {response.url}")
+                        if response.status >= 500
+                        else None
+                    ),
                 )
                 page.goto(
                     f"{base_url}/app/day?session_id={session_id}",
@@ -1155,12 +1160,13 @@ def test_final_review_workspace_firefox_entity_timeline_smoke(tmp_path: Path) ->
                 page.locator(night_marker).wait_for(state="visible", timeout=5_000)
                 wait_for_timeline_frame(page, "night", {"2", "3"})
                 night_duplicate.locator(".task-technical summary").click()
-                assert GROUPED_CHILD_TASK_ID in night_duplicate.locator(
-                    ".task-technical"
-                ).inner_text()
-                assert "license_plate_plate_review_0006" in night_duplicate.locator(
-                    ".task-technical"
-                ).inner_text()
+                assert (
+                    GROUPED_CHILD_TASK_ID in night_duplicate.locator(".task-technical").inner_text()
+                )
+                assert (
+                    "license_plate_plate_review_0006"
+                    in night_duplicate.locator(".task-technical").inner_text()
+                )
                 action_labels = [
                     item.strip()
                     for item in night_duplicate.locator(".task-actions button").all_inner_texts()

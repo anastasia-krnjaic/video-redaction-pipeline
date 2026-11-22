@@ -1,0 +1,15 @@
+{
+  "fixture_note": "Synthetic geometry and simulated review states for validator tests only. Frozen schema identities are loaded from tracked Ground Truth; this fixture is not annotation or privacy evidence.",
+  "benchmarks": [
+    {"benchmark_id": "day_plate", "target_id": "plate_day_01", "frame_count": 240, "parent_start": 240},
+    {"benchmark_id": "night_selective", "target_id": "plate_night_01", "frame_count": 360, "parent_start": 420}
+  ],
+  "review_buckets": [
+    {"name": "manual_no_proposal", "count": 2},
+    {"name": "migrated_manual_review", "count": 268},
+    {"name": "proposal_accepted_unchanged", "count": 284},
+    {"name": "proposal_human_adjusted", "count": 46}
+  ],
+  "bbox_xyxy": [100, 200, 180, 230],
+  "adjusted_proposal_bbox_xyxy": [101, 200, 180, 230]
+}

@@ -1711,10 +1711,7 @@ def validate_plate_annotation_package(package_root: Path) -> None:
     from redactor import plate_annotation_package
 
     result = plate_annotation_package.validate_plate_annotation_package(package_root)
-    click.echo(
-        f"Plate annotation package validation: "
-        f"{'passed' if result['passed'] else 'failed'}"
-    )
+    click.echo(f"Plate annotation package validation: {'passed' if result['passed'] else 'failed'}")
     progress = result.get("progress") or {}
     if progress:
         total = progress["total"]
@@ -1898,9 +1895,7 @@ def validate_plate_ground_truth(
         f"Records: day={counts.get('day_plate', 0)}; "
         f"night={counts.get('night_selective', 0)}; total={counts.get('total', 0)}"
     )
-    click.echo(
-        f"Annotation export bbox matches: {result['annotation_export_match_count']} / 600"
-    )
+    click.echo(f"Annotation export bbox matches: {result['annotation_export_match_count']} / 600")
     click.echo(f"content_sha256={result['content_sha256']}")
     for error in result["errors"]:
         click.echo(f"- {error}")
@@ -2982,10 +2977,7 @@ def redact_video(
         workspace_label = (
             "mixed review workspace" if len(selected_categories) > 1 else "review workspace"
         )
-        click.echo(
-            f"Wrote {workspace_label}: "
-            f"{output_dir / review_workspace['workspace_dir']}"
-        )
+        click.echo(f"Wrote {workspace_label}: {output_dir / review_workspace['workspace_dir']}")
     click.echo(f"Wrote case manifest: {output_dir / 'case_manifest.json'}")
 
 

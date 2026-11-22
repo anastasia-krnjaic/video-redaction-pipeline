@@ -1,6 +1,6 @@
 # Face Pipeline Technical Notes
 
-These notes capture implementation-level detail for the current Face Pipeline v1. The broader explanation is in `docs/SYSTEM_OVERVIEW.md`.
+These notes capture implementation-level detail for the current Face Pipeline v1. The broader explanation is in `docs/SYSTEM_OVERVIEW.md`. Legacy review-bundle sections below document compatibility tooling; the primary current workflow is the server-persisted React workspace.
 
 ## Active Face Detector
 
@@ -48,10 +48,9 @@ can now be adapted to the shared privacy records in
 ADAS threshold policy, existing tracking profile, privacy-gap recovery settings,
 and render profile hash.
 
-The current face tracking and privacy-gap recovery engines are intentionally not
-rewritten in this milestone. Shared contracts are used for parity tests and for
-future unified rendering/review work once exact behavior preservation has been
-demonstrated.
+The face tracking and privacy-gap recovery engines retain category-specific
+behavior. Shared contracts are active in combined face/plate rendering and the
+current review workspace; parity tests preserve the face behavior at this boundary.
 
 Shared Temporal Evidence v1 is active for plate track confirmation only. The
 Face Pipeline continues to use the frozen ADAS face tracking, privacy gap
@@ -147,15 +146,15 @@ Synthetic boxes may improve temporal continuity, but only real observations and 
 
 Privacy gap recovery runs after ordinary tracking. It is a privacy-continuity layer, not detector recall and not track confirmation.
 
-Supported recovery strategies:
+Recovery strategies and compatibility records:
 
 - short interpolation
 - bidirectional privacy bridge
-- one-sided bridge
+- one-sided unresolved interval (not authoritative automatic prediction)
 - preserved accepted region
 - conservative fallback or review-required record
 
-Bidirectional recovery tracks forward from the last reliable pre-gap anchor and backward from the first reliable post-gap anchor. It records raw and refined trajectories, disagreement, selected direction, fused boxes where compatible, and unresolved frames where evidence is insufficient.
+Current bidirectional recovery uses deterministic source-bound envelopes between reliable pre-gap and post-gap anchors. It records the anchor-derived geometry and safety decisions without relying on nondeterministic MIL trajectories. One-sided visual tracking is not authoritative: unsupported intervals remain unresolved/reviewable. Legacy forward/backward provenance fields are retained for compatibility, not evidence of active one-sided automatic protection.
 
 The optional `bottom_component` refinement is disabled by default. It is a strategy-specific visual refinement for cases where a dark visual component connected to a configured edge is useful; it is not universal face logic.
 
@@ -232,7 +231,7 @@ FFprobe validation records expected and observed resolution, frame rate, frame c
 
 ## Machine-Readable Ground Truth And Evaluation
 
-The selected machine-readable redaction ground truth is `data/ground_truth/redaction_ground_truth_v1.0.json`. It derives from frozen GroundTruth v1.1 and the face benchmark v1.1 JSON. It supports future object types such as license plates, but the current evaluator only scores face objects.
+The selected machine-readable redaction ground truth is `data/ground_truth/redaction_ground_truth_v1.0.json`. It derives from frozen GroundTruth v1.1 and the face benchmark v1.1 JSON. This face evaluator scores face objects. Plates have a separate frozen `plate_ground_truth_v1.0.json` and policy; see [Plate Evaluation](PLATE_EVALUATION.md).
 
 The schema records:
 
@@ -262,7 +261,7 @@ Evaluation modes:
 
 - `detector`: raw ADAS observations only. The evaluator uses the corrected ADAS adjudication as identity truth for detector-scored frames. Tracking, synthetic privacy boxes, and reviewed corrections never count as detector hits.
 - `automatic`: detector, ordinary tracking, and automatically accepted privacy recovery. Preserved or manual reviewed corrections are excluded, and unresolved or review-required privacy frames keep the run in `review_required`.
-- `reviewed_final`: includes explicitly reviewed or preserved corrections and can validate the rendered-video manifest, output hash, and FFprobe media checks.
+- `reviewed_final`: includes explicitly reviewed or preserved corrections and can validate the rendered-video manifest, output hash, and FFprobe media checks. This mode does not establish a publishable current face reviewed-final numerical score under the frozen evaluation contract; see [Evaluation](EVALUATION.md).
 
 Final statuses are:
 
@@ -359,6 +358,6 @@ The tracked ADAS detector evidence record is `data/evaluations/face_detector_ada
 Historical detector comparison context lives in `docs/archive/face_detector_bakeoff/`. Generated artifacts, videos, overlays, model binaries, and browser state remain ignored.
 
 The selected plate detector is documented separately in
-`docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`. Plate detector and prototype tracking
-work remain separate from the frozen Face Pipeline behavior until a dedicated
-unified review or rendering milestone explicitly integrates plate regions.
+`docs/PLATE_PIPELINE_TECHNICAL_NOTES.md`. Face and plate detector/tracker policies remain separate. Their privacy regions
+are already integrated by the shared renderer and current case review workspace;
+manual corrections and finalization preserve category and source provenance.

@@ -133,6 +133,7 @@ class TaskTargetBinding:
     entity_keys: tuple[str, ...] = ()
     payload: dict[str, Any] = field(default_factory=dict)
 
+
 ALL_REVIEW_ACTIONS = review_sessions.CANONICAL_REVIEW_ACTIONS
 
 ACTION_LABELS = {
@@ -602,9 +603,7 @@ def build_case_review_workspace(
 def prepare_workspace_dir(workspace_dir: Path, *, overwrite: bool) -> None:
     if workspace_dir.exists():
         if not overwrite and any(workspace_dir.iterdir()):
-            raise FileExistsError(
-                f"{workspace_dir} already exists; pass --overwrite to replace it"
-            )
+            raise FileExistsError(f"{workspace_dir} already exists; pass --overwrite to replace it")
         shutil.rmtree(workspace_dir)
     for relative in ("cases", "entities", "media", "regions", "sessions"):
         (workspace_dir / relative).mkdir(parents=True, exist_ok=True)
@@ -728,8 +727,7 @@ def validate_automatic_preview_source(
     actual = media.sha256_file(preview_source)
     if str(declared_output_hash) != actual:
         raise ValueError(
-            "automatic preview output hash mismatch: "
-            f"{declared_output_hash} != {actual}"
+            f"automatic preview output hash mismatch: {declared_output_hash} != {actual}"
         )
     return region_count
 
@@ -795,9 +793,7 @@ def validate_media_pair(
     for role, info in (("original", original_info), ("automatic", automatic_info)):
         frames = int(info.video_stream.frame_count or 0)
         if expected_frame_count is not None and frames != int(expected_frame_count):
-            errors.append(
-                f"{role} frame-count mismatch: {frames} != {expected_frame_count}"
-            )
+            errors.append(f"{role} frame-count mismatch: {frames} != {expected_frame_count}")
         if int(info.video_stream.width) != int(context.source_identity.width):
             errors.append(f"{role} width mismatch")
         if int(info.video_stream.height) != int(context.source_identity.height):
@@ -1065,9 +1061,7 @@ def merged_policy(existing: str, incoming: str) -> str:
     if existing == incoming:
         return existing
     if "keep_visible" in {existing, incoming}:
-        raise ValueError(
-            f"conflicting source-backed entity policies: {existing} vs {incoming}"
-        )
+        raise ValueError(f"conflicting source-backed entity policies: {existing} vs {incoming}")
     if "redact" in {existing, incoming}:
         return "redact"
     return "review_required"
@@ -1160,9 +1154,7 @@ def add_plate_entity_sources(
             source.representative_frame = first
             source.technical_detector_ids.add(str(track.get("track_id") or track_uid))
             source.technical_track_ids.add(track_uid)
-            source.evidence_disposition = (
-                "accepted" if policy == "redact" else "review_required"
-            )
+            source.evidence_disposition = "accepted" if policy == "redact" else "review_required"
             if track.get("stitch_parent_id") or track.get("stitch_child_ids"):
                 source.merge_lineage.append(
                     {
@@ -1285,9 +1277,7 @@ def ensure_entity_builder(
 ) -> dict[str, Any]:
     builder_key = (category, key)
     if builder_key not in builders:
-        entity_hash = stable_hash(
-            {"case_id": case_id, "category": category, "key": key}
-        )[:16]
+        entity_hash = stable_hash({"case_id": case_id, "category": category, "key": key})[:16]
         entity_id = f"{ENTITY_ID_PREFIX[category]}_{entity_hash}"
         builders[builder_key] = {
             "bboxes": [],
@@ -1318,9 +1308,7 @@ def entity_from_builder(builder: dict[str, Any], *, fps: str) -> dict[str, Any]:
         "automatic_source_track_ids": [builder["key"]],
         "case_id": builder["case_id"],
         "category": builder["category"],
-        "configuration_lineage": {
-            "schema_version": "mixed_review_entity_configuration_lineage.v1"
-        },
+        "configuration_lineage": {"schema_version": "mixed_review_entity_configuration_lineage.v1"},
         "created_provenance": {
             "builder": SCHEMA_VERSION,
             "source": "mixed_review_workspace_builder",
@@ -1389,9 +1377,7 @@ def entity_from_source(source: ReviewEntitySource, *, fps: str) -> dict[str, Any
         "automatic_source_track_ids": sorted(source.technical_track_ids),
         "case_id": source.case_id,
         "category": source.category,
-        "configuration_lineage": {
-            "schema_version": "mixed_review_entity_configuration_lineage.v1"
-        },
+        "configuration_lineage": {"schema_version": "mixed_review_entity_configuration_lineage.v1"},
         "created_provenance": {
             "builder": SCHEMA_VERSION,
             "source": "source_backed_mixed_review_workspace_builder",
@@ -1806,9 +1792,7 @@ def build_tasks(
                 "blocking": blocking,
                 "case_id": case_id,
                 "category": category,
-                "category_allowed_actions": [
-                    ACTION_LABELS[action] for action in allowed_actions
-                ],
+                "category_allowed_actions": [ACTION_LABELS[action] for action in allowed_actions],
                 "category_review_source": category_tasks[category]["source_path"],
                 "correction_required": blocking or issue_type in {"possible_privacy_gap"},
                 "decision_state": "pending",
@@ -2202,11 +2186,7 @@ def validated_category_run_manifest_identities(
             raise ValueError(f"duplicate category run result: {category}")
         result_by_category[category] = result
         artifact = next(
-            (
-                artifact
-                for artifact in result.artifacts
-                if artifact.role == "category_run_manifest"
-            ),
+            (artifact for artifact in result.artifacts if artifact.role == "category_run_manifest"),
             None,
         )
         if artifact is None:
@@ -2242,15 +2222,11 @@ def validated_category_run_manifest_identities(
                 run_manifest.get("category_run_content_sha256") or ""
             ),
             "configuration_hash": str(
-                dict(run_manifest.get("configuration_identity") or {}).get(
-                    "configuration_hash"
-                )
+                dict(run_manifest.get("configuration_identity") or {}).get("configuration_hash")
                 or ""
             ),
             "configuration_sha256": str(
-                dict(run_manifest.get("configuration_identity") or {}).get(
-                    "configuration_hash"
-                )
+                dict(run_manifest.get("configuration_identity") or {}).get("configuration_hash")
                 or ""
             ),
             "processed_span": dict(
@@ -2810,9 +2786,7 @@ def entity_key_for_record(record: PrivacyRegionRecord) -> str:
 
 def source_task_id(category: str, task: dict[str, Any]) -> str:
     value = (
-        task.get("review_task_id")
-        if category == CATEGORY_PLATE
-        else task.get("reviewer_task_id")
+        task.get("review_task_id") if category == CATEGORY_PLATE else task.get("reviewer_task_id")
     )
     value = value or task.get("review_task_id") or task.get("reviewer_task_id")
     if value not in {None, ""}:
@@ -2985,8 +2959,7 @@ def task_what_to_inspect(category: str, task: dict[str, Any], issue_type: str) -
         )
     if category == CATEGORY_FACE:
         return (
-            "Compare Original and Automatic preview and confirm that the person remains "
-            "protected."
+            "Compare Original and Automatic preview and confirm that the person remains protected."
         )
     return "Compare Original and Automatic preview and confirm that the plate remains protected."
 

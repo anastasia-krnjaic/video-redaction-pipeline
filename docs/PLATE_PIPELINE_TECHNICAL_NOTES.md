@@ -172,9 +172,9 @@ Frame-level provenance is preserved as:
 - `plate_detector_observation`;
 - `plate_track_interpolation`;
 - `plate_track_prediction` (reserved, not emitted by v1);
-- `reviewed_plate_correction` (reserved for a later review/correction stage).
+- `reviewed_plate_correction` (review-layer provenance, never a detector hit).
 
-Interpolation and future reviewed corrections must never be counted as raw
+Interpolation and reviewed corrections must never be counted as raw
 detector hits. Tracking metrics therefore report detector recall, observed track
 coverage, interpolated coverage, unresolved gaps, false track burden, and review
 intervals separately.
@@ -321,3 +321,13 @@ automatic previews from accepted evidence. Known nighttime gaps remain review
 items. Reviewed correction intake now exists in the local final-review
 workspace, but complete reviewed-final plate media still requires human decisions
 and verified corrections for every blocking interval.
+
+## Public evaluation and setup
+
+Frozen machine-readable plate Ground Truth and scoring policy are tracked.
+Current detector recall is 236 / 240 Day and 321 / 360 Night, recorded in the
+[compact detector evidence](../data/evaluations/plate_detector_oim_yolov9_s_608_v1/README.md).
+Historical detector-selection figures above describe their earlier selection
+contract and must not be substituted for these results or current formal precision.
+See [Evaluation](EVALUATION.md) for historical/current Final distinctions and
+[Model setup](MODEL_SETUP.md) for the only active plate model.

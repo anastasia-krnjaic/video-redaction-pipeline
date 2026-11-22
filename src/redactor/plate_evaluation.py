@@ -26,8 +26,7 @@ POLICY_ID = "plate_evaluation_policy_v1.0"
 REPORT_SCHEMA_VERSION = "plate_evaluation_report.v1.0"
 DEFAULT_POLICY_PATH = Path("data/evaluations/plate_evaluation_policy_v1.0.json")
 DEFAULT_DETECTOR_CONFIG_PATH = Path(
-    "data/evaluations/license_plate_detector_oim_yolov9_s_608_v1/"
-    "selected_configuration.json"
+    "data/evaluations/license_plate_detector_oim_yolov9_s_608_v1/selected_configuration.json"
 )
 EXPECTED_GT_CONTENT_SHA256 = "5cf36ff48fa93743caf460ff6ee0470799e165dba2b9b42b9ad58168e5233314"
 SUPPORTED_PLATE_EVALUATION_POLICIES = {
@@ -322,9 +321,7 @@ def validate_frame_namespace(
 ) -> list[str]:
     errors: list[str] = []
     policy_mapping = (
-        dict(policy.get("canonical_frame_namespace") or {})
-        .get("benchmarks", {})
-        .get(benchmark_id)
+        dict(policy.get("canonical_frame_namespace") or {}).get("benchmarks", {}).get(benchmark_id)
     )
     if not isinstance(policy_mapping, dict):
         return ["wrong benchmark or missing canonical frame mapping"]
@@ -984,9 +981,7 @@ def is_region_associated(
 def is_eligible_reviewed_final_region(region: AutomaticRegion, policy: dict[str, Any]) -> bool:
     _ = policy
     return (
-        region.category == CATEGORY
-        and region.bbox_xyxy is not None
-        and region.status == "covered"
+        region.category == CATEGORY and region.bbox_xyxy is not None and region.status == "covered"
     )
 
 
@@ -999,9 +994,7 @@ def rectangle_union_area(boxes: list[Box]) -> float:
     for left, right in zip(xs, xs[1:]):
         if right <= left:
             continue
-        intervals = sorted(
-            (box[1], box[3]) for box in boxes if box[0] < right and box[2] > left
-        )
+        intervals = sorted((box[1], box[3]) for box in boxes if box[0] < right and box[2] > left)
         covered_y = 0
         current_start = current_end = None
         for start, end in intervals:
@@ -1063,11 +1056,9 @@ def reviewed_final_trust_gate_blockers(evidence: dict[str, Any]) -> list[str]:
         blockers.append("final_pointer_mismatch")
     if not evidence.get("reviewed_region_set_sha256"):
         blockers.append("missing_reviewed_region_set_sha256")
-    elif (
-        evidence.get("expected_reviewed_region_set_sha256")
-        and evidence.get("reviewed_region_set_sha256")
-        != evidence.get("expected_reviewed_region_set_sha256")
-    ):
+    elif evidence.get("expected_reviewed_region_set_sha256") and evidence.get(
+        "reviewed_region_set_sha256"
+    ) != evidence.get("expected_reviewed_region_set_sha256"):
         blockers.append("reviewed_region_set_sha256_mismatch")
     if not evidence.get("reviewed_regions_artifact_valid"):
         blockers.append("reviewed_regions_artifact_invalid")
@@ -1115,9 +1106,7 @@ def reviewed_final_metrics_for_target(
         "publishable_metrics": not blockers and not metrics["uncovered_frames"],
         "region_validation_valid": bool(evidence.get("region_validation_valid")),
         "required_gt_frames": metrics["required_visible_frames"],
-        "reviewed_regions_artifact_valid": bool(
-            evidence.get("reviewed_regions_artifact_valid")
-        ),
+        "reviewed_regions_artifact_valid": bool(evidence.get("reviewed_regions_artifact_valid")),
         "reviewed_region_set_sha256": evidence.get("reviewed_region_set_sha256"),
         "source_lineage_valid": bool(evidence.get("source_lineage_valid")),
         "target_id": metrics["target_id"],
@@ -1476,10 +1465,9 @@ def validate_render_manifest_for_automatic(
         tracks_path
     ):
         blockers.append("render manifest tracks/privacy-region input hash mismatch")
-    if (
-        review_intervals_path is not None
-        and manifest.get("review_intervals_hash") != media.sha256_file(review_intervals_path)
-    ):
+    if review_intervals_path is not None and manifest.get(
+        "review_intervals_hash"
+    ) != media.sha256_file(review_intervals_path):
         blockers.append("render manifest review intervals hash mismatch")
     config = dict(manifest.get("configuration") or {})
     if config.get("detector_configuration_hash") != EXPECTED_DETECTOR_CONFIGURATION_HASH:
@@ -1552,12 +1540,11 @@ def reviewed_final_validation(
                     "reviewed_region_set_sha256"
                 )
     if latest_payload and final_payload:
-        evidence["final_pointer_matches_latest"] = (
-            final_payload.get("approved_latest_reviewed_revision_id")
-            == latest_payload.get("revision_id")
-            and final_payload.get("reviewed_region_set_sha256")
-            == latest_payload.get("reviewed_region_set_sha256")
-        )
+        evidence["final_pointer_matches_latest"] = final_payload.get(
+            "approved_latest_reviewed_revision_id"
+        ) == latest_payload.get("revision_id") and final_payload.get(
+            "reviewed_region_set_sha256"
+        ) == latest_payload.get("reviewed_region_set_sha256")
     if reviewed_regions_path is not None and latest_payload:
         latest_package_root = (
             latest_reviewed_pointer_path.parent.parent
@@ -1857,9 +1844,7 @@ def failure_intervals_from_target_metrics(
         return metrics.get("miss_intervals") or metrics.get("uncovered_intervals") or []
     intervals = []
     for target_id, metrics in sorted(target_metrics_by_id.items()):
-        target_intervals = (
-            metrics.get("miss_intervals") or metrics.get("uncovered_intervals") or []
-        )
+        target_intervals = metrics.get("miss_intervals") or metrics.get("uncovered_intervals") or []
         if target_intervals:
             intervals.append({"intervals": target_intervals, "target_id": target_id})
     return intervals

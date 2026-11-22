@@ -272,8 +272,7 @@ def markdown_report(report: dict[str, Any]) -> str:
         f"`{str(report['shared_renderer_migration_safe']).lower()}`",
         "- Exact encoded-output parity for all cases: "
         f"`{str(report['exact_encoded_output_parity_for_all_cases']).lower()}`",
-        "- Baseline defect detected: "
-        f"`{str(report['baseline_defect_detected']).lower()}`",
+        f"- Baseline defect detected: `{str(report['baseline_defect_detected']).lower()}`",
         "",
         "| Case | Classification | Raw render | Exact final file | "
         "Legacy span | Shared span | Migration safe |",
@@ -423,9 +422,7 @@ def _case_notes(
 ) -> list[str]:
     notes: list[str] = []
     if classification == CLASSIFICATION_BASELINE_DEFECT:
-        notes.append(
-            "Legacy frozen output does not preserve the source span; shared output does."
-        )
+        notes.append("Legacy frozen output does not preserve the source span; shared output does.")
     if not exact_encoded_output_parity_passed:
         notes.append("Final encoded outputs are not exact span/count parity.")
     if legacy_source_span_preserved and shared_source_span_preserved:

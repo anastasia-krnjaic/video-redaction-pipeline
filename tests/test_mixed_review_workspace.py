@@ -32,6 +32,8 @@ from redactor.review_corrections import (
     ReviewCorrection,
 )
 
+pytestmark = pytest.mark.usefixtures("synthetic_frontend_assets")
+
 
 def fake_media_info() -> MediaInfo:
     return MediaInfo(
@@ -687,8 +689,7 @@ def test_authoritative_workspace_manifest_is_sole_runtime_authority(
     assert baseline_regions.exists()
     assert manifest["content_identities"]["automatic_baseline_regions"]["sha256"]
     assert (
-        manifest["latest_reviewed_publication"]["publication_mode"]
-        == "reviewed_region_compiler.v1"
+        manifest["latest_reviewed_publication"]["publication_mode"] == "reviewed_region_compiler.v1"
     )
     assert manifest["latest_reviewed_publication"]["status"] == "supported"
 
@@ -899,10 +900,7 @@ def test_source_backed_entities_include_policy_and_no_task_targets(
     workspace_root = fixture["case_root"] / result["workspace_dir"]
     entities = json.loads((workspace_root / "review_entities.json").read_text())["cases"]["case"]
     tasks = json.loads((workspace_root / "reviewer_tasks.json").read_text())["tasks"]
-    by_key = {
-        entity["source_lineage"]["technical_id"]: entity
-        for entity in entities
-    }
+    by_key = {entity["source_lineage"]["technical_id"]: entity for entity in entities}
     labels = [entity["label"] for entity in entities]
     assert labels == [
         "Person 01",

@@ -1,100 +1,108 @@
 # Evaluation
 
-This document records the frozen release evaluation disposition. It does not create new benchmarks, reinterpret Ground Truth, tune thresholds, or combine incompatible evidence layers.
+Detector recall, automatic coverage, reviewed-final geometry and human review are
+separate evidence layers. Metrics apply to their recorded source, configuration,
+Ground Truth and revision; they do not automatically transfer to newer Final media.
 
-## Evidence Layers
+## Public detector results
 
-The release keeps these claim layers separate:
+The public source repository includes compact, non-media evidence for these results:
 
-- Detector recall: selected-detector proposals matched against frozen Ground Truth.
-- Automatic eligible coverage: machine-generated privacy regions matched against frozen Ground Truth.
-- Reviewed-final geometric coverage: authoritative reviewed regions in current Final media matched against frozen Ground Truth windows.
-- Full-video human review: reviewer watched and approved the exact current Latest reviewed revision before Final publication.
-
-Human full-video approval is review evidence, not a numerical benchmark. Geometric coverage is not a pixel-level zero-leak proof.
-
-## Plate Detector Recall
-
-Frozen detector recall uses the selected plate detector and the frozen plate evaluation policy.
-
-| Case | Covered | Total | Recall |
+| Detector / target | Hits | Scored target frames | Recall |
 | --- | ---: | ---: | ---: |
-| Day | 236 | 240 | 0.983333 |
-| Night | 321 | 360 | 0.891667 |
-| Aggregate | 557 | 600 | 0.928333 |
+| ADAS / Day face | 299 | 300 | 0.996667 |
+| ADAS / standing Night face | 359 | 360 | 0.997222 |
+| ADAS / seated Night face | 175 | 192 | 0.911458 |
+| **ADAS micro aggregate** | **833** | **852** | **0.977700** |
+| OIM / Day plate | 236 | 240 | 0.983333 |
+| OIM / Night plate | 321 | 360 | 0.891667 |
+| **OIM micro aggregate** | **557** | **600** | **0.928333** |
 
-Formal detector precision is not published because the frozen plate Ground Truth does not provide a complete spatial negative/ignore map.
+Both tables use primary threshold `0.30`. These are small, source-bound benchmark
+results, not universal detector rankings or full-video privacy scores.
 
-## Automatic Eligible Coverage
+- [Face evidence](../data/evaluations/face_detector_adas_v1.0/README.md) contains
+  metrics, corrected adjudication, validation and input hashes for GroundTruth v1.1.
+  Longest miss runs are 1, 1 and 9 frames. The `0.20` proposal threshold is temporal
+  support, not the primary operating point in this table.
+- [Plate evidence](../data/evaluations/plate_detector_oim_yolov9_s_608_v1/README.md)
+  contains compact metrics derived from the existing validated local run, input
+  hashes and a read-only verifier. Longest miss runs are 2 and 7 frames. GT contains
+  600 proposal-assisted, human-reviewed boxes across two certified dense intervals.
+  Formal precision is unavailable without a complete spatial negative/ignore map.
 
-Automatic eligible coverage measures machine-generated privacy regions only.
+The records support checking identities, denominators and arithmetic in a clean
+checkout. Independent inference/scoring reproduction requires excluded local media
+and detector artifacts. Neither record measures tracking, manual corrections,
+rendered privacy quality or zero leaks. See [Plate Evaluation](PLATE_EVALUATION.md)
+for the matching and coverage contract.
 
-| Case | Covered | Total | Coverage |
-| --- | ---: | ---: | ---: |
-| Day | 240 | 240 | 1.0 |
-| Night | 0 | 360 | 0.0 |
-| Aggregate | 240 | 600 | 0.4 |
+## Historical automatic plate coverage
 
-Night automatic coverage is zero for this benchmark layer because the frozen automatic eligibility rules do not credit the final reviewed/manual/human-corrected state.
+The local run `artifacts/plate_evaluation_v1/run_20260812T004154Z/` records automatic
+eligible coverage of Day `240/240`, Night `0/360`, aggregate `240/600 = 0.4`.
+These are historical automatic-layer diagnostics; the full machine reports are
+ignored local artifacts, not part of the compact public detector record.
 
-## Reviewed-Final Plate Coverage
+Night coverage is zero under that run's frozen automatic eligibility rules, which
+exclude reviewed/manual corrections. This is not a measure of the current Final
+video. Automatic coverage must not be relabeled as detector recall.
 
-Day reviewed-final plate scoring is unavailable:
+## Historical reviewed-final plate evidence
 
-```text
-DIFFERENT_SOURCE_NOT_COMPARABLE
-```
+The August 16 reconciliation reported Night strict geometric coverage of
+`284/360 = 0.788889` for **this exact historical revision**:
 
-The frozen `day_plate` benchmark is source-bound to the frozen Day plate evaluation clip, while the product Day Final uses a different full-case source. The correct release interpretation is unavailable, not zero and not failed.
+| Identity | Value |
+| --- | --- |
+| Latest reviewed revision | `latest_reviewed_133bd8a1e52cfa36` |
+| Reviewed-region set SHA-256 | `133bd8a1e52cfa36163768630d487557b226e2b2e4f4931986013063741633e9` |
+| Rendered video SHA-256 | `5a010c26f5f3367f14a1fc25327ec93e7f244bf8c22b760946140dd928968e60` |
 
-Night reviewed-final strict geometric coverage is:
+The source report is
+`artifacts/reviewed_final_evaluation_reconciliation_v1/run_20260816T192539Z/reviewed_final_results/night/metrics.json`.
+Its associated `night_uncovered_audit/visual_classification.json` records review of
+the 76 geometrically uncovered frames: 74 visually protected below the 0.95 geometry
+threshold, two occluded/not localizable, and zero classified true visible leaks or
+actionable undercoverage. These are historical local records, not a fresh audit.
+The report also contains inconsistent top-level/per-target publishability flags;
+it is retained as historical evidence, not a current public certification.
 
-| Case | Covered | Total | Coverage |
-| --- | ---: | ---: | ---: |
-| Night | 284 | 360 | 0.788889 |
+The current Night Final instead uses `latest_reviewed_41fcfdd5b7e2349d` and media
+SHA-256 `cc8982b317c439d7965dd151c562f0c01004b3252cfd5f63266fa95b0a21e88a`.
+**The historical 284/360 metric and 76-frame visual disposition do not certify this
+newer revision.** A new compatible evaluation, or verified evidence of equivalence,
+would be required to attach numerical results to it.
 
-The 76 strict geometric uncovered frames were exhaustively visually audited:
+Day reviewed-final scoring remains `DIFFERENT_SOURCE_NOT_COMPARABLE`: the frozen
+`day_plate` benchmark and the full-case Day Final use different source identities.
+Unavailable is not zero and is not a failed score.
 
-| Classification | Count |
-| --- | ---: |
-| TRUE_VISIBLE_PRIVACY_LEAK | 0 |
-| PLATE_PRESENT_BUT_UNDER_COVERED | 0 |
-| VISUALLY_PROTECTED_BELOW_0_95_GEOMETRIC_THRESHOLD | 74 |
-| OCCLUDED_OR_NOT_VISUALLY_LOCALIZABLE | 2 |
+## Current reviewed-final and human evidence
 
-The frozen disposition is:
+Current Final identities are indexed in [Release Evidence](RELEASE_EVIDENCE.md).
+Local manifests record full-case human sweep acknowledgements bound to the current
+Latest reviewed revisions, source/configuration checks, media/region validation,
+and immutable Final publication. This is recorded human approval, not independently
+repeated visual verification or an automated numerical privacy benchmark.
 
-```text
-NIGHT_FINAL_PRIVACY_SAFE_UNDER_VISUAL_AUDIT
-```
+Face reviewed-final numerical scoring is
+`NOT_SUPPORTED_BY_FROZEN_FACE_EVALUATION_CONTRACT`. Source lineage and human approval
+do not supply a missing face coverage metric.
 
-The 0.788889 result is strict geometric Ground Truth coverage, not a visual privacy leak rate.
+The local Night submission sample covers case source frames `484–686`, 203 frames
+(about 6.77 seconds). Its separate acceptance record reports no known visible leak
+observed in that sample. This bounded human observation is neither a full-video
+zero-leak certification nor permission to redistribute the media.
 
-## Face Reviewed-Final Status
+## Claim boundaries
 
-Face reviewed-final numerical scoring is:
-
-```text
-NOT_SUPPORTED_BY_FROZEN_FACE_EVALUATION_CONTRACT
-```
-
-The release does not invent a face metric from visual sweep approval. Face evidence remains documented through source lineage, reviewed media validation, region validation, and full-video human approval.
-
-## Current Product Visual Review Evidence
-
-The current Day and Night Final identities are recorded in [RELEASE_EVIDENCE.md](RELEASE_EVIDENCE.md). For both cases, the reviewer watched the exact current Latest reviewed video in full, recorded explicit full-video approval for that revision, and produced immutable Final media from the approved revision.
-
-This evidence supports the current product release workflow. It does not become detector recall, automatic coverage, reviewed-final geometric coverage, or a mathematical/global zero-leak metric.
-
-The selected Night submission sample covers source frames 484-686 inclusive, 203 frames, or about 6.77 seconds. It has separate machine validation and human visual acceptance with no known visible sensitive-data leak observed in that sample. This is a bounded sample acceptance claim only.
-
-## Evaluation Guardrails
-
-Do not:
-
-- change Ground Truth after the release;
-- adapt benchmark source identity post hoc;
-- tune thresholds to match Final media;
-- combine detector, automatic, reviewed-final, and human sweep evidence into one undefined score;
-- present visual sweep approval as an automated numerical metric;
-- describe strict geometric coverage as pixel-level zero-leak proof.
+- Preserve frozen GT and scoring policy; do not tune them to fit Final media.
+- Attribute every evaluated result to its exact source and revision.
+- Keep raw detector, automatic, reviewed-final and human evidence separate.
+- Restrict dense-interval claims to their certified windows; full-case human review
+  does not extend a numerical benchmark to the full original source video.
+- Do not equate geometric coverage, renderer approval or visual acceptance with
+  automated pixel-level or global zero-leak proof.
+- Do not publish formal plate precision or treat historical selection precision as
+  a result under the current frozen plate evaluation contract.

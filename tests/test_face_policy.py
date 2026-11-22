@@ -301,6 +301,7 @@ def test_redact_video_help_is_full_video_policy_oriented() -> None:
 def test_redact_video_runs_policy_flow_without_target_ids(
     tmp_path: Path,
     monkeypatch,
+    synthetic_frontend_assets: Path,
 ) -> None:
     input_video = tmp_path / "input.mp4"
     synthetic_video(input_video)
@@ -347,12 +348,12 @@ def test_redact_video_runs_policy_flow_without_target_ids(
         preview_path.write_bytes(Path(input_video_arg).read_bytes())
         write_json(
             case_dir / "automatic_preview" / "render_manifest.json",
-                {
-                    "output_video_hash": media.sha256_file(preview_path),
-                    "rendered_region_count": 0,
-                    "source_video_hash": info.sha256,
-                },
-            )
+            {
+                "output_video_hash": media.sha256_file(preview_path),
+                "rendered_region_count": 0,
+                "source_video_hash": info.sha256,
+            },
+        )
         write_json(case_dir / "automatic_preview" / "validation.json", {"passed": True})
         write_json(
             case_dir / "final" / "final_status.json",

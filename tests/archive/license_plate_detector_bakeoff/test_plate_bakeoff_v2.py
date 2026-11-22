@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import numpy as np
 import pytest
@@ -142,7 +144,12 @@ def test_candidate_threshold_selection_is_one_threshold_across_clips() -> None:
     assert set(rows) == {"day_plate_primary", "night_plate_primary"}
 
 
-def test_missing_candidate_weight_fails_clearly(tmp_path: Path) -> None:
+def test_missing_candidate_weight_fails_clearly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Exercise path validation without installing this archived adapter's runtime.
+    # The empty module also fails if model compilation is attempted before validation.
+    monkeypatch.setitem(sys.modules, "openvino", ModuleType("openvino"))
     candidate = plate_bakeoff_v2.CandidateSpec(
         detector_id="missing",
         display_name="Missing",

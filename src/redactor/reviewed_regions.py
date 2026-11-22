@@ -198,9 +198,7 @@ def compile_reviewed_regions(
         case_id=case_id,
         decisions_by_case=review_working_state.task_decisions_by_case_from_payload(state),
     )
-    active_correction_ids = {
-        str(item) for item in list(state.get("active_correction_ids") or [])
-    }
+    active_correction_ids = {str(item) for item in list(state.get("active_correction_ids") or [])}
     correction_records = [
         correction
         for correction in review_working_state.load_active_corrections(
@@ -254,9 +252,7 @@ def compile_reviewed_regions(
             "manual_correction_replaced": correction_provenance["replaced_region_count"],
             "object_override_added": policy_provenance["added_region_count"],
             "suppression_removed": policy_provenance["suppressed_region_count"],
-            "task_not_sensitive_removed": task_suppression_provenance[
-                "suppressed_region_count"
-            ],
+            "task_not_sensitive_removed": task_suppression_provenance["suppressed_region_count"],
         },
         "publication_blockers": blockers,
         "reviewed_region_identity": identity,
@@ -538,9 +534,7 @@ def materialize_latest_reviewed_revision(
         "active_corrections_hash": provenance["reviewed_region_identity"][
             "active_corrections_hash"
         ],
-        "active_decisions_hash": provenance["reviewed_region_identity"][
-            "active_decisions_hash"
-        ],
+        "active_decisions_hash": provenance["reviewed_region_identity"]["active_decisions_hash"],
         "active_projection_hash_schema_version": provenance["reviewed_region_identity"].get(
             "active_projection_hash_schema_version"
         ),
@@ -575,9 +569,7 @@ def materialize_latest_reviewed_revision(
         "source_video_hash": source_hash,
         "validation_artifact_sha256": validation_hash,
         "video_artifact_sha256": video_hash,
-        "workspace_manifest_input_sha256": publication_guard[
-            "workspace_manifest_input_sha256"
-        ],
+        "workspace_manifest_input_sha256": publication_guard["workspace_manifest_input_sha256"],
         "workspace_manifest_sha256": publication_guard["workspace_manifest_sha256"],
     }
     revision_manifest["revision_manifest_sha256"] = stable_hash(revision_manifest)
@@ -613,9 +605,7 @@ def materialize_latest_reviewed_revision(
         rendered_frames = int(revision_manifest.get("rendered_frame_count") or 0)
         rendered_regions = int(revision_manifest.get("rendered_region_count") or 0)
         media_validation = json.loads(
-            (revision_root / str(revision_manifest["media_validation"])).read_text(
-                encoding="utf-8"
-            )
+            (revision_root / str(revision_manifest["media_validation"])).read_text(encoding="utf-8")
         )
         region_validation = json.loads(
             (revision_root / str(revision_manifest["region_validation"])).read_text(
@@ -917,9 +907,7 @@ def publish_automatic_reuse_latest_reviewed_revision(
         "active_corrections_hash": provenance["reviewed_region_identity"][
             "active_corrections_hash"
         ],
-        "active_decisions_hash": provenance["reviewed_region_identity"][
-            "active_decisions_hash"
-        ],
+        "active_decisions_hash": provenance["reviewed_region_identity"]["active_decisions_hash"],
         "active_projection_hash_schema_version": provenance["reviewed_region_identity"].get(
             "active_projection_hash_schema_version"
         ),
@@ -954,9 +942,7 @@ def publish_automatic_reuse_latest_reviewed_revision(
         "source_video_hash": source_hash,
         "validation_artifact_sha256": validation_hash,
         "video_artifact_sha256": video_hash,
-        "workspace_manifest_input_sha256": publication_guard[
-            "workspace_manifest_input_sha256"
-        ],
+        "workspace_manifest_input_sha256": publication_guard["workspace_manifest_input_sha256"],
         "workspace_manifest_sha256": publication_guard["workspace_manifest_sha256"],
     }
     revision_manifest["revision_manifest_sha256"] = stable_hash(revision_manifest)
@@ -989,9 +975,7 @@ def publish_automatic_reuse_latest_reviewed_revision(
         video_hash = str(revision_manifest["video_artifact_sha256"])
         validation_hash = str(revision_manifest["validation_artifact_sha256"])
         media_validation = json.loads(
-            (revision_root / str(revision_manifest["media_validation"])).read_text(
-                encoding="utf-8"
-            )
+            (revision_root / str(revision_manifest["media_validation"])).read_text(encoding="utf-8")
         )
         region_validation = json.loads(
             (revision_root / str(revision_manifest["region_validation"])).read_text(
@@ -1123,11 +1107,7 @@ def latest_reviewed_automatic_reuse_role(
     manifest: case_manifests.CaseManifest,
 ) -> case_manifests.VideoRole | None:
     return next(
-        (
-            role
-            for role in manifest.video_roles
-            if role.role in {"automatic", "current_result"}
-        ),
+        (role for role in manifest.video_roles if role.role in {"automatic", "current_result"}),
         None,
     )
 
@@ -1167,9 +1147,7 @@ def validate_source_identity(
     }
     for name, expected in expected_hashes.items():
         if expected and str(expected) != source_hash:
-            raise ReviewedRegionCompilationError(
-                f"{manifest.case_id}: {name} source hash mismatch"
-            )
+            raise ReviewedRegionCompilationError(f"{manifest.case_id}: {name} source hash mismatch")
 
 
 def load_authoritative_baseline(
@@ -1354,10 +1332,14 @@ def resolve_category_run_manifest_path(
     identity: dict[str, Any],
 ) -> Path:
     raw_path = Path(str(identity.get("path") or ""))
-    candidates = [raw_path] if raw_path.is_absolute() else [
-        package_root / raw_path,
-        package_root.parent / raw_path,
-    ]
+    candidates = (
+        [raw_path]
+        if raw_path.is_absolute()
+        else [
+            package_root / raw_path,
+            package_root.parent / raw_path,
+        ]
+    )
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -1925,10 +1907,14 @@ def annotate_region(
     from redactor import review_working_state
 
     source_record = dict(record.source_record)
-    entity = sorted(
-        matched_entities,
-        key=lambda item: (str(item.get("category") or ""), str(item.get("entity_id") or "")),
-    )[0] if matched_entities else {}
+    entity = (
+        sorted(
+            matched_entities,
+            key=lambda item: (str(item.get("category") or ""), str(item.get("entity_id") or "")),
+        )[0]
+        if matched_entities
+        else {}
+    )
     baseline_id = baseline_region_id(record)
     source_record.update(
         {
@@ -1936,9 +1922,7 @@ def annotate_region(
             "baseline_region_id": baseline_id,
             "reviewed_entity_id": entity.get("entity_id"),
             "reviewed_entity_label": entity.get("label") or entity.get("display_name"),
-            "reviewed_policy": review_working_state.inherited_policy(entity)
-            if entity
-            else None,
+            "reviewed_policy": review_working_state.inherited_policy(entity) if entity else None,
             "reviewed_region_kind": "automatic_baseline",
             "source_timestamp_seconds": source_timestamp_seconds(record, manifest),
         }
@@ -2066,8 +2050,7 @@ def reviewed_region_identity(
     merge_payload = {
         entity_id: entity
         for entity_id, entity in sorted(object_policy_payload.items())
-        if dict(entity).get("current_status") == "merged"
-        or dict(entity).get("merge_split_lineage")
+        if dict(entity).get("current_status") == "merged" or dict(entity).get("merge_split_lineage")
     }
     active_correction_audit_hash = stable_hash(
         sorted(correction.correction_hash() for correction in correction_records)
@@ -2098,14 +2081,10 @@ def reviewed_region_identity(
         "active_corrections_hash": active_correction_audit_hash,
         "active_decisions_hash": active_decisions_hash,
         "active_task_resolutions_hash": active_task_resolutions_hash,
-        "active_projection_hash_schema_version": state.get(
-            "active_projection_hash_schema_version"
-        ),
+        "active_projection_hash_schema_version": state.get("active_projection_hash_schema_version"),
         "automatic_baseline_region_count": len(baseline_regions),
         "automatic_baseline_region_set_sha256": baseline_hash,
-        "case_manifest_input_sha256": case_manifest_review_input_sha256_file(
-            case_manifest_path
-        ),
+        "case_manifest_input_sha256": case_manifest_review_input_sha256_file(case_manifest_path),
         "case_id": manifest.case_id,
         "category_run_manifest_identity_hash": case_scoped_workspace_value(
             workspace,
@@ -2146,10 +2125,7 @@ def reviewed_region_set_identity_hash(identity: dict[str, Any]) -> str:
 
 
 def reviewed_region_media_identity_payload(identity: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: dict(identity).get(key)
-        for key in REVIEWED_REGION_MEDIA_IDENTITY_KEYS
-    }
+    return {key: dict(identity).get(key) for key in REVIEWED_REGION_MEDIA_IDENTITY_KEYS}
 
 
 def reviewed_region_media_identity_hash(identity: dict[str, Any]) -> str:
@@ -2198,8 +2174,7 @@ def semantic_decision_payload(decisions: dict[str, Any]) -> dict[str, Any]:
         decisions
         if all(isinstance(value, dict) for value in decisions.values())
         and any(
-            isinstance(value, dict)
-            and all(isinstance(item, dict) for item in dict(value).values())
+            isinstance(value, dict) and all(isinstance(item, dict) for item in dict(value).values())
             for value in decisions.values()
         )
         else {}
@@ -2357,16 +2332,12 @@ def publication_guard_payload(
             "automatic_baseline_region_set_sha256"
         ),
         "case_id": case_id,
-        "case_manifest_input_sha256": case_manifest_review_input_sha256_file(
-            case_manifest_path
-        ),
+        "case_manifest_input_sha256": case_manifest_review_input_sha256_file(case_manifest_path),
         "case_manifest_sha256": media.sha256_file(case_manifest_path),
         "merge_rejection_state_hash": identity.get("merge_rejection_state_hash"),
         "object_policy_hash": identity.get("object_policy_hash"),
         "renderer_configuration_sha256": identity.get("renderer_configuration_sha256"),
-        "reviewed_region_media_identity_sha256": reviewed_region_media_identity_hash(
-            identity
-        ),
+        "reviewed_region_media_identity_sha256": reviewed_region_media_identity_hash(identity),
         "reviewed_region_set_sha256": provenance.get("reviewed_region_set_sha256"),
         "schema_version": "latest_reviewed_publication_guard.v1",
         "session_head_hash": review_sessions.last_event_hash(session_dir),
@@ -2608,9 +2579,7 @@ def write_current_pointer(
         "publication_guard": publication_guard,
         "publication_status": "ready",
         "published_at_utc": media.utc_timestamp(),
-        "renderer_configuration_sha256": revision_manifest.get(
-            "renderer_configuration_sha256"
-        ),
+        "renderer_configuration_sha256": revision_manifest.get("renderer_configuration_sha256"),
         "revision_id": role["revision_id"],
         "revision_manifest": role["revision_manifest"],
         "revision_manifest_artifact_sha256": revision_manifest_artifact_sha256,
@@ -2623,15 +2592,11 @@ def write_current_pointer(
         "status": "ready",
         "video_artifact_sha256": role["sha256"],
         "working_state_generation": accepted_revision,
-        "working_state_projection_hash": publication_guard.get(
-            "working_state_projection_hash"
-        ),
+        "working_state_projection_hash": publication_guard.get("working_state_projection_hash"),
         "working_state_projection_schema_version": publication_guard.get(
             "active_projection_hash_schema_version"
         ),
-        "workspace_manifest_input_sha256": publication_guard.get(
-            "workspace_manifest_input_sha256"
-        ),
+        "workspace_manifest_input_sha256": publication_guard.get("workspace_manifest_input_sha256"),
         "workspace_manifest_sha256": publication_guard.get("workspace_manifest_sha256"),
     }
     pointer_index = current_pointer_index_payload(package_root)
@@ -2817,9 +2782,7 @@ def validate_current_pointer(
         or pointer_projection_schema
     )
     if revision_projection_schema != pointer_projection_schema:
-        raise ReviewedRegionCompilationError(
-            "Latest reviewed projection hash schema mismatch"
-        )
+        raise ReviewedRegionCompilationError("Latest reviewed projection hash schema mismatch")
     for key in (
         "revision_id",
         "reviewed_region_set_sha256",
@@ -2878,9 +2841,7 @@ def validate_reviewed_regions_artifact_binding(
 
     revision_manifest = dict(latest_pointer.get("revision_manifest_payload") or {})
     if not revision_manifest:
-        raise ReviewedRegionCompilationError(
-            "Latest reviewed revision manifest payload is missing"
-        )
+        raise ReviewedRegionCompilationError("Latest reviewed revision manifest payload is missing")
     revision_manifest_path = case_ids.contained_path(
         package_root,
         *Path(str(latest_pointer.get("revision_manifest") or "")).parts,
@@ -2914,30 +2875,20 @@ def validate_reviewed_regions_artifact_binding(
     try:
         records = review_finalization.load_privacy_region_records(supplied_path)
     except (OSError, KeyError, TypeError, ValueError) as exc:
-        raise ReviewedRegionCompilationError(
-            f"invalid reviewed regions artifact: {exc}"
-        ) from exc
+        raise ReviewedRegionCompilationError(f"invalid reviewed regions artifact: {exc}") from exc
     semantic_records_sha = semantic_region_set_hash(records)
     identity = dict(revision_manifest.get("reviewed_region_identity") or {})
-    expected_semantic_records_sha = str(
-        identity.get("reviewed_region_records_sha256") or ""
-    )
+    expected_semantic_records_sha = str(identity.get("reviewed_region_records_sha256") or "")
     if not expected_semantic_records_sha:
-        raise ReviewedRegionCompilationError(
-            "reviewed region semantic records SHA is missing"
-        )
+        raise ReviewedRegionCompilationError("reviewed region semantic records SHA is missing")
     if semantic_records_sha != expected_semantic_records_sha:
-        raise ReviewedRegionCompilationError(
-            "reviewed region semantic records SHA mismatch"
-        )
+        raise ReviewedRegionCompilationError("reviewed region semantic records SHA mismatch")
 
     reviewed_region_set_sha = str(revision_manifest.get("reviewed_region_set_sha256") or "")
     if not reviewed_region_set_sha:
         raise ReviewedRegionCompilationError("reviewed_region_set_sha256 is missing")
     if str(identity.get("reviewed_region_set_sha256") or "") != reviewed_region_set_sha:
-        raise ReviewedRegionCompilationError(
-            "reviewed_region_set_sha256 identity mismatch"
-        )
+        raise ReviewedRegionCompilationError("reviewed_region_set_sha256 identity mismatch")
     if reviewed_region_set_identity_hash(identity) != reviewed_region_set_sha:
         raise ReviewedRegionCompilationError(
             "reviewed_region_set_sha256 canonical identity mismatch"
@@ -2997,9 +2948,7 @@ def validate_reviewed_regions_artifact_binding(
             ("Finalization manifest", final_manifest),
         ):
             if str(payload.get("reviewed_region_set_sha256") or "") != reviewed_region_set_sha:
-                raise ReviewedRegionCompilationError(
-                    f"{label} reviewed_region_set_sha256 mismatch"
-                )
+                raise ReviewedRegionCompilationError(f"{label} reviewed_region_set_sha256 mismatch")
             if expected_source_sha256 and str(payload.get("source_sha256") or "") != (
                 expected_source_sha256
             ):
@@ -3009,14 +2958,11 @@ def validate_reviewed_regions_artifact_binding(
             ("Final pointer", final_pointer),
             ("Finalization manifest", final_manifest),
         ):
-            actual_revision = (
-                payload.get("approved_latest_reviewed_revision_id")
-                or payload.get("latest_reviewed_revision_id")
+            actual_revision = payload.get("approved_latest_reviewed_revision_id") or payload.get(
+                "latest_reviewed_revision_id"
             )
             if str(actual_revision or "") != expected_revision:
-                raise ReviewedRegionCompilationError(
-                    f"{label} Latest reviewed revision mismatch"
-                )
+                raise ReviewedRegionCompilationError(f"{label} Latest reviewed revision mismatch")
 
     return {
         "case_id": revision_manifest.get("case_id"),
@@ -3064,6 +3010,7 @@ def maybe_inject_failure(stage: str) -> None:
     if os.environ.get(FAILURE_INJECTION_ENV) == stage:
         raise ReviewedRegionPublicationStaleError(f"injected Latest reviewed failure: {stage}")
 
+
 def update_workspace_case_manifest(
     *,
     package_root: Path,
@@ -3082,12 +3029,9 @@ def update_workspace_case_manifest(
         source_frame_start=manifest.source_frame_start,
     )
     roles = tuple(
-        [item for item in manifest.video_roles if item.role != "latest_reviewed"]
-        + [latest_role]
+        [item for item in manifest.video_roles if item.role != "latest_reviewed"] + [latest_role]
     )
-    expected = tuple(
-        dict.fromkeys([*list(manifest.expected_output_roles), "latest_reviewed"])
-    )
+    expected = tuple(dict.fromkeys([*list(manifest.expected_output_roles), "latest_reviewed"]))
     lineage = dict(manifest.lineage)
     lineage["latest_reviewed_publication"] = {
         "revision_id": role["revision_id"],
@@ -3272,9 +3216,7 @@ def clear_current_publication(
             {
                 "case_id": previous.get("case_id") or case_id,
                 "previous_revision_id": previous.get("revision_id"),
-                "previous_reviewed_region_set_sha256": previous.get(
-                    "reviewed_region_set_sha256"
-                ),
+                "previous_reviewed_region_set_sha256": previous.get("reviewed_region_set_sha256"),
             }
         )
         pointer_index["cases"][case_id] = {
@@ -3388,20 +3330,18 @@ def refresh_top_level_after_clear(package_root: Path) -> dict[str, Any]:
             by_id[str(artifact.artifact_id)] = artifact.to_dict()
     payload["artifacts"] = [by_id[key] for key in sorted(by_id)]
     if isinstance(payload.get("latest_reviewed_publication"), dict):
-        payload["latest_reviewed_publication"] = (
-            dict(payload["latest_reviewed_publication"])
-            | {
-                "reason": "reset_to_automatic_baseline",
-                "status": "supported",
-                "superseded_at_utc": media.utc_timestamp(),
-            }
-        )
+        payload["latest_reviewed_publication"] = dict(payload["latest_reviewed_publication"]) | {
+            "reason": "reset_to_automatic_baseline",
+            "status": "supported",
+            "superseded_at_utc": media.utc_timestamp(),
+        }
     case_manifests.publish_unified_case_manifest(top_manifest, payload)
     return {
         "path": top_manifest.as_posix(),
         "status": "refreshed",
         "top_level_case_manifest_sha256": media.sha256_file(top_manifest),
     }
+
 
 def artifact_payload(package_root: Path, path: Path, *, role: str) -> dict[str, Any]:
     return {

@@ -27,12 +27,8 @@ PROVENANCE_MANUAL_CORRECTION = "manual_correction"
 PROVENANCE_PRESERVED_REGION = "preserved_privacy_region"
 DETERMINISTIC_BRIDGE_ALGORITHM = "deterministic_source_bound_bridge_v1"
 DETERMINISTIC_ROUNDING_RULE = "round_half_up_then_clip_to_frame"
-REASON_DETERMINISTIC_BRIDGE_REQUIRES_REVIEW = (
-    "deterministic_source_bound_bridge_requires_review"
-)
-REASON_ONE_SIDED_VISUAL_TRACKING_NOT_AUTHORITATIVE = (
-    "one_sided_visual_tracking_not_authoritative"
-)
+REASON_DETERMINISTIC_BRIDGE_REQUIRES_REVIEW = "deterministic_source_bound_bridge_requires_review"
+REASON_ONE_SIDED_VISUAL_TRACKING_NOT_AUTHORITATIVE = "one_sided_visual_tracking_not_authoritative"
 
 DECISION_ACCEPTED_AUTOMATICALLY = "accepted_automatically"
 DECISION_ACCEPTED_AFTER_REFINEMENT = "accepted_after_refinement"
@@ -928,18 +924,14 @@ def deterministic_bidirectional_region(
             ),
             "anchor_scale_change": round(anchor_scale_change, 6),
             "authoritative_algorithm": DETERMINISTIC_BRIDGE_ALGORITHM,
-            "deterministic_bridge_margin_fraction": (
-                settings.deterministic_bridge_margin_fraction
-            ),
+            "deterministic_bridge_margin_fraction": (settings.deterministic_bridge_margin_fraction),
             "interpolated_box_xyxy": list(interpolated),
             "rounding": DETERMINISTIC_ROUNDING_RULE,
             "visual_tracker_authoritative": False,
         }
     )
     blocking_reasons = [
-        reason
-        for reason in reasons
-        if reason != REASON_DETERMINISTIC_BRIDGE_REQUIRES_REVIEW
+        reason for reason in reasons if reason != REASON_DETERMINISTIC_BRIDGE_REQUIRES_REVIEW
     ]
     if blocking_reasons:
         selected = None
@@ -1862,9 +1854,7 @@ def settings_to_dict(settings: PrivacyGapRecoverySettings) -> dict[str, object]:
     return {
         "competing_identity_distance_norm": settings.competing_identity_distance_norm,
         "conservative_fallback_enabled": settings.conservative_fallback_enabled,
-        "deterministic_bridge_margin_fraction": (
-            settings.deterministic_bridge_margin_fraction
-        ),
+        "deterministic_bridge_margin_fraction": (settings.deterministic_bridge_margin_fraction),
         "enable_visual_refinement": settings.enable_visual_refinement,
         "max_bridge_gap_frames": settings.max_bridge_gap_frames,
         "max_center_jump_norm": settings.max_center_jump_norm,
@@ -1955,8 +1945,7 @@ def interpolate_box(left: Box, right: Box, fraction: float) -> Box:
 
 def deterministic_interpolate_box(left: Box, right: Box, fraction: float) -> Box:
     return tuple(
-        round_half_up(left[index] + (right[index] - left[index]) * fraction)
-        for index in range(4)
+        round_half_up(left[index] + (right[index] - left[index]) * fraction) for index in range(4)
     )
 
 
@@ -1983,9 +1972,7 @@ def deterministic_bridge_envelope(
         right[3] - right[1],
         1,
     )
-    margin = math.ceil(
-        max(base_width, base_height) * settings.deterministic_bridge_margin_fraction
-    )
+    margin = math.ceil(max(base_width, base_height) * settings.deterministic_bridge_margin_fraction)
     envelope = (
         round_half_up(center_x - base_width / 2.0 - margin),
         round_half_up(center_y - base_height / 2.0 - margin),

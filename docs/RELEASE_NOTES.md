@@ -48,8 +48,8 @@ Both current Final videos were watched through in full by the reviewer, approved
 - Plate detector aggregate recall: 557 / 600 = 0.928333.
 - Automatic eligible aggregate coverage: 240 / 600 = 0.4.
 - Day reviewed-final plate metric: unavailable due source incompatibility.
-- Night reviewed-final strict geometric coverage: 284 / 360 = 0.788889.
-- Night visual audit of the 76 strict geometric misses found no true visible privacy leaks.
+- Historical Night reviewed-final strict geometric coverage: 284 / 360 = 0.788889, bound to `latest_reviewed_133bd8a1e52cfa36` and media SHA-256 `5a010c26f5f3367f14a1fc25327ec93e7f244bf8c22b760946140dd928968e60`.
+- The 76-frame visual audit belongs to that same historical revision. Neither result is assigned to current Final revision `latest_reviewed_41fcfdd5b7e2349d`; see [Evaluation](EVALUATION.md).
 - Face reviewed-final numerical scoring is not supported by the frozen face evaluation contract.
 - The Night submission sample covers source frames 484-686 inclusive, is 203 frames/about 6.77 seconds, and has separate machine validation plus human visual acceptance with no known visible sensitive-data leak observed.
 

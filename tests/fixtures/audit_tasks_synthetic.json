@@ -1,0 +1,14 @@
+{
+  "fixture_note": "Synthetic task coordinates; no source video or reviewer evidence.",
+  "tasks": [
+    {
+      "audit_item_id": "synthetic_day_plate_gap",
+      "category": "license_plate",
+      "clip_id": "day_plate",
+      "issue_type": "unresolved_gap",
+      "severity": "blocker",
+      "source_frame_start": 2,
+      "source_frame_end": 23
+    }
+  ]
+}

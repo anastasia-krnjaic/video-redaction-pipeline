@@ -539,9 +539,7 @@ def pixelated_redaction(roi: np.ndarray, settings: RenderSettings) -> np.ndarray
 def enforce_pixelation_privacy_signal(original: np.ndarray, redacted: np.ndarray) -> np.ndarray:
     gray = cv.cvtColor(original, cv.COLOR_BGR2GRAY)
     fill_value = (
-        PIXELATE_FALLBACK_DARK_FILL
-        if float(gray.mean()) >= 128.0
-        else PIXELATE_FALLBACK_LIGHT_FILL
+        PIXELATE_FALLBACK_DARK_FILL if float(gray.mean()) >= 128.0 else PIXELATE_FALLBACK_LIGHT_FILL
     )
     fill = np.full_like(redacted, fill_value)
     strengthened = cv.addWeighted(
